@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.3
+// @version      0.4.5
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
@@ -125,15 +125,16 @@
 
       #fb-bank-coin.fb-fixed-header {
         position: fixed !important;
-        right: 114px !important;
-        top: 472px !important;
-        z-index: 900 !important;
+        left: var(--fb-coin-left, 360px) !important;
+        top: var(--fb-coin-top, 472px) !important;
+        z-index: 99998 !important;
         width: 22px !important;
         height: 22px !important;
         font-size: 16px !important;
         background: transparent !important;
-        border: 0 !important;
+        border: 1px solid rgba(255,255,255,.12) !important;
         box-shadow: none !important;
+        pointer-events: auto !important;
       }
 
       #fb-bank-coin:hover {
@@ -381,6 +382,13 @@
         border-color: rgba(110,170,255,.45);
       }
 
+      .fb-btn.pay {
+        background: rgba(255,211,106,.18);
+        border-color: rgba(255,211,106,.52);
+        color: #ffd36a;
+        text-decoration: none;
+      }
+
       .fb-tabs {
         display: flex;
         gap: 6px;
@@ -545,6 +553,76 @@
     return null;
   }
 
+  function getCleanText(el) {
+    return String(el?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function findGenderOrResourceAnchor() {
+    const all = Array.from(document.querySelectorAll("a, div, span, li, i, img"));
+
+    const gender = all.find((el) => {
+      const text = getCleanText(el);
+      const cls = String(el.className || "").toLowerCase();
+      const title = String(el.getAttribute("title") || "").toLowerCase();
+      const alt = String(el.getAttribute("alt") || "").toLowerCase();
+
+      if (text === "♂" || text === "♀") return true;
+      if (title.includes("gender") || alt.includes("gender")) return true;
+      if (cls.includes("gender")) return true;
+      return false;
+    });
+
+    if (gender) return gender;
+
+    const resourceRow = Array.from(document.querySelectorAll("div, ul, nav")).find((el) => {
+      const text = getCleanText(el);
+      const rect = el.getBoundingClientRect();
+
+      if (!rect || rect.width < 250 || rect.height < 18 || rect.height > 70) return false;
+      if (rect.top < 300 || rect.top > 560) return false;
+
+      return text.includes("$") && (text.includes("P") || text.includes("♂") || text.includes("♀"));
+    });
+
+    if (resourceRow) return resourceRow;
+
+    return null;
+  }
+
+  function positionCoinInHeader() {
+    const coin = $("#fb-bank-coin");
+    if (!coin) return;
+
+    const anchor = findGenderOrResourceAnchor();
+
+    let left = Math.round(window.innerWidth * 0.50);
+    let top = 472;
+
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+
+      if (rect && rect.width && rect.height) {
+        const text = getCleanText(anchor);
+
+        if (text === "♂" || text === "♀" || String(anchor.className || "").toLowerCase().includes("gender")) {
+          left = Math.round(rect.right + 4);
+          top = Math.round(rect.top + (rect.height / 2) - 11);
+        } else {
+          // Fallback when we found the whole money/points row.
+          // This places the coin around the gender/merits area instead of beside the Faction title.
+          left = Math.round(rect.left + (rect.width * 0.54));
+          top = Math.round(rect.top + (rect.height / 2) - 11);
+        }
+      }
+    }
+
+    left = Math.max(4, Math.min(window.innerWidth - 28, left));
+    top = Math.max(80, Math.min(window.innerHeight - 60, top));
+
+    coin.style.setProperty("--fb-coin-left", `${left}px`);
+    coin.style.setProperty("--fb-coin-top", `${top}px`);
+  }
+
   function mountCoin() {
     let coin = $("#fb-bank-coin");
 
@@ -555,7 +633,7 @@
       coin.title = "Faction Bankers";
       coin.textContent = "🪙";
       coin.setAttribute("data-count", "0");
-      coin.addEventListener("click", toggleOverlay);
+      coin.addEventListener("click", openBankerBoard);
     }
 
     coin.classList.remove("fb-fixed-test");
@@ -564,6 +642,8 @@
     if (coin.parentElement !== document.body) {
       document.body.appendChild(coin);
     }
+
+    positionCoinInHeader();
   }
 
   function findFactionBuiltInMount() {
@@ -704,6 +784,15 @@
     else openOverlay();
   }
 
+  function openBankerBoard() {
+    openOverlay();
+
+    setTimeout(() => {
+      const bankerTab = document.querySelector('.fb-tab[data-tab="banker"]');
+      if (bankerTab) bankerTab.click();
+    }, 150);
+  }
+
   function activeTab() {
     const btn = $(".fb-tab.active");
     return btn?.dataset?.tab || "request";
@@ -712,14 +801,21 @@
   function setCoinAlert(count) {
     const coin = $("#fb-bank-coin");
     const n = Number(count || 0);
+    const canBank = !!(APP.me?.is_banker || APP.me?.is_admin);
     APP.pendingCount = n;
 
     if (coin) {
       coin.setAttribute("data-count", String(n > 99 ? "99+" : n));
 
-      if (n > 0 && APP.me?.is_banker) {
+      if (canBank) {
+        coin.classList.add("fb-banker-visible");
+      } else {
+        coin.classList.remove("fb-banker-visible");
+      }
+
+      if (canBank && n > 0) {
         coin.classList.add("fb-alert");
-        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"}`;
+        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to pay members`;
       } else {
         coin.classList.remove("fb-alert");
         coin.title = "Faction Bankers";
@@ -728,7 +824,7 @@
 
     const builtBox = $("#fb-built-in-box");
     if (builtBox) {
-      if (n > 0 && APP.me?.is_banker) {
+      if (canBank && n > 0) {
         builtBox.classList.add("fb-built-alert");
         const status = $("#fb-built-status");
         if (status) status.textContent = `${n} pending banker request${n === 1 ? "" : "s"}`;
@@ -894,6 +990,7 @@
     if (isBanker && status === "pending") {
       actions = `
         <div class="fb-row" style="margin-top:10px;">
+          <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
           <button class="fb-btn green" data-id="${id}" data-fb-action="approve" type="button">Approve</button>
           <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
           <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
@@ -904,6 +1001,7 @@
     if (isBanker && status === "approved") {
       actions = `
         <div class="fb-row" style="margin-top:10px;">
+          <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
           <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
           <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
         </div>
@@ -1110,11 +1208,7 @@
 
         n.onclick = () => {
           window.focus();
-          openOverlay();
-          setTimeout(() => {
-            const bankerTab = document.querySelector('.fb-tab[data-tab="banker"]');
-            if (bankerTab) bankerTab.click();
-          }, 200);
+          openBankerBoard();
         };
       } catch {
         // Ignore notification errors.
@@ -1214,6 +1308,8 @@
   } else {
     startWhenReady();
   }
+
+  window.addEventListener("resize", positionCoinInHeader);
 
   let lastUrl = location.href;
   setInterval(() => {
