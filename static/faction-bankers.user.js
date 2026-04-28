@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.7
+// @version      0.4.8
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
@@ -22,11 +22,11 @@
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
 
-  // Locked PDA/Torn header position for the money / points / merits / gender row, inside the highlighted area.
+  // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
   // Increase TOP to move down. Decrease TOP to move up.
-  const COIN_LOCK_LEFT = 342;
-  const COIN_LOCK_TOP = 488;
+  const COIN_LOCK_LEFT = 172;
+  const COIN_LOCK_TOP = 244;
 
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
@@ -125,15 +125,15 @@
         position: fixed !important;
         right: 8px !important;
         bottom: 74px !important;
-        z-index: 99998 !important;
+        z-index: 100000 !important;
         background: rgba(0,0,0,.55) !important;
       }
 
       #fb-bank-coin.fb-fixed-header {
         position: fixed !important;
-        left: var(--fb-coin-left, 342px) !important;
-        top: var(--fb-coin-top, 488px) !important;
-        z-index: 99998 !important;
+        left: var(--fb-coin-left, 172px) !important;
+        top: var(--fb-coin-top, 244px) !important;
+        z-index: 100000 !important;
         width: 24px !important;
         height: 24px !important;
         min-width: 24px !important;
