@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Torn Faction Bankers 🪙 Clean
-// @namespace    Fries91.Torn.FactionBankers.Clean
+// @name         Torn Faction Bankers 🪙
+// @namespace    Fries91.Torn.FactionBanker
 // @version      0.5.6
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
