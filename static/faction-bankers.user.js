@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 Clean
 // @namespace    Fries91.Torn.FactionBankers.Clean
-// @version      0.5.5
+// @version      0.5.6
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -29,6 +29,7 @@
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
   const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
+  const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
 
   const APP = {
     me: null,
@@ -232,7 +233,7 @@
 
       .fb-built-grid {
         display: grid;
-        grid-template-columns: 1fr 1.2fr auto;
+        grid-template-columns: 1fr;
         gap: 6px;
       }
 
@@ -252,6 +253,18 @@
         border: 1px solid rgba(255,211,106,.45);
         background: rgba(255,211,106,.16);
         color: #ffd36a;
+        border-radius: 8px;
+        padding: 7px 9px;
+        font-size: 12px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      #fb-built-full,
+      #fb-full-request {
+        border: 1px solid rgba(110,170,255,.45);
+        background: rgba(45,105,180,.24);
+        color: #d8eaff;
         border-radius: 8px;
         padding: 7px 9px;
         font-size: 12px;
@@ -519,11 +532,12 @@
         }
 
         .fb-built-grid {
-          grid-template-columns: 1fr;
-        }
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
 
         #fb-built-amount,
-        #fb-built-note,
         #fb-built-send {
           width: 100%;
           box-sizing: border-box;
@@ -724,8 +738,8 @@
 
       <div class="fb-built-grid">
         <input id="fb-built-amount" inputmode="numeric" placeholder="Amount needed">
-        <input id="fb-built-note" placeholder="Reason / note">
-        <button id="fb-built-send" type="button">Request</button>
+        <button id="fb-built-full" type="button">Request Full Balance</button>
+        <button id="fb-built-send" type="button">Request Amount</button>
       </div>
     `;
 
@@ -752,6 +766,7 @@
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
     $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
+    $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
   }
 
   function ensureOverlay() {
@@ -915,11 +930,12 @@
         <label class="fb-label">Amount requested</label>
         <input id="fb-amount" class="fb-input" inputmode="numeric" placeholder="Example: 25000000">
 
-        <label class="fb-label" style="margin-top:10px;">Reason / note</label>
-        <textarea id="fb-note" class="fb-textarea" placeholder="Example: Need vault money for war refill, armor buy, meds, etc."></textarea>
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-full-request" class="fb-btn blue" type="button">Request Full Balance</button>
+        </div>
 
         <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-submit-request" class="fb-btn gold" type="button">Send Request</button>
+          <button id="fb-submit-request" class="fb-btn gold" type="button">Send Amount Request</button>
           <button id="fb-refresh" class="fb-btn" type="button">Refresh</button>
         </div>
 
@@ -930,6 +946,7 @@
     `);
 
     $("#fb-submit-request")?.addEventListener("click", submitRequest);
+    $("#fb-full-request")?.addEventListener("click", submitFullBalanceRequest);
     $("#fb-refresh")?.addEventListener("click", () => refreshAll(true));
   }
 
@@ -1040,13 +1057,13 @@
       <div class="fb-box">
         <div class="fb-row fb-space">
           <div>
-            <div class="fb-request-title">${requester} requested ${money(r.amount)}</div>
+            <div class="fb-request-title">${requester} requested ${String(r.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(r.amount)}</div>
             <div class="fb-request-meta">Request #${id}${created ? ` • ${created}` : ""}</div>
           </div>
           ${statusPill(status)}
         </div>
 
-        ${r.note ? `<div class="fb-request-note">${esc(r.note)}</div>` : `<div class="fb-request-note fb-muted">No note added.</div>`}
+        ${String(r.note || "") === FULL_BALANCE_NOTE ? `<div class="fb-request-note">Full balance requested.</div>` : ""}
 
         ${handledBy}
         ${r.bank_note ? `<div class="fb-small">Bank note: ${esc(r.bank_note)}</div>` : ""}
@@ -1099,12 +1116,48 @@
     $("#fb-enable-notify")?.addEventListener("click", requestNotifyPermission);
   }
 
+  async function submitFullBalanceRequest() {
+    if (APP.busy) return;
+
+    const status = $("#fb-built-status");
+
+    if (!GM_getValue(K_API_KEY, "")) {
+      if (status) status.textContent = "Save your API key in settings first";
+      openOverlay();
+      return;
+    }
+
+    APP.busy = true;
+    if (status) status.textContent = "Sending full balance request...";
+
+    try {
+      await gmRequest("POST", "/api/banker/requests", {
+        amount: 1,
+        note: FULL_BALANCE_NOTE,
+      });
+
+      if (status) status.textContent = "Full balance request sent to bankers";
+      await refreshAll(true);
+
+      if (APP.open) {
+        renderRequestTab(`<div class="fb-success">Full balance request sent to faction bankers.</div>`);
+      }
+    } catch (err) {
+      if (status) status.textContent = err.message || "Request failed";
+      if (APP.open) {
+        renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+      }
+    } finally {
+      APP.busy = false;
+    }
+  }
+
   async function submitBuiltInRequest() {
     if (APP.busy) return;
 
     const amountRaw = ($("#fb-built-amount")?.value || "").replace(/[^\d]/g, "");
     const amount = Number(amountRaw);
-    const note = $("#fb-built-note")?.value?.trim() || "";
+    const note = "";
     const status = $("#fb-built-status");
 
     if (!GM_getValue(K_API_KEY, "")) {
@@ -1124,7 +1177,6 @@
     try {
       await gmRequest("POST", "/api/banker/requests", { amount, note });
       $("#fb-built-amount").value = "";
-      $("#fb-built-note").value = "";
       if (status) status.textContent = "Request sent to bankers";
       await refreshAll(true);
     } catch (err) {
@@ -1139,7 +1191,7 @@
 
     const amountRaw = ($("#fb-amount")?.value || "").replace(/[^\d]/g, "");
     const amount = Number(amountRaw);
-    const note = $("#fb-note")?.value?.trim() || "";
+    const note = "";
 
     if (!amount || amount < 1) {
       renderRequestTab(`<div class="fb-error">Enter a valid amount.</div>`);
@@ -1152,7 +1204,7 @@
     try {
       await gmRequest("POST", "/api/banker/requests", { amount, note });
       await refreshAll(true);
-      renderRequestTab(`<div class="fb-success">Request sent to faction bankers.</div>`);
+      renderRequestTab(`<div class="fb-success">Amount request sent to faction bankers.</div>`);
     } catch (err) {
       renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -1238,7 +1290,7 @@
     if ("Notification" in window && Notification.permission === "granted") {
       for (const req of fresh.slice(0, 3)) {
         const title = "🪙 New Faction Bank Request";
-        const body = `${req.requester_name || "Member"} requested ${money(req.amount)}${req.note ? " — " + req.note : ""}`;
+        const body = `${req.requester_name || "Member"} requested ${String(req.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(req.amount)}`;
 
         try {
           const n = new Notification(title, {
