@@ -1,1 +1,4 @@
-
+Flask
+flask-cors
+gunicorn
+requests
