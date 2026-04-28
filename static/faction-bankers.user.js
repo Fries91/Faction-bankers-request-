@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.0
+// @version      0.4.1
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
@@ -98,28 +98,32 @@
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: 34px !important;
-        height: 28px !important;
-        margin-left: 6px !important;
-        border: 1px solid rgba(255,255,255,.12) !important;
-        border-radius: 9px !important;
+        width: 24px !important;
+        height: 24px !important;
+        margin-left: 4px !important;
+        padding: 0 !important;
+        border: 0 !important;
+        border-radius: 50% !important;
         background: transparent !important;
         color: #ffd36a !important;
-        font-size: 20px !important;
+        font-size: 17px !important;
         line-height: 1 !important;
         cursor: pointer !important;
         user-select: none !important;
         position: relative !important;
-        z-index: 20 !important;
+        z-index: 12 !important;
         box-shadow: none !important;
       }
 
       #fb-bank-coin.fb-fixed-test {
         position: fixed !important;
-        right: 8px !important;
-        bottom: 74px !important;
+        right: 74px !important;
+        top: 474px !important;
         z-index: 99998 !important;
-        background: rgba(0,0,0,.55) !important;
+        width: 24px !important;
+        height: 24px !important;
+        font-size: 17px !important;
+        background: transparent !important;
       }
 
       #fb-bank-coin:hover {
@@ -500,23 +504,40 @@
   }
 
   function findHeaderMount() {
-    const selectors = [
-      "#top-page-links-list",
-      ".user-info-list",
-      ".user-info",
-      "[class*='user-info']",
-      "[class*='UserInfo']",
-      "[class*='top-page-links']",
-      "[class*='Header'] [class*='links']",
-      "[class*='header'] [class*='links']",
-      ".top-header",
-      ".header",
-      "header",
-    ];
+    const resourceRows = Array.from(document.querySelectorAll("div, ul, nav")).filter((el) => {
+      const text = String(el.textContent || "");
+      const rect = el.getBoundingClientRect();
 
-    for (const sel of selectors) {
-      const el = $(sel);
-      if (el) return el;
+      if (!rect || rect.width < 200 || rect.height < 20 || rect.height > 80) return false;
+
+      const hasMoney = text.includes("$");
+      const hasPoints = text.includes("P") || /(^|\s)\d+\s*(P|points?)/i.test(text);
+      const hasGender = text.includes("♂") || text.includes("♀");
+
+      return hasMoney && (hasPoints || hasGender || rect.top < 540);
+    });
+
+    if (resourceRows.length) {
+      resourceRows.sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+
+        const aScore =
+          (String(a.textContent || "").includes("♂") || String(a.textContent || "").includes("♀") ? 30 : 0) +
+          (String(a.textContent || "").includes("$") ? 20 : 0) +
+          (String(a.textContent || "").includes("P") ? 10 : 0) -
+          Math.abs(ar.top - 480);
+
+        const bScore =
+          (String(b.textContent || "").includes("♂") || String(b.textContent || "").includes("♀") ? 30 : 0) +
+          (String(b.textContent || "").includes("$") ? 20 : 0) +
+          (String(b.textContent || "").includes("P") ? 10 : 0) -
+          Math.abs(br.top - 480);
+
+        return bScore - aScore;
+      });
+
+      return resourceRows[0];
     }
 
     const genderIcon = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
@@ -527,6 +548,13 @@
     });
 
     if (genderIcon?.parentElement) return genderIcon.parentElement;
+
+    const meritsStar = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
+      const t = String(el.textContent || "").trim();
+      return t === "★" || t === "⭐";
+    });
+
+    if (meritsStar?.parentElement) return meritsStar.parentElement;
 
     return null;
   }
