@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.9
+// @version      0.5.0
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -143,6 +143,7 @@
       .fb-coin-mount-row {
         display: flex !important;
         align-items: center !important;
+        flex-wrap: nowrap !important;
       }
 
       #fb-bank-coin:hover {
@@ -533,62 +534,67 @@
     return String(el?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
+  function looksLikeMoneyPointsMeritsRow(el) {
+    const text = getCleanText(el);
+    const rect = el.getBoundingClientRect();
+    const cls = String(el.className || "");
+
+    if (!rect || rect.width < 250 || rect.height < 20 || rect.height > 48) return false;
+
+    // From your debug:
+    // #7: class swiperWrapper___sfn5X, text "Money:$2.7MPoints:17Merits:2"
+    // #6: upper row has Energy/Nerve/Happy/Life/Chain.
+    const hasMoneyWords = text.includes("Money:") && text.includes("Points:") && text.includes("Merits:");
+    const hasMoneySymbols = text.includes("$") && (text.includes("P") || text.includes("Points")) && (text.includes("Merits") || text.includes("★") || text.includes("⭐"));
+
+    const isKnownTornResourceClass =
+      cls.includes("swiperWrapper") ||
+      cls.includes("user-information-mobile") ||
+      cls.includes("userInformation") ||
+      cls.includes("user-info");
+
+    return (hasMoneyWords || hasMoneySymbols) && (isKnownTornResourceClass || rect.top > 120);
+  }
+
   function findTornResourceRow() {
+    // First use the exact mobile resource row found by debug.
+    const exact = Array.from(document.querySelectorAll("div")).find(looksLikeMoneyPointsMeritsRow);
+    if (exact) return exact;
+
+    // Then search all rows and score the money/points/merits row.
     const candidates = Array.from(document.querySelectorAll("div, ul, nav, section")).filter((el) => {
       const rect = el.getBoundingClientRect();
-      if (!rect || rect.width < 280 || rect.height < 22 || rect.height > 70) return false;
-      if (rect.top < 250 || rect.top > 560) return false;
+      if (!rect || rect.width < 250 || rect.height < 20 || rect.height > 55) return false;
 
       const text = getCleanText(el);
-      const hasMoney = text.includes("$");
-      const hasPoints = /\bP\b/.test(text) || text.includes("points") || text.includes("Points");
-      const hasGender = text.includes("♂") || text.includes("♀");
-      const hasMeritLike = text.includes("★") || text.includes("⭐") || text.includes("2");
-
-      return hasMoney && (hasPoints || hasGender || hasMeritLike);
+      return text.includes("$") && (text.includes("Points") || /\bP\b/.test(text)) && (text.includes("Merits") || text.includes("★") || text.includes("⭐"));
     });
 
     if (candidates.length) {
       candidates.sort((a, b) => {
         const ar = a.getBoundingClientRect();
         const br = b.getBoundingClientRect();
-
-        const aText = getCleanText(a);
-        const bText = getCleanText(b);
+        const at = getCleanText(a);
+        const bt = getCleanText(b);
 
         const aScore =
-          (aText.includes("$") ? 40 : 0) +
-          (/\bP\b/.test(aText) ? 30 : 0) +
-          (aText.includes("♂") || aText.includes("♀") ? 30 : 0) +
-          (aText.includes("★") || aText.includes("⭐") ? 15 : 0) -
-          Math.abs(ar.top - 488) / 10;
+          (at.includes("Money:") ? 50 : 0) +
+          (at.includes("Points:") ? 40 : 0) +
+          (at.includes("Merits:") ? 40 : 0) +
+          (String(a.className || "").includes("swiperWrapper") ? 30 : 0) -
+          Math.abs(ar.height - 30);
 
         const bScore =
-          (bText.includes("$") ? 40 : 0) +
-          (/\bP\b/.test(bText) ? 30 : 0) +
-          (bText.includes("♂") || bText.includes("♀") ? 30 : 0) +
-          (bText.includes("★") || bText.includes("⭐") ? 15 : 0) -
-          Math.abs(br.top - 488) / 10;
+          (bt.includes("Money:") ? 50 : 0) +
+          (bt.includes("Points:") ? 40 : 0) +
+          (bt.includes("Merits:") ? 40 : 0) +
+          (String(b.className || "").includes("swiperWrapper") ? 30 : 0) -
+          Math.abs(br.height - 30);
 
         return bScore - aScore;
       });
 
       return candidates[0];
-    }
-
-    // PDA fallback: find the blue P / gender icon area and use its parent row.
-    const iconAnchor = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
-      const text = getCleanText(el);
-      const cls = String(el.className || "").toLowerCase();
-      const title = String(el.getAttribute("title") || "").toLowerCase();
-      return text === "P" || text === "♂" || text === "♀" || cls.includes("gender") || title.includes("gender");
-    });
-
-    let p = iconAnchor?.parentElement || null;
-    for (let i = 0; i < 5 && p; i += 1) {
-      const rect = p.getBoundingClientRect();
-      if (rect && rect.width > 250 && rect.height >= 22 && rect.height <= 80) return p;
-      p = p.parentElement;
     }
 
     return null;
@@ -614,22 +620,13 @@
     if (row) {
       row.classList.add("fb-coin-mount-row");
 
-      // Put the coin after the gender/merits cluster when possible.
-      const icons = Array.from(row.children);
-      const genderChild = icons.find((el) => {
-        const text = getCleanText(el);
-        const cls = String(el.className || "").toLowerCase();
-        const title = String(el.getAttribute("title") || "").toLowerCase();
-        return text.includes("♂") || text.includes("♀") || cls.includes("gender") || title.includes("gender");
-      });
-
-      if (genderChild && genderChild.nextSibling) {
-        row.insertBefore(coin, genderChild.nextSibling);
-      } else {
+      // Insert it as part of the real Torn row, after merits when possible.
+      // On PDA this row is #7 from the debug panel: "Money:$... Points:... Merits:..."
+      if (coin.parentElement !== row) {
         row.appendChild(coin);
       }
     } else if (coin.parentElement !== document.body) {
-      // Last resort: keep it available but small.
+      // Last-resort tiny fixed button so it never disappears during testing.
       coin.classList.add("fb-fixed-test");
       document.body.appendChild(coin);
     }
