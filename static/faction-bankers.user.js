@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Faction Bankers 🪙
-// @namespace    Fries91.Torn.FactionBankers
-// @version      0.5.4
+// @name         Torn Faction Bankers 🪙 Clean
+// @namespace    Fries91.Torn.FactionBankers.Clean
+// @version      0.5.5
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -13,8 +13,6 @@
 // @connect      faction-bankers-request.onrender.com
 // @connect      api.torn.com
 // @connect      *
-// @downloadURL  https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
-// @updateURL    https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
 // ==/UserScript==
 
 (function () {
@@ -105,7 +103,7 @@
     const style = document.createElement("style");
     style.id = "fb-style";
     style.textContent = `
-      #fb-bank-coin {
+      #fb-bank-coin-clean {
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
@@ -125,7 +123,7 @@
         box-shadow: none !important;
       }
 
-      #fb-bank-coin.fb-fixed-test {
+      #fb-bank-coin-clean.fb-fixed-test {
         position: fixed !important;
         right: 8px !important;
         bottom: 74px !important;
@@ -133,7 +131,7 @@
         background: rgba(0,0,0,.55) !important;
       }
 
-      #fb-bank-coin.fb-fixed-header {
+      #fb-bank-coin-clean.fb-fixed-header {
         position: relative !important;
         left: auto !important;
         top: auto !important;
@@ -148,12 +146,12 @@
         position: relative !important;
       }
 
-      #fb-bank-coin:hover {
+      #fb-bank-coin-clean:hover {
         opacity: .96 !important;
         filter: drop-shadow(0 1px 2px rgba(0,0,0,.85)) saturate(1) brightness(1.02) !important;
       }
 
-      #fb-bank-coin.fb-alert {
+      #fb-bank-coin-clean.fb-alert {
         opacity: 1 !important;
         background: radial-gradient(circle, rgba(220,0,0,.58), rgba(130,0,0,.24) 62%, transparent 72%) !important;
         border-radius: 50% !important;
@@ -161,20 +159,20 @@
         filter: drop-shadow(0 1px 2px rgba(0,0,0,.9)) saturate(1.1) brightness(1.02) !important;
       }
 
-      #fb-bank-coin.fb-alert::after {
+      #fb-bank-coin-clean.fb-alert::after {
         content: attr(data-count);
         position: absolute;
         top: -5px;
         right: -6px;
-        min-width: 14px;
-        height: 14px;
-        padding: 0 4px;
+        min-width: 13px;
+        height: 13px;
+        padding: 0 3px;
         border-radius: 999px;
         background: #ff3131;
         color: #fff;
-        font-size: 9px;
+        font-size: 8px;
         font-weight: 900;
-        line-height: 14px;
+        line-height: 13px;
         text-align: center;
         box-shadow: 0 1px 3px rgba(0,0,0,.65);
       }
@@ -638,11 +636,16 @@
   }
 
   function mountCoin() {
-    let coin = $("#fb-bank-coin");
+    document.querySelectorAll("#fb-bank-coin").forEach((oldCoin) => {
+      oldCoin.style.display = "none";
+      oldCoin.remove();
+    });
+
+    let coin = $("#fb-bank-coin-clean");
 
     if (!coin) {
       coin = document.createElement("button");
-      coin.id = "fb-bank-coin";
+      coin.id = "fb-bank-coin-clean";
       coin.type = "button";
       coin.title = "Faction Bankers";
       coin.textContent = "🪙";
@@ -824,7 +827,7 @@
   }
 
   function setCoinAlert(count) {
-    const coin = $("#fb-bank-coin");
+    const coin = $("#fb-bank-coin-clean");
     const n = Number(count || 0);
     const canBank = !!(APP.me?.is_banker || APP.me?.is_admin);
     APP.pendingCount = n;
