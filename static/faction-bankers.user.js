@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.5.3
+// @version      0.5.4
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -145,6 +145,7 @@
         align-items: center !important;
         flex-wrap: nowrap !important;
         gap: 0 !important;
+        position: relative !important;
       }
 
       #fb-bank-coin:hover {
@@ -650,22 +651,21 @@
     }
 
     coin.classList.remove("fb-fixed-test", "fb-fixed-header");
+    coin.classList.add("fb-gender-lock");
 
     const row = findTornResourceRow();
 
     if (row) {
       row.classList.add("fb-coin-mount-row");
 
-      const target = findGenderInsertTarget(row);
-
-      if (target && target.parentElement) {
-        // Put coin directly beside the gender/merits icon, not at the far end of the row.
-        target.parentElement.insertBefore(coin, target.nextSibling);
-      } else if (coin.parentElement !== row) {
+      // Mount inside the real money/points/merits row, but lock it visually beside gender
+      // instead of appending it to the far end of the row.
+      if (coin.parentElement !== row) {
         row.appendChild(coin);
       }
     } else if (coin.parentElement !== document.body) {
       // Last-resort tiny fixed button so it never disappears during testing.
+      coin.classList.remove("fb-gender-lock");
       coin.classList.add("fb-fixed-test");
       document.body.appendChild(coin);
     }
