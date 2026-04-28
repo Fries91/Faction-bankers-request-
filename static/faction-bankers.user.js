@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.5.2
+// @version      0.5.3
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -165,15 +165,15 @@
         position: absolute;
         top: -5px;
         right: -6px;
-        min-width: 15px;
-        height: 15px;
+        min-width: 14px;
+        height: 14px;
         padding: 0 4px;
         border-radius: 999px;
         background: #ff3131;
         color: #fff;
-        font-size: 10px;
+        font-size: 9px;
         font-weight: 900;
-        line-height: 15px;
+        line-height: 14px;
         text-align: center;
         box-shadow: 0 1px 3px rgba(0,0,0,.65);
       }
@@ -604,6 +604,38 @@
     return null;
   }
 
+  function findGenderInsertTarget(row) {
+    if (!row) return null;
+
+    const all = Array.from(row.querySelectorAll("a, div, span, li, i, img, button"));
+
+    // Best: exact gender icon.
+    let target = all.find((el) => {
+      const text = getCleanText(el);
+      const cls = String(el.className || "").toLowerCase();
+      const title = String(el.getAttribute("title") || "").toLowerCase();
+      const alt = String(el.getAttribute("alt") || "").toLowerCase();
+
+      return text === "♂" || text === "♀" || cls.includes("gender") || title.includes("gender") || alt.includes("gender");
+    });
+
+    if (target) return target;
+
+    // Fallback: find the merit/star icon, then coin goes after it, which is beside the gender area on PDA.
+    target = all.find((el) => {
+      const text = getCleanText(el);
+      const cls = String(el.className || "").toLowerCase();
+      const title = String(el.getAttribute("title") || "").toLowerCase();
+      const alt = String(el.getAttribute("alt") || "").toLowerCase();
+
+      return text.includes("★") || text.includes("⭐") || cls.includes("merit") || title.includes("merit") || alt.includes("merit");
+    });
+
+    if (target) return target;
+
+    return null;
+  }
+
   function mountCoin() {
     let coin = $("#fb-bank-coin");
 
@@ -624,9 +656,12 @@
     if (row) {
       row.classList.add("fb-coin-mount-row");
 
-      // Insert it as part of the real Torn row, after merits when possible.
-      // On PDA this row is #7 from the debug panel: "Money:$... Points:... Merits:..."
-      if (coin.parentElement !== row) {
+      const target = findGenderInsertTarget(row);
+
+      if (target && target.parentElement) {
+        // Put coin directly beside the gender/merits icon, not at the far end of the row.
+        target.parentElement.insertBefore(coin, target.nextSibling);
+      } else if (coin.parentElement !== row) {
         row.appendChild(coin);
       }
     } else if (coin.parentElement !== document.body) {
