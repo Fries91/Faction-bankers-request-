@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.1
+// @version      0.4.3
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
@@ -24,6 +24,7 @@
 
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
+  const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
 
   const APP = {
     me: null,
@@ -98,32 +99,41 @@
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: 24px !important;
-        height: 24px !important;
-        margin-left: 4px !important;
-        padding: 0 !important;
-        border: 0 !important;
-        border-radius: 50% !important;
+        width: 34px !important;
+        height: 28px !important;
+        margin-left: 6px !important;
+        border: 1px solid rgba(255,255,255,.12) !important;
+        border-radius: 9px !important;
         background: transparent !important;
         color: #ffd36a !important;
-        font-size: 17px !important;
+        font-size: 20px !important;
         line-height: 1 !important;
         cursor: pointer !important;
         user-select: none !important;
         position: relative !important;
-        z-index: 12 !important;
+        z-index: 20 !important;
         box-shadow: none !important;
       }
 
       #fb-bank-coin.fb-fixed-test {
         position: fixed !important;
-        right: 74px !important;
-        top: 474px !important;
+        right: 8px !important;
+        bottom: 74px !important;
         z-index: 99998 !important;
-        width: 24px !important;
-        height: 24px !important;
-        font-size: 17px !important;
+        background: rgba(0,0,0,.55) !important;
+      }
+
+      #fb-bank-coin.fb-fixed-header {
+        position: fixed !important;
+        right: 114px !important;
+        top: 472px !important;
+        z-index: 900 !important;
+        width: 22px !important;
+        height: 22px !important;
+        font-size: 16px !important;
         background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
       }
 
       #fb-bank-coin:hover {
@@ -504,40 +514,23 @@
   }
 
   function findHeaderMount() {
-    const resourceRows = Array.from(document.querySelectorAll("div, ul, nav")).filter((el) => {
-      const text = String(el.textContent || "");
-      const rect = el.getBoundingClientRect();
+    const selectors = [
+      "#top-page-links-list",
+      ".user-info-list",
+      ".user-info",
+      "[class*='user-info']",
+      "[class*='UserInfo']",
+      "[class*='top-page-links']",
+      "[class*='Header'] [class*='links']",
+      "[class*='header'] [class*='links']",
+      ".top-header",
+      ".header",
+      "header",
+    ];
 
-      if (!rect || rect.width < 200 || rect.height < 20 || rect.height > 80) return false;
-
-      const hasMoney = text.includes("$");
-      const hasPoints = text.includes("P") || /(^|\s)\d+\s*(P|points?)/i.test(text);
-      const hasGender = text.includes("♂") || text.includes("♀");
-
-      return hasMoney && (hasPoints || hasGender || rect.top < 540);
-    });
-
-    if (resourceRows.length) {
-      resourceRows.sort((a, b) => {
-        const ar = a.getBoundingClientRect();
-        const br = b.getBoundingClientRect();
-
-        const aScore =
-          (String(a.textContent || "").includes("♂") || String(a.textContent || "").includes("♀") ? 30 : 0) +
-          (String(a.textContent || "").includes("$") ? 20 : 0) +
-          (String(a.textContent || "").includes("P") ? 10 : 0) -
-          Math.abs(ar.top - 480);
-
-        const bScore =
-          (String(b.textContent || "").includes("♂") || String(b.textContent || "").includes("♀") ? 30 : 0) +
-          (String(b.textContent || "").includes("$") ? 20 : 0) +
-          (String(b.textContent || "").includes("P") ? 10 : 0) -
-          Math.abs(br.top - 480);
-
-        return bScore - aScore;
-      });
-
-      return resourceRows[0];
+    for (const sel of selectors) {
+      const el = $(sel);
+      if (el) return el;
     }
 
     const genderIcon = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
@@ -548,13 +541,6 @@
     });
 
     if (genderIcon?.parentElement) return genderIcon.parentElement;
-
-    const meritsStar = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
-      const t = String(el.textContent || "").trim();
-      return t === "★" || t === "⭐";
-    });
-
-    if (meritsStar?.parentElement) return meritsStar.parentElement;
 
     return null;
   }
@@ -572,15 +558,10 @@
       coin.addEventListener("click", toggleOverlay);
     }
 
-    const mount = findHeaderMount();
+    coin.classList.remove("fb-fixed-test");
+    coin.classList.add("fb-fixed-header");
 
-    if (mount && coin.parentElement !== mount) {
-      coin.classList.remove("fb-fixed-test");
-      mount.appendChild(coin);
-    }
-
-    if (!mount && !coin.parentElement) {
-      coin.classList.add("fb-fixed-test");
+    if (coin.parentElement !== document.body) {
       document.body.appendChild(coin);
     }
   }
@@ -768,7 +749,7 @@
       pending: "Pending",
       approved: "Approved",
       denied: "Denied",
-      paid: "Paid",
+      paid: "Complete",
       cancelled: "Cancelled",
     }[s] || s;
 
@@ -914,7 +895,7 @@
       actions = `
         <div class="fb-row" style="margin-top:10px;">
           <button class="fb-btn green" data-id="${id}" data-fb-action="approve" type="button">Approve</button>
-          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Paid</button>
+          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
           <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
         </div>
       `;
@@ -923,7 +904,7 @@
     if (isBanker && status === "approved") {
       actions = `
         <div class="fb-row" style="margin-top:10px;">
-          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Paid</button>
+          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
           <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
         </div>
       `;
@@ -969,6 +950,7 @@
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-save-key" class="fb-btn gold" type="button">Save Key</button>
           <button id="fb-test-login" class="fb-btn" type="button">Test Login</button>
+          <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable Banker Ping</button>
         </div>
       </div>
 
@@ -988,6 +970,7 @@
     });
 
     $("#fb-test-login")?.addEventListener("click", () => refreshAll(true));
+    $("#fb-enable-notify")?.addEventListener("click", requestNotifyPermission);
   }
 
   async function submitBuiltInRequest() {
@@ -1077,6 +1060,70 @@
     }
   }
 
+
+  function getSeenPendingIds() {
+    try {
+      const raw = GM_getValue(K_SEEN_PENDING, "[]");
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveSeenPendingIds(ids) {
+    GM_setValue(K_SEEN_PENDING, JSON.stringify(Array.from(new Set(ids.map(String))).slice(-100)));
+  }
+
+  function requestNotifyPermission() {
+    if (!("Notification" in window)) {
+      alert("Notifications are not supported in this browser/PDA.");
+      return;
+    }
+
+    Notification.requestPermission().then((permission) => {
+      alert(permission === "granted" ? "Banker notifications enabled." : "Notifications were not allowed.");
+    });
+  }
+
+  function notifyBankerForNewPending(pendingItems) {
+    if (!APP.me?.is_banker) return;
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+
+    const seen = getSeenPendingIds();
+    const seenSet = new Set(seen);
+    const fresh = pendingItems.filter((r) => !seenSet.has(String(r.id)));
+
+    if (!fresh.length) return;
+
+    for (const req of fresh.slice(0, 3)) {
+      const title = "🪙 New Faction Bank Request";
+      const body = `${req.requester_name || "Member"} requested ${money(req.amount)}${req.note ? " — " + req.note : ""}`;
+
+      try {
+        const n = new Notification(title, {
+          body,
+          tag: `faction-bank-request-${req.id}`,
+          silent: false,
+        });
+
+        n.onclick = () => {
+          window.focus();
+          openOverlay();
+          setTimeout(() => {
+            const bankerTab = document.querySelector('.fb-tab[data-tab="banker"]');
+            if (bankerTab) bankerTab.click();
+          }, 200);
+        };
+      } catch {
+        // Ignore notification errors.
+      }
+    }
+
+    saveSeenPendingIds([...seen, ...fresh.map((r) => String(r.id))]);
+  }
+
   async function refreshAll(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key) {
@@ -1096,8 +1143,11 @@
       const list = await gmRequest("GET", "/api/banker/requests");
       APP.requests = Array.isArray(list.items) ? list.items : [];
 
-      const pending = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending").length;
+      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      const pending = pendingItems.length;
+
       setCoinAlert(pending);
+      notifyBankerForNewPending(pendingItems);
 
       if (APP.open) renderBody(activeTab());
     } catch (err) {
