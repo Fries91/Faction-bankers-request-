@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.3.1
+// @version      0.4.0
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
 // @match        https://torn.com/factions.php*
+// @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      faction-bankers-request.onrender.com
+// @connect      api.torn.com
 // @connect      *
 // @downloadURL  https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
 // @updateURL    https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
@@ -30,6 +32,7 @@
     busy: false,
     open: false,
     lastLoad: 0,
+    booted: false,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -51,7 +54,7 @@
   }
 
   function isFactionPage() {
-    return location.pathname.includes("/factions.php");
+    return location.href.includes("factions.php");
   }
 
   function gmRequest(method, path, body) {
@@ -64,7 +67,7 @@
           "X-Torn-Key": GM_getValue(K_API_KEY, ""),
         },
         data: body ? JSON.stringify(body) : undefined,
-        timeout: 20000,
+        timeout: 25000,
         onload: (res) => {
           let data = {};
           try {
@@ -92,34 +95,42 @@
     style.id = "fb-style";
     style.textContent = `
       #fb-bank-coin {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 34px;
-        height: 28px;
-        margin-left: 6px;
-        border: 1px solid rgba(255,255,255,.12);
-        border-radius: 9px;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 34px !important;
+        height: 28px !important;
+        margin-left: 6px !important;
+        border: 1px solid rgba(255,255,255,.12) !important;
+        border-radius: 9px !important;
         background: transparent !important;
-        color: #ffd36a;
-        font-size: 20px;
-        line-height: 1;
-        cursor: pointer;
-        user-select: none;
-        position: relative;
-        z-index: 20;
-        box-shadow: none;
+        color: #ffd36a !important;
+        font-size: 20px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        user-select: none !important;
+        position: relative !important;
+        z-index: 20 !important;
+        box-shadow: none !important;
+      }
+
+      #fb-bank-coin.fb-fixed-test {
+        position: fixed !important;
+        right: 8px !important;
+        bottom: 74px !important;
+        z-index: 99998 !important;
+        background: rgba(0,0,0,.55) !important;
       }
 
       #fb-bank-coin:hover {
-        border-color: rgba(255,211,106,.55);
-        filter: brightness(1.18);
+        border-color: rgba(255,211,106,.55) !important;
+        filter: brightness(1.18) !important;
       }
 
       #fb-bank-coin.fb-alert {
         background: rgba(180,0,0,.35) !important;
-        border-color: rgba(255,80,80,.95);
-        box-shadow: 0 0 10px rgba(255,0,0,.45);
+        border-color: rgba(255,80,80,.95) !important;
+        box-shadow: 0 0 10px rgba(255,0,0,.45) !important;
       }
 
       #fb-bank-coin.fb-alert::after {
@@ -497,6 +508,9 @@
       "[class*='UserInfo']",
       "[class*='top-page-links']",
       "[class*='Header'] [class*='links']",
+      "[class*='header'] [class*='links']",
+      ".top-header",
+      ".header",
       "header",
     ];
 
@@ -505,27 +519,56 @@
       if (el) return el;
     }
 
-    return document.body;
+    const genderIcon = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
+      const t = String(el.textContent || "").trim();
+      const cls = String(el.className || "").toLowerCase();
+      const title = String(el.getAttribute("title") || "").toLowerCase();
+      return t === "♂" || t === "♀" || cls.includes("gender") || title.includes("gender");
+    });
+
+    if (genderIcon?.parentElement) return genderIcon.parentElement;
+
+    return null;
   }
 
   function mountCoin() {
-    if ($("#fb-bank-coin")) return;
+    let coin = $("#fb-bank-coin");
+
+    if (!coin) {
+      coin = document.createElement("button");
+      coin.id = "fb-bank-coin";
+      coin.type = "button";
+      coin.title = "Faction Bankers";
+      coin.textContent = "🪙";
+      coin.setAttribute("data-count", "0");
+      coin.addEventListener("click", toggleOverlay);
+    }
 
     const mount = findHeaderMount();
 
-    const coin = document.createElement("button");
-    coin.id = "fb-bank-coin";
-    coin.type = "button";
-    coin.title = "Faction Bankers";
-    coin.textContent = "🪙";
-    coin.setAttribute("data-count", "0");
+    if (mount && coin.parentElement !== mount) {
+      coin.classList.remove("fb-fixed-test");
+      mount.appendChild(coin);
+    }
 
-    coin.addEventListener("click", toggleOverlay);
-
-    mount.appendChild(coin);
+    if (!mount && !coin.parentElement) {
+      coin.classList.add("fb-fixed-test");
+      document.body.appendChild(coin);
+    }
   }
 
   function findFactionBuiltInMount() {
+    const exactFactionHeader = Array.from(document.querySelectorAll("div, h1, h2, h3, span"))
+      .find((el) => String(el.textContent || "").trim().toLowerCase() === "faction");
+
+    if (exactFactionHeader) {
+      let p = exactFactionHeader.parentElement;
+      for (let i = 0; i < 4 && p; i += 1) {
+        if (p.offsetWidth > 250) return p;
+        p = p.parentElement;
+      }
+    }
+
     const candidates = [
       ".faction-info-wrap",
       ".faction-info",
@@ -536,6 +579,7 @@
       ".faction-page",
       ".content-wrapper",
       ".content",
+      "main",
     ];
 
     for (const sel of candidates) {
@@ -543,10 +587,7 @@
       if (el) return el;
     }
 
-    const factionTitle = Array.from(document.querySelectorAll("div, h1, h2, h3"))
-      .find((el) => String(el.textContent || "").trim().toLowerCase() === "faction");
-
-    return factionTitle?.parentElement || document.body;
+    return document.body;
   }
 
   function mountBuiltInBankerBox() {
@@ -580,7 +621,16 @@
       tabBar.parentElement.insertBefore(box, tabBar.nextSibling);
     } else {
       const mount = findFactionBuiltInMount();
-      mount.insertBefore(box, mount.firstChild);
+
+      const warBox = Array.from(mount.querySelectorAll("div")).find((el) =>
+        String(el.textContent || "").toLowerCase().includes("your faction is not in a war")
+      );
+
+      if (warBox?.parentElement) {
+        warBox.parentElement.insertBefore(box, warBox);
+      } else {
+        mount.insertBefore(box, mount.firstChild);
+      }
     }
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
@@ -1046,6 +1096,8 @@
     mountBuiltInBankerBox();
     ensureOverlay();
 
+    APP.booted = true;
+
     if (GM_getValue(K_OPEN, false)) openOverlay();
 
     setTimeout(() => refreshAll(true), 1800);
@@ -1057,10 +1109,33 @@
       if (GM_getValue(K_API_KEY, "")) {
         refreshAll(false);
       }
-    }, 45000);
+    }, 15000);
   }
 
-  boot();
+  function startWhenReady() {
+    if (!isFactionPage()) return;
+
+    boot();
+
+    const obs = new MutationObserver(() => {
+      if (!isFactionPage()) return;
+      ensureStyles();
+      mountCoin();
+      mountBuiltInBankerBox();
+      ensureOverlay();
+    });
+
+    obs.observe(document.documentElement || document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startWhenReady, { once: true });
+  } else {
+    startWhenReady();
+  }
 
   let lastUrl = location.href;
   setInterval(() => {
@@ -1077,4 +1152,3 @@
     }
   }, 1000);
 })();
-</script>
