@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.6
+// @version      0.4.7
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
@@ -22,11 +22,11 @@
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
 
-  // Locked PDA/Torn header position for the money / points / merits / gender row.
+  // Locked PDA/Torn header position for the money / points / merits / gender row, inside the highlighted area.
   // Increase LEFT to move right. Decrease LEFT to move left.
   // Increase TOP to move down. Decrease TOP to move up.
-  const COIN_LOCK_LEFT = 376;
-  const COIN_LOCK_TOP = 244;
+  const COIN_LOCK_LEFT = 342;
+  const COIN_LOCK_TOP = 488;
 
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
@@ -131,14 +131,18 @@
 
       #fb-bank-coin.fb-fixed-header {
         position: fixed !important;
-        left: var(--fb-coin-left, 376px) !important;
-        top: var(--fb-coin-top, 244px) !important;
+        left: var(--fb-coin-left, 342px) !important;
+        top: var(--fb-coin-top, 488px) !important;
         z-index: 99998 !important;
-        width: 22px !important;
-        height: 22px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: 24px !important;
+        max-width: 24px !important;
+        min-height: 24px !important;
+        max-height: 24px !important;
         font-size: 16px !important;
-        background: transparent !important;
-        border: 1px solid rgba(255,255,255,.12) !important;
+        background: rgba(0,0,0,.10) !important;
+        border: 1px solid rgba(255,255,255,.18) !important;
         box-shadow: none !important;
         pointer-events: auto !important;
       }
@@ -149,25 +153,25 @@
       }
 
       #fb-bank-coin.fb-alert {
-        background: rgba(180,0,0,.35) !important;
-        border-color: rgba(255,80,80,.95) !important;
-        box-shadow: 0 0 10px rgba(255,0,0,.45) !important;
+        background: rgba(200,0,0,.72) !important;
+        border-color: rgba(255,90,90,.98) !important;
+        box-shadow: 0 0 9px rgba(255,0,0,.55) !important;
       }
 
       #fb-bank-coin.fb-alert::after {
         content: attr(data-count);
         position: absolute;
-        top: -7px;
+        top: -8px;
         right: -8px;
-        min-width: 16px;
-        height: 16px;
+        min-width: 15px;
+        height: 15px;
         padding: 0 4px;
         border-radius: 999px;
         background: #ff3131;
         color: #fff;
         font-size: 10px;
         font-weight: 900;
-        line-height: 16px;
+        line-height: 15px;
         text-align: center;
       }
 
@@ -1028,7 +1032,7 @@
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-save-key" class="fb-btn gold" type="button">Save Key</button>
           <button id="fb-test-login" class="fb-btn" type="button">Test Login</button>
-          <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable Banker Ping</button>
+          <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable In-App Ping</button>
         </div>
       </div>
 
@@ -1155,19 +1159,24 @@
 
   function requestNotifyPermission() {
     if (!("Notification" in window)) {
-      alert("Notifications are not supported in this browser/PDA.");
+      GM_setValue("fb_in_app_ping_enabled_v1", true);
+      alert("PDA/browser notifications are not supported here. In-app banker ping is enabled instead: the 🪙 coin and banker box will turn red when requests are pending.");
       return;
     }
 
     Notification.requestPermission().then((permission) => {
-      alert(permission === "granted" ? "Banker notifications enabled." : "Notifications were not allowed.");
+      if (permission === "granted") {
+        GM_setValue("fb_in_app_ping_enabled_v1", true);
+        alert("Banker notifications enabled.");
+      } else {
+        GM_setValue("fb_in_app_ping_enabled_v1", true);
+        alert("Browser notifications were not allowed. In-app banker ping is enabled instead: the 🪙 coin and banker box will turn red when requests are pending.");
+      }
     });
   }
 
   function notifyBankerForNewPending(pendingItems) {
-    if (!APP.me?.is_banker) return;
-    if (!("Notification" in window)) return;
-    if (Notification.permission !== "granted") return;
+    if (!APP.me?.is_banker && !APP.me?.is_admin) return;
 
     const seen = getSeenPendingIds();
     const seenSet = new Set(seen);
@@ -1175,23 +1184,32 @@
 
     if (!fresh.length) return;
 
-    for (const req of fresh.slice(0, 3)) {
-      const title = "🪙 New Faction Bank Request";
-      const body = `${req.requester_name || "Member"} requested ${money(req.amount)}${req.note ? " — " + req.note : ""}`;
+    // PDA-friendly in-app ping: vibrate where supported, while the red coin/request box is the visual ping.
+    try {
+      if (navigator.vibrate) navigator.vibrate([180, 80, 180]);
+    } catch {
+      // Ignore vibration errors.
+    }
 
-      try {
-        const n = new Notification(title, {
-          body,
-          tag: `faction-bank-request-${req.id}`,
-          silent: false,
-        });
+    if ("Notification" in window && Notification.permission === "granted") {
+      for (const req of fresh.slice(0, 3)) {
+        const title = "🪙 New Faction Bank Request";
+        const body = `${req.requester_name || "Member"} requested ${money(req.amount)}${req.note ? " — " + req.note : ""}`;
 
-        n.onclick = () => {
-          window.focus();
-          openBankerBoard();
-        };
-      } catch {
-        // Ignore notification errors.
+        try {
+          const n = new Notification(title, {
+            body,
+            tag: `faction-bank-request-${req.id}`,
+            silent: false,
+          });
+
+          n.onclick = () => {
+            window.focus();
+            openBankerBoard();
+          };
+        } catch {
+          // Ignore notification errors.
+        }
       }
     }
 
