@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.5
+// @version      0.4.6
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/factions.php*
@@ -21,6 +21,12 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
+
+  // Locked PDA/Torn header position for the money / points / merits / gender row.
+  // Increase LEFT to move right. Decrease LEFT to move left.
+  // Increase TOP to move down. Decrease TOP to move up.
+  const COIN_LOCK_LEFT = 376;
+  const COIN_LOCK_TOP = 244;
 
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
@@ -125,8 +131,8 @@
 
       #fb-bank-coin.fb-fixed-header {
         position: fixed !important;
-        left: var(--fb-coin-left, 360px) !important;
-        top: var(--fb-coin-top, 472px) !important;
+        left: var(--fb-coin-left, 376px) !important;
+        top: var(--fb-coin-top, 244px) !important;
         z-index: 99998 !important;
         width: 22px !important;
         height: 22px !important;
@@ -593,34 +599,8 @@
     const coin = $("#fb-bank-coin");
     if (!coin) return;
 
-    const anchor = findGenderOrResourceAnchor();
-
-    let left = Math.round(window.innerWidth * 0.50);
-    let top = 472;
-
-    if (anchor) {
-      const rect = anchor.getBoundingClientRect();
-
-      if (rect && rect.width && rect.height) {
-        const text = getCleanText(anchor);
-
-        if (text === "♂" || text === "♀" || String(anchor.className || "").toLowerCase().includes("gender")) {
-          left = Math.round(rect.right + 4);
-          top = Math.round(rect.top + (rect.height / 2) - 11);
-        } else {
-          // Fallback when we found the whole money/points row.
-          // This places the coin around the gender/merits area instead of beside the Faction title.
-          left = Math.round(rect.left + (rect.width * 0.54));
-          top = Math.round(rect.top + (rect.height / 2) - 11);
-        }
-      }
-    }
-
-    left = Math.max(4, Math.min(window.innerWidth - 28, left));
-    top = Math.max(80, Math.min(window.innerHeight - 60, top));
-
-    coin.style.setProperty("--fb-coin-left", `${left}px`);
-    coin.style.setProperty("--fb-coin-top", `${top}px`);
+    coin.style.setProperty("--fb-coin-left", `${COIN_LOCK_LEFT}px`);
+    coin.style.setProperty("--fb-coin-top", `${COIN_LOCK_TOP}px`);
   }
 
   function mountCoin() {
