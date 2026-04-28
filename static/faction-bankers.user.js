@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.4.8
+// @version      0.4.9
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
-// @match        https://www.torn.com/factions.php*
-// @match        https://torn.com/factions.php*
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -58,6 +58,10 @@
     const n = Number(v || 0);
     if (!Number.isFinite(n)) return "$0";
     return "$" + Math.floor(n).toLocaleString();
+  }
+
+  function isTornPage() {
+    return location.hostname === "www.torn.com" || location.hostname === "torn.com";
   }
 
   function isFactionPage() {
@@ -130,21 +134,15 @@
       }
 
       #fb-bank-coin.fb-fixed-header {
-        position: fixed !important;
-        left: var(--fb-coin-left, 172px) !important;
-        top: var(--fb-coin-top, 244px) !important;
-        z-index: 100000 !important;
-        width: 24px !important;
-        height: 24px !important;
-        min-width: 24px !important;
-        max-width: 24px !important;
-        min-height: 24px !important;
-        max-height: 24px !important;
-        font-size: 16px !important;
-        background: rgba(0,0,0,.10) !important;
-        border: 1px solid rgba(255,255,255,.18) !important;
-        box-shadow: none !important;
-        pointer-events: auto !important;
+        position: relative !important;
+        left: auto !important;
+        top: auto !important;
+        z-index: 20 !important;
+      }
+
+      .fb-coin-mount-row {
+        display: flex !important;
+        align-items: center !important;
       }
 
       #fb-bank-coin:hover {
@@ -531,80 +529,69 @@
     document.head.appendChild(style);
   }
 
-  function findHeaderMount() {
-    const selectors = [
-      "#top-page-links-list",
-      ".user-info-list",
-      ".user-info",
-      "[class*='user-info']",
-      "[class*='UserInfo']",
-      "[class*='top-page-links']",
-      "[class*='Header'] [class*='links']",
-      "[class*='header'] [class*='links']",
-      ".top-header",
-      ".header",
-      "header",
-    ];
-
-    for (const sel of selectors) {
-      const el = $(sel);
-      if (el) return el;
-    }
-
-    const genderIcon = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
-      const t = String(el.textContent || "").trim();
-      const cls = String(el.className || "").toLowerCase();
-      const title = String(el.getAttribute("title") || "").toLowerCase();
-      return t === "♂" || t === "♀" || cls.includes("gender") || title.includes("gender");
-    });
-
-    if (genderIcon?.parentElement) return genderIcon.parentElement;
-
-    return null;
-  }
-
   function getCleanText(el) {
     return String(el?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
-  function findGenderOrResourceAnchor() {
-    const all = Array.from(document.querySelectorAll("a, div, span, li, i, img"));
+  function findTornResourceRow() {
+    const candidates = Array.from(document.querySelectorAll("div, ul, nav, section")).filter((el) => {
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width < 280 || rect.height < 22 || rect.height > 70) return false;
+      if (rect.top < 250 || rect.top > 560) return false;
 
-    const gender = all.find((el) => {
+      const text = getCleanText(el);
+      const hasMoney = text.includes("$");
+      const hasPoints = /\bP\b/.test(text) || text.includes("points") || text.includes("Points");
+      const hasGender = text.includes("♂") || text.includes("♀");
+      const hasMeritLike = text.includes("★") || text.includes("⭐") || text.includes("2");
+
+      return hasMoney && (hasPoints || hasGender || hasMeritLike);
+    });
+
+    if (candidates.length) {
+      candidates.sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+
+        const aText = getCleanText(a);
+        const bText = getCleanText(b);
+
+        const aScore =
+          (aText.includes("$") ? 40 : 0) +
+          (/\bP\b/.test(aText) ? 30 : 0) +
+          (aText.includes("♂") || aText.includes("♀") ? 30 : 0) +
+          (aText.includes("★") || aText.includes("⭐") ? 15 : 0) -
+          Math.abs(ar.top - 488) / 10;
+
+        const bScore =
+          (bText.includes("$") ? 40 : 0) +
+          (/\bP\b/.test(bText) ? 30 : 0) +
+          (bText.includes("♂") || bText.includes("♀") ? 30 : 0) +
+          (bText.includes("★") || bText.includes("⭐") ? 15 : 0) -
+          Math.abs(br.top - 488) / 10;
+
+        return bScore - aScore;
+      });
+
+      return candidates[0];
+    }
+
+    // PDA fallback: find the blue P / gender icon area and use its parent row.
+    const iconAnchor = Array.from(document.querySelectorAll("a, div, span, li")).find((el) => {
       const text = getCleanText(el);
       const cls = String(el.className || "").toLowerCase();
       const title = String(el.getAttribute("title") || "").toLowerCase();
-      const alt = String(el.getAttribute("alt") || "").toLowerCase();
-
-      if (text === "♂" || text === "♀") return true;
-      if (title.includes("gender") || alt.includes("gender")) return true;
-      if (cls.includes("gender")) return true;
-      return false;
+      return text === "P" || text === "♂" || text === "♀" || cls.includes("gender") || title.includes("gender");
     });
 
-    if (gender) return gender;
-
-    const resourceRow = Array.from(document.querySelectorAll("div, ul, nav")).find((el) => {
-      const text = getCleanText(el);
-      const rect = el.getBoundingClientRect();
-
-      if (!rect || rect.width < 250 || rect.height < 18 || rect.height > 70) return false;
-      if (rect.top < 300 || rect.top > 560) return false;
-
-      return text.includes("$") && (text.includes("P") || text.includes("♂") || text.includes("♀"));
-    });
-
-    if (resourceRow) return resourceRow;
+    let p = iconAnchor?.parentElement || null;
+    for (let i = 0; i < 5 && p; i += 1) {
+      const rect = p.getBoundingClientRect();
+      if (rect && rect.width > 250 && rect.height >= 22 && rect.height <= 80) return p;
+      p = p.parentElement;
+    }
 
     return null;
-  }
-
-  function positionCoinInHeader() {
-    const coin = $("#fb-bank-coin");
-    if (!coin) return;
-
-    coin.style.setProperty("--fb-coin-left", `${COIN_LOCK_LEFT}px`);
-    coin.style.setProperty("--fb-coin-top", `${COIN_LOCK_TOP}px`);
   }
 
   function mountCoin() {
@@ -620,14 +607,32 @@
       coin.addEventListener("click", openBankerBoard);
     }
 
-    coin.classList.remove("fb-fixed-test");
-    coin.classList.add("fb-fixed-header");
+    coin.classList.remove("fb-fixed-test", "fb-fixed-header");
 
-    if (coin.parentElement !== document.body) {
+    const row = findTornResourceRow();
+
+    if (row) {
+      row.classList.add("fb-coin-mount-row");
+
+      // Put the coin after the gender/merits cluster when possible.
+      const icons = Array.from(row.children);
+      const genderChild = icons.find((el) => {
+        const text = getCleanText(el);
+        const cls = String(el.className || "").toLowerCase();
+        const title = String(el.getAttribute("title") || "").toLowerCase();
+        return text.includes("♂") || text.includes("♀") || cls.includes("gender") || title.includes("gender");
+      });
+
+      if (genderChild && genderChild.nextSibling) {
+        row.insertBefore(coin, genderChild.nextSibling);
+      } else {
+        row.appendChild(coin);
+      }
+    } else if (coin.parentElement !== document.body) {
+      // Last resort: keep it available but small.
+      coin.classList.add("fb-fixed-test");
       document.body.appendChild(coin);
     }
-
-    positionCoinInHeader();
   }
 
   function findFactionBuiltInMount() {
@@ -1259,7 +1264,7 @@
   }
 
   function boot() {
-    if (!isFactionPage()) return;
+    if (!isTornPage()) return;
 
     ensureStyles();
     mountCoin();
@@ -1283,12 +1288,12 @@
   }
 
   function startWhenReady() {
-    if (!isFactionPage()) return;
+    if (!isTornPage()) return;
 
     boot();
 
     const obs = new MutationObserver(() => {
-      if (!isFactionPage()) return;
+      if (!isTornPage()) return;
       ensureStyles();
       mountCoin();
       mountBuiltInBankerBox();
@@ -1307,15 +1312,13 @@
     startWhenReady();
   }
 
-  window.addEventListener("resize", positionCoinInHeader);
-
   let lastUrl = location.href;
   setInterval(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
 
       setTimeout(() => {
-        if (isFactionPage()) {
+        if (isTornPage()) {
           mountCoin();
           mountBuiltInBankerBox();
           refreshAll(true);
