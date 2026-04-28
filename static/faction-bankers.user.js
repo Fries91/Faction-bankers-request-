@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙
 // @namespace    Fries91.Torn.FactionBankers
-// @version      0.5.0
+// @version      0.5.2
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -144,24 +144,27 @@
         display: flex !important;
         align-items: center !important;
         flex-wrap: nowrap !important;
+        gap: 0 !important;
       }
 
       #fb-bank-coin:hover {
-        border-color: rgba(255,211,106,.55) !important;
-        filter: brightness(1.18) !important;
+        opacity: .96 !important;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.85)) saturate(1) brightness(1.02) !important;
       }
 
       #fb-bank-coin.fb-alert {
-        background: rgba(200,0,0,.72) !important;
-        border-color: rgba(255,90,90,.98) !important;
-        box-shadow: 0 0 9px rgba(255,0,0,.55) !important;
+        opacity: 1 !important;
+        background: radial-gradient(circle, rgba(220,0,0,.58), rgba(130,0,0,.24) 62%, transparent 72%) !important;
+        border-radius: 50% !important;
+        box-shadow: 0 0 8px rgba(255,0,0,.68) !important;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.9)) saturate(1.1) brightness(1.02) !important;
       }
 
       #fb-bank-coin.fb-alert::after {
         content: attr(data-count);
         position: absolute;
-        top: -8px;
-        right: -8px;
+        top: -5px;
+        right: -6px;
         min-width: 15px;
         height: 15px;
         padding: 0 4px;
@@ -172,6 +175,7 @@
         font-weight: 900;
         line-height: 15px;
         text-align: center;
+        box-shadow: 0 1px 3px rgba(0,0,0,.65);
       }
 
       #fb-built-in-box {
