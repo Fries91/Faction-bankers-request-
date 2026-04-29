@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Faction Bankers 🪙
-// @namespace    Fries91.Torn.FactionBanker
-// @version      0.5.6
+// @name         Torn Faction Bankers 🪙 
+// @namespace    Fries91.Torn.FactionBankers.
+// @version      0.5.8
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -65,6 +65,25 @@
 
   function isFactionPage() {
     return location.href.includes("factions.php");
+  }
+
+  function isOwnFactionPage() {
+    if (!isFactionPage()) return false;
+
+    const url = new URL(location.href);
+    const params = url.searchParams;
+
+    // Other faction pages normally have an ID/XID or profile/view style step.
+    if (params.has("ID") || params.has("id") || params.has("XID") || params.has("xid")) return false;
+
+    const step = String(params.get("step") || "").toLowerCase();
+    const type = String(params.get("type") || "").toLowerCase();
+
+    if (step.includes("profile")) return false;
+    if (step.includes("view")) return false;
+    if (type.includes("profile")) return false;
+
+    return true;
   }
 
   function gmRequest(method, path, body) {
@@ -270,6 +289,31 @@
         font-size: 12px;
         font-weight: 900;
         cursor: pointer;
+      }
+
+
+      #fb-setup-button {
+        position: fixed !important;
+        right: 10px !important;
+        bottom: 86px !important;
+        z-index: 100000 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 4px !important;
+        padding: 7px 10px !important;
+        border: 1px solid rgba(255,211,106,.45) !important;
+        border-radius: 999px !important;
+        background: rgba(20,20,20,.88) !important;
+        color: #ffd36a !important;
+        font-size: 12px !important;
+        font-weight: 900 !important;
+        box-shadow: 0 6px 18px rgba(0,0,0,.55) !important;
+        cursor: pointer !important;
+      }
+
+      #fb-setup-button.fb-hide {
+        display: none !important;
       }
 
       #fb-overlay {
@@ -512,7 +556,32 @@
       }
 
       @media (max-width: 520px) {
-        #fb-overlay {
+  
+      #fb-setup-button {
+        position: fixed !important;
+        right: 10px !important;
+        bottom: 86px !important;
+        z-index: 100000 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 4px !important;
+        padding: 7px 10px !important;
+        border: 1px solid rgba(255,211,106,.45) !important;
+        border-radius: 999px !important;
+        background: rgba(20,20,20,.88) !important;
+        color: #ffd36a !important;
+        font-size: 12px !important;
+        font-weight: 900 !important;
+        box-shadow: 0 6px 18px rgba(0,0,0,.55) !important;
+        cursor: pointer !important;
+      }
+
+      #fb-setup-button.fb-hide {
+        display: none !important;
+      }
+
+      #fb-overlay {
           top: 62px;
           right: 6px;
           left: 6px;
@@ -672,6 +741,10 @@
 
     const row = findTornResourceRow();
 
+    if (!GM_getValue(K_API_KEY, "")) {
+      coin.classList.add("fb-banker-visible");
+    }
+
     if (row) {
       row.classList.add("fb-coin-mount-row");
 
@@ -722,7 +795,11 @@
   }
 
   function mountBuiltInBankerBox() {
-    if (!isFactionPage()) return;
+    if (!isOwnFactionPage()) {
+      const oldBox = $("#fb-built-in-box");
+      if (oldBox) oldBox.remove();
+      return;
+    }
     if ($("#fb-built-in-box")) return;
 
     const box = document.createElement("div");
@@ -767,6 +844,29 @@
     $("#fb-built-open")?.addEventListener("click", openOverlay);
     $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
     $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
+  }
+
+  function ensureSetupButton() {
+    if ($("#fb-setup-button")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "fb-setup-button";
+    btn.type = "button";
+    btn.textContent = "🪙 Setup";
+    btn.title = "Open Faction Bankers settings";
+    btn.addEventListener("click", () => {
+      openOverlay();
+      setTimeout(() => {
+        const settingsTab = document.querySelector('.fb-tab[data-tab="settings"]');
+        if (settingsTab) settingsTab.click();
+      }, 150);
+    });
+
+    document.body.appendChild(btn);
+
+    if (GM_getValue(K_API_KEY, "")) {
+      btn.classList.add("fb-hide");
+    }
   }
 
   function ensureOverlay() {
@@ -831,8 +931,9 @@
     openOverlay();
 
     setTimeout(() => {
-      const bankerTab = document.querySelector('.fb-tab[data-tab="banker"]');
-      if (bankerTab) bankerTab.click();
+      const tabName = GM_getValue(K_API_KEY, "") ? "banker" : "settings";
+      const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+      if (tab) tab.click();
     }, 150);
   }
 
@@ -843,14 +944,20 @@
 
   function setCoinAlert(count) {
     const coin = $("#fb-bank-coin-clean");
+    const setupBtn = $("#fb-setup-button");
     const n = Number(count || 0);
+    const hasKey = !!GM_getValue(K_API_KEY, "");
     const canBank = !!(APP.me?.is_banker || APP.me?.is_admin);
     APP.pendingCount = n;
 
     if (coin) {
       coin.setAttribute("data-count", String(n > 99 ? "99+" : n));
 
-      if (canBank) {
+      // Show coin when:
+      // 1) no key yet, so user can open settings/login
+      // 2) user is banker/admin
+      // 3) there are pending requests
+      if (!hasKey || canBank || n > 0) {
         coin.classList.add("fb-banker-visible");
       } else {
         coin.classList.remove("fb-banker-visible");
@@ -861,8 +968,13 @@
         coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to pay members`;
       } else {
         coin.classList.remove("fb-alert");
-        coin.title = "Faction Bankers";
+        coin.title = hasKey ? "Faction Bankers" : "Faction Bankers setup";
       }
+    }
+
+    if (setupBtn) {
+      if (hasKey) setupBtn.classList.add("fb-hide");
+      else setupBtn.classList.remove("fb-hide");
     }
 
     const builtBox = $("#fb-built-in-box");
@@ -1082,7 +1194,7 @@
       <div class="fb-box">
         <div class="fb-request-title">Settings</div>
         <div class="fb-small" style="margin-top:4px;">
-          Save your Torn API key so the banker app can verify your faction and account.
+          Save your Torn API key so the banker app can verify your faction/account. After saving, tap Test Login.
         </div>
       </div>
 
@@ -1358,6 +1470,7 @@
     if (!isTornPage()) return;
 
     ensureStyles();
+    ensureSetupButton();
     mountCoin();
     mountBuiltInBankerBox();
     ensureOverlay();
@@ -1386,6 +1499,7 @@
     const obs = new MutationObserver(() => {
       if (!isTornPage()) return;
       ensureStyles();
+      ensureSetupButton();
       mountCoin();
       mountBuiltInBankerBox();
       ensureOverlay();
