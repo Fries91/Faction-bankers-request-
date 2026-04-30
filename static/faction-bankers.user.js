@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.6.0
+// @version      0.6.1
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -147,13 +147,15 @@
 
       #fb-bank-coin-clean.fb-fixed-test {
         position: fixed !important;
-        right: 8px !important;
-        bottom: 74px !important;
-        z-index: 100000 !important;
-        background: rgba(0,0,0,.55) !important;
+        right: 10px !important;
+        bottom: 132px !important;
+        z-index: 99998 !important;
+        background: rgba(0,0,0,.72) !important;
+        border-color: rgba(255,211,106,.55) !important;
+        box-shadow: 0 5px 16px rgba(0,0,0,.55) !important;
       }
 
-      #fb-bank-coin-clean.fb-fixed-header {
+            #fb-bank-coin-clean.fb-fixed-header {
         position: relative !important;
         left: auto !important;
         top: auto !important;
@@ -740,27 +742,12 @@
       coin.addEventListener("click", openBankerBoard);
     }
 
-    coin.classList.remove("fb-fixed-test", "fb-fixed-header");
-    coin.classList.add("fb-gender-lock");
+    // PDA-safe: keep the coin on the page no matter how Torn rebuilds the header.
+    // It sits below the overlay z-index, so the overlay covers it when open.
+    coin.classList.remove("fb-fixed-header");
+    coin.classList.add("fb-fixed-test", "fb-banker-visible");
 
-    const row = findTornResourceRow();
-
-    if (!GM_getValue(K_API_KEY, "")) {
-      coin.classList.add("fb-banker-visible");
-    }
-
-    if (row) {
-      row.classList.add("fb-coin-mount-row");
-
-      // Mount inside the real money/points/merits row, but lock it visually beside gender
-      // instead of appending it to the far end of the row.
-      if (coin.parentElement !== row) {
-        row.appendChild(coin);
-      }
-    } else if (coin.parentElement !== document.body) {
-      // Last-resort tiny fixed button so it never disappears during testing.
-      coin.classList.remove("fb-gender-lock");
-      coin.classList.add("fb-fixed-test");
+    if (coin.parentElement !== document.body) {
       document.body.appendChild(coin);
     }
   }
@@ -969,15 +956,8 @@
     if (coin) {
       coin.setAttribute("data-count", String(n > 99 ? "99+" : n));
 
-      // Show coin when:
-      // 1) no key yet, so user can open settings/login
-      // 2) user is banker/admin
-      // 3) there are pending requests
-      if (!hasKey || canBank || n > 0) {
-        coin.classList.add("fb-banker-visible");
-      } else {
-        coin.classList.remove("fb-banker-visible");
-      }
+      // Always show the coin so members can open the app and send requests.
+      coin.classList.add("fb-banker-visible", "fb-fixed-test");
 
       if (canBank && n > 0) {
         coin.classList.add("fb-alert");
