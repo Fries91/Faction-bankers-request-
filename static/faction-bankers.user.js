@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.5.8
+// @version      0.6.0
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -29,10 +29,12 @@
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
   const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
+  const K_TARGET_FACTION = "fb_target_faction_v1";
   const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
 
   const APP = {
     me: null,
+    factions: [],
     requests: [],
     pendingCount: 0,
     busy: false,
@@ -257,6 +259,7 @@
       }
 
       #fb-built-amount,
+      #fb-built-faction,
       #fb-built-note {
         min-width: 0;
         border: 1px solid rgba(255,255,255,.16);
@@ -607,6 +610,7 @@
       }
 
         #fb-built-amount,
+        #fb-built-faction,
         #fb-built-send {
           width: 100%;
           box-sizing: border-box;
@@ -800,7 +804,15 @@
       if (oldBox) oldBox.remove();
       return;
     }
-    if ($("#fb-built-in-box")) return;
+    if ($("#fb-built-in-box")) {
+      const sel = $("#fb-built-faction");
+      if (sel && APP.factions?.length) {
+        const current = sel.value || GM_getValue(K_TARGET_FACTION, "");
+        sel.innerHTML = factionOptions(current);
+        sel.value = current;
+      }
+      return;
+    }
 
     const box = document.createElement("div");
     box.id = "fb-built-in-box";
@@ -814,6 +826,9 @@
       </div>
 
       <div class="fb-built-grid">
+        <select id="fb-built-faction">
+          ${factionOptions()}
+        </select>
         <input id="fb-built-amount" inputmode="numeric" placeholder="Amount needed">
         <button id="fb-built-full" type="button">Request Full Balance</button>
         <button id="fb-built-send" type="button">Request Amount</button>
@@ -842,6 +857,7 @@
     }
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
+    $("#fb-built-faction")?.addEventListener("change", () => rememberFactionFromSelect("#fb-built-faction"));
     $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
     $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
   }
@@ -1007,6 +1023,45 @@
     return `<span class="fb-pill ${esc(s)}">${esc(label)}</span>`;
   }
 
+
+  function factionOptions(selected = GM_getValue(K_TARGET_FACTION, "")) {
+    const items = Array.isArray(APP.factions) ? APP.factions : [];
+
+    if (!items.length) {
+      return `<option value="">No factions loaded yet</option>`;
+    }
+
+    return [
+      `<option value="">Choose faction banker group</option>`,
+      ...items.map((f) => {
+        const id = String(f.faction_id || "");
+        const name = String(f.faction_name || id);
+        return `<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${esc(name)}</option>`;
+      }),
+    ].join("");
+  }
+
+  function rememberFactionFromSelect(sel) {
+    const val = $(sel)?.value || "";
+    if (val) GM_setValue(K_TARGET_FACTION, val);
+    return val;
+  }
+
+  function selectedFactionFromPage() {
+    return (
+      $("#fb-target-faction")?.value ||
+      $("#fb-built-faction")?.value ||
+      GM_getValue(K_TARGET_FACTION, "") ||
+      ""
+    );
+  }
+
+  function factionLabelById(factionId) {
+    const id = String(factionId || "");
+    const found = (APP.factions || []).find((f) => String(f.faction_id) === id);
+    return found?.faction_name || id;
+  }
+
   function renderBody(tab = activeTab()) {
     if (!GM_getValue(K_API_KEY, "")) {
       renderSettings("Add your Torn API key first.");
@@ -1039,7 +1094,12 @@
       </div>
 
       <div class="fb-box">
-        <label class="fb-label">Amount requested</label>
+        <label class="fb-label">Choose faction banker group</label>
+        <select id="fb-target-faction" class="fb-input">
+          ${factionOptions()}
+        </select>
+
+        <label class="fb-label" style="margin-top:10px;">Amount requested</label>
         <input id="fb-amount" class="fb-input" inputmode="numeric" placeholder="Example: 25000000">
 
         <div class="fb-row" style="margin-top:10px;">
@@ -1052,11 +1112,12 @@
         </div>
 
         <div class="fb-small" style="margin-top:8px;">
-          This sends a request to faction bankers. A banker still pays from the faction vault manually.
+          Pick the Deadly Sins faction group first. Only bankers assigned to that faction will get the red coin notification.
         </div>
       </div>
     `);
 
+    $("#fb-target-faction")?.addEventListener("change", () => rememberFactionFromSelect("#fb-target-faction"));
     $("#fb-submit-request")?.addEventListener("click", submitRequest);
     $("#fb-full-request")?.addEventListener("click", submitFullBalanceRequest);
     $("#fb-refresh")?.addEventListener("click", () => refreshAll(true));
@@ -1140,6 +1201,7 @@
 
     const created = r.created_at ? esc(r.created_at) : "";
     const requester = esc(r.requester_name || `User ${r.requester_id || ""}`);
+    const targetFaction = esc(r.faction_name || factionLabelById(r.faction_id) || "Faction");
     const handledBy = r.handled_by_name ? `<div class="fb-small">Handled by: ${esc(r.handled_by_name)}</div>` : "";
 
     let actions = "";
@@ -1170,7 +1232,7 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">${requester} requested ${String(r.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(r.amount)}</div>
-            <div class="fb-request-meta">Request #${id}${created ? ` • ${created}` : ""}</div>
+            <div class="fb-request-meta">For ${targetFaction} • Request #${id}${created ? ` • ${created}` : ""}</div>
           </div>
           ${statusPill(status)}
         </div>
@@ -1232,10 +1294,17 @@
     if (APP.busy) return;
 
     const status = $("#fb-built-status");
+    const targetFactionId = selectedFactionFromPage();
 
     if (!GM_getValue(K_API_KEY, "")) {
       if (status) status.textContent = "Save your API key in settings first";
       openOverlay();
+      return;
+    }
+
+    if (!targetFactionId) {
+      if (status) status.textContent = "Choose faction first";
+      if (APP.open) renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
       return;
     }
 
@@ -1246,13 +1315,15 @@
       await gmRequest("POST", "/api/banker/requests", {
         amount: 1,
         note: FULL_BALANCE_NOTE,
+        target_faction_id: targetFactionId,
       });
 
-      if (status) status.textContent = "Full balance request sent to bankers";
+      GM_setValue(K_TARGET_FACTION, targetFactionId);
+      if (status) status.textContent = `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
       await refreshAll(true);
 
       if (APP.open) {
-        renderRequestTab(`<div class="fb-success">Full balance request sent to faction bankers.</div>`);
+        renderRequestTab(`<div class="fb-success">Full balance request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>`);
       }
     } catch (err) {
       if (status) status.textContent = err.message || "Request failed";
@@ -1270,11 +1341,17 @@
     const amountRaw = ($("#fb-built-amount")?.value || "").replace(/[^\d]/g, "");
     const amount = Number(amountRaw);
     const note = "";
+    const targetFactionId = $("#fb-built-faction")?.value || "";
     const status = $("#fb-built-status");
 
     if (!GM_getValue(K_API_KEY, "")) {
       if (status) status.textContent = "Save your API key in settings first";
       openOverlay();
+      return;
+    }
+
+    if (!targetFactionId) {
+      if (status) status.textContent = "Choose faction first";
       return;
     }
 
@@ -1287,9 +1364,14 @@
     if (status) status.textContent = "Sending request...";
 
     try {
-      await gmRequest("POST", "/api/banker/requests", { amount, note });
+      await gmRequest("POST", "/api/banker/requests", {
+        amount,
+        note,
+        target_faction_id: targetFactionId,
+      });
+      GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
-      if (status) status.textContent = "Request sent to bankers";
+      if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
       await refreshAll(true);
     } catch (err) {
       if (status) status.textContent = err.message || "Request failed";
@@ -1304,6 +1386,12 @@
     const amountRaw = ($("#fb-amount")?.value || "").replace(/[^\d]/g, "");
     const amount = Number(amountRaw);
     const note = "";
+    const targetFactionId = $("#fb-target-faction")?.value || "";
+
+    if (!targetFactionId) {
+      renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
+      return;
+    }
 
     if (!amount || amount < 1) {
       renderRequestTab(`<div class="fb-error">Enter a valid amount.</div>`);
@@ -1314,9 +1402,14 @@
     renderRequestTab(`<div class="fb-muted">Sending request...</div>`);
 
     try {
-      await gmRequest("POST", "/api/banker/requests", { amount, note });
+      await gmRequest("POST", "/api/banker/requests", {
+        amount,
+        note,
+        target_faction_id: targetFactionId,
+      });
+      GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
-      renderRequestTab(`<div class="fb-success">Amount request sent to faction bankers.</div>`);
+      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>`);
     } catch (err) {
       renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -1402,7 +1495,7 @@
     if ("Notification" in window && Notification.permission === "granted") {
       for (const req of fresh.slice(0, 3)) {
         const title = "🪙 New Faction Bank Request";
-        const body = `${req.requester_name || "Member"} requested ${String(req.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(req.amount)}`;
+        const body = `${req.requester_name || "Member"} requested ${String(req.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(req.amount)} for ${req.faction_name || "Faction"}`;
 
         try {
           const n = new Notification(title, {
@@ -1437,6 +1530,9 @@
     APP.lastLoad = Date.now();
 
     try {
+      const factions = await gmRequest("GET", "/api/banker/factions");
+      APP.factions = Array.isArray(factions.items) ? factions.items : [];
+
       const me = await gmRequest("GET", "/api/banker/me");
       APP.me = me;
 
