@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -23,6 +24,96 @@ BANKER_IDS = {
     for x in os.getenv("BANKER_IDS", "3679030").split(",")
     if x.strip()
 }
+
+
+def load_faction_bankers():
+    """
+    Reads FACTION_BANKERS from Render.
+
+    Format:
+    {"52040":{"name":"Sloth","bankers":["3679030"]},"49384":{"name":"Wrath","bankers":["3509957"]}}
+    """
+    raw = os.getenv("FACTION_BANKERS", "").strip()
+
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                cleaned = {}
+                for faction_id, info in data.items():
+                    fid = str(faction_id).strip()
+                    if not fid:
+                        continue
+
+                    if not isinstance(info, dict):
+                        info = {"name": str(info), "bankers": []}
+
+                    name = str(info.get("name") or fid).strip()
+                    bankers = [
+                        str(x).strip()
+                        for x in (info.get("bankers") or [])
+                        if str(x).strip()
+                    ]
+
+                    cleaned[fid] = {
+                        "name": name,
+                        "bankers": bankers,
+                    }
+
+                if cleaned:
+                    return cleaned
+        except Exception:
+            # Keep the app alive even if the env var is temporarily malformed.
+            pass
+
+    # Backwards-compatible fallback for older Render setup.
+    return {
+        "default": {
+            "name": "Default",
+            "bankers": sorted(BANKER_IDS),
+        }
+    }
+
+
+FACTION_BANKERS = load_faction_bankers()
+
+
+def all_configured_faction_ids():
+    return [fid for fid in FACTION_BANKERS.keys() if fid != "default"]
+
+
+def banker_factions_for_player(player_id):
+    pid = str(player_id).strip()
+
+    if pid == ADMIN_PLAYER_ID:
+        return all_configured_faction_ids()
+
+    allowed = []
+    for faction_id, info in FACTION_BANKERS.items():
+        if faction_id == "default":
+            continue
+
+        bankers = {str(x).strip() for x in info.get("bankers", []) if str(x).strip()}
+        if pid in bankers:
+            allowed.append(str(faction_id))
+
+    return allowed
+
+
+def faction_name_for_id(faction_id):
+    fid = str(faction_id).strip()
+    info = FACTION_BANKERS.get(fid) or {}
+    return str(info.get("name") or fid).strip()
+
+
+def public_factions():
+    return [
+        {
+            "faction_id": str(fid),
+            "faction_name": faction_name_for_id(fid),
+        }
+        for fid in all_configured_faction_ids()
+    ]
 
 
 def now_iso():
@@ -117,13 +208,21 @@ def torn_get_user(key):
     if not faction_id:
         return None, "You must be in a faction to use Faction Bankers"
 
+    banker_factions = banker_factions_for_player(player_id)
+
+    # Keep BANKER_IDS working as a legacy fallback if FACTION_BANKERS is not configured yet.
+    legacy_banker = player_id in BANKER_IDS or player_id == ADMIN_PLAYER_ID
+    if legacy_banker and not banker_factions and "default" in FACTION_BANKERS:
+        banker_factions = [faction_id]
+
     user = {
         "player_id": player_id,
         "name": name,
         "faction_id": faction_id,
         "faction_name": faction_name,
         "is_admin": player_id == ADMIN_PLAYER_ID,
-        "is_banker": player_id in BANKER_IDS or player_id == ADMIN_PLAYER_ID,
+        "is_banker": bool(banker_factions) or legacy_banker,
+        "banker_factions": banker_factions,
     }
 
     return user, None
@@ -198,6 +297,7 @@ def health():
                 "mode": "postgres",
                 "active_requests": active_count,
                 "banker_ids": sorted(BANKER_IDS),
+                "faction_bankers": public_factions(),
                 "admin_player_id": ADMIN_PLAYER_ID,
                 "time": now_iso(),
             }
@@ -210,6 +310,17 @@ def health():
 def static_files(filename):
     return send_from_directory("static", filename)
 
+
+
+@app.get("/api/banker/factions")
+def banker_factions():
+    return jsonify(
+        {
+            "ok": True,
+            "items": public_factions(),
+            "count": len(public_factions()),
+        }
+    )
 
 @app.get("/api/banker/me")
 def banker_me():
@@ -226,6 +337,8 @@ def banker_me():
             "faction_name": user["faction_name"],
             "is_admin": user["is_admin"],
             "is_banker": user["is_banker"],
+            "banker_factions": user.get("banker_factions", []),
+            "available_factions": public_factions(),
         }
     )
 
@@ -238,16 +351,40 @@ def list_requests():
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM banker_requests
-                WHERE faction_id = %s
-                  AND is_active = TRUE
-                ORDER BY created_ts DESC
-                """,
-                (user["faction_id"],),
-            )
+            if user["is_admin"]:
+                faction_ids = all_configured_faction_ids()
+                if not faction_ids:
+                    faction_ids = [user["faction_id"]]
+            elif user["is_banker"]:
+                faction_ids = user.get("banker_factions", []) or [user["faction_id"]]
+            else:
+                faction_ids = []
+
+            if faction_ids:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE is_active = TRUE
+                      AND (
+                        faction_id = ANY(%s)
+                        OR requester_id = %s
+                      )
+                    ORDER BY created_ts DESC
+                    """,
+                    (faction_ids, user["player_id"]),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE requester_id = %s
+                      AND is_active = TRUE
+                    ORDER BY created_ts DESC
+                    """,
+                    (user["player_id"],),
+                )
 
             rows = cur.fetchall()
 
@@ -272,6 +409,7 @@ def create_request():
 
     amount = data.get("amount", 0)
     note = str(data.get("note") or "").strip()
+    selected_faction_id = str(data.get("target_faction_id") or "").strip()
 
     try:
         amount = int(str(amount).replace(",", "").replace("$", "").strip())
@@ -283,6 +421,25 @@ def create_request():
 
     if len(note) > 500:
         note = note[:500]
+
+    configured = all_configured_faction_ids()
+
+    if configured:
+        if not selected_faction_id:
+            # If their own faction is configured, default to it. Otherwise force dropdown choice.
+            if user["faction_id"] in FACTION_BANKERS:
+                selected_faction_id = user["faction_id"]
+            else:
+                return jsonify({"ok": False, "error": "Choose a faction banker group"}), 400
+
+        if selected_faction_id not in FACTION_BANKERS:
+            return jsonify({"ok": False, "error": "Selected faction is not configured"}), 400
+
+        target_faction_id = selected_faction_id
+        target_faction_name = faction_name_for_id(selected_faction_id)
+    else:
+        target_faction_id = user["faction_id"]
+        target_faction_name = user["faction_name"]
 
     created_at = now_iso()
     created_ts = time.time()
@@ -312,8 +469,8 @@ def create_request():
                     note,
                     user["player_id"],
                     user["name"],
-                    user["faction_id"],
-                    user["faction_name"],
+                    target_faction_id,
+                    target_faction_name,
                     created_at,
                     created_ts,
                 ),
@@ -367,6 +524,11 @@ def banker_action(req_id, action):
     # Complete/denied requests are removed from active list.
     is_active = new_status not in {"complete", "denied"}
 
+    allowed_factions = all_configured_faction_ids() if user["is_admin"] else user.get("banker_factions", [])
+
+    if not allowed_factions:
+        return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -374,16 +536,16 @@ def banker_action(req_id, action):
                 SELECT *
                 FROM banker_requests
                 WHERE id = %s
-                  AND faction_id = %s
+                  AND faction_id = ANY(%s)
                   AND is_active = TRUE
                 """,
-                (req_id, user["faction_id"]),
+                (req_id, allowed_factions),
             )
 
             existing = cur.fetchone()
 
             if not existing:
-                return jsonify({"ok": False, "error": "Active request not found"}), 404
+                return jsonify({"ok": False, "error": "Active request not found for your banker faction"}), 404
 
             cur.execute(
                 """
@@ -434,15 +596,20 @@ def clear_completed():
     if not user["is_banker"]:
         return jsonify({"ok": False, "error": "Banker access required"}), 403
 
+    allowed_factions = all_configured_faction_ids() if user["is_admin"] else user.get("banker_factions", [])
+
+    if not allowed_factions:
+        return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 DELETE FROM banker_requests
-                WHERE faction_id = %s
+                WHERE faction_id = ANY(%s)
                   AND is_active = FALSE
                 """,
-                (user["faction_id"],),
+                (allowed_factions,),
             )
 
             removed = cur.rowcount
