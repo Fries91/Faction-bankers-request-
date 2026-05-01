@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.6.3
-// @description  Faction vault request app with faction dropdown, stable coin alert, and safer Render refresh handling.
+// @version      0.6.4
+// @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -19,6 +19,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
+  const FB_BUILD = "0.6.4-coin-only";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -749,7 +750,7 @@
       coin = document.createElement("button");
       coin.id = "fb-bank-coin-clean";
       coin.type = "button";
-      coin.title = "Faction Bankers";
+      coin.title = "Faction Bankers - tap to open";
       coin.textContent = "🪙";
       coin.setAttribute("data-count", "0");
       coin.addEventListener("click", openBankerBoard);
@@ -799,68 +800,13 @@
   }
 
   function mountBuiltInBankerBox() {
-    if (!isOwnFactionPage()) {
-      const oldBox = $("#fb-built-in-box");
-      if (oldBox) oldBox.remove();
-      return;
-    }
-    if ($("#fb-built-in-box")) {
-      const sel = $("#fb-built-faction");
-      if (sel && APP.factions?.length) {
-        const current = sel.value || GM_getValue(K_TARGET_FACTION, "");
-        sel.innerHTML = factionOptions(current);
-        sel.value = current;
-      }
-      return;
-    }
-
-    const box = document.createElement("div");
-    box.id = "fb-built-in-box";
-    box.innerHTML = `
-      <div class="fb-built-head">
-        <div>
-          <b>🪙 Faction Bankers</b>
-          <span id="fb-built-status">Request faction vault money</span>
-        </div>
-        <button id="fb-built-open" type="button">Open</button>
-      </div>
-
-      <div class="fb-built-grid">
-        <select id="fb-built-faction">
-          ${factionOptions()}
-        </select>
-        <input id="fb-built-amount" inputmode="numeric" placeholder="Amount needed">
-        <button id="fb-built-full" type="button">Request Full Balance</button>
-        <button id="fb-built-send" type="button">Request Amount</button>
-      </div>
-    `;
-
-    const tabBar =
-      document.querySelector(".faction-tabs") ||
-      document.querySelector("[class*='faction'] [class*='tabs']") ||
-      document.querySelector("[class*='tabs']");
-
-    if (tabBar && tabBar.parentElement) {
-      tabBar.parentElement.insertBefore(box, tabBar.nextSibling);
-    } else {
-      const mount = findFactionBuiltInMount();
-
-      const warBox = Array.from(mount.querySelectorAll("div")).find((el) =>
-        String(el.textContent || "").toLowerCase().includes("your faction is not in a war")
-      );
-
-      if (warBox?.parentElement) {
-        warBox.parentElement.insertBefore(box, warBox);
-      } else {
-        mount.insertBefore(box, mount.firstChild);
-      }
-    }
-
-    $("#fb-built-open")?.addEventListener("click", openOverlay);
-    $("#fb-built-faction")?.addEventListener("change", () => rememberFactionFromSelect("#fb-built-faction"));
-    $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
-    $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
+    // Removed from faction page for PDA performance.
+    // Coin-only launcher now opens the request overlay.
+    const oldBox = $("#fb-built-in-box");
+    if (oldBox) oldBox.remove();
+    return;
   }
+
 
   function ensureSetupButton() {
     if ($("#fb-setup-button")) return;
@@ -1628,7 +1574,6 @@
     ensureStyles();
     ensureSetupButton();
     mountCoin();
-    mountBuiltInBankerBox();
     ensureOverlay();
 
     APP.booted = true;
@@ -1639,8 +1584,7 @@
 
     setInterval(() => {
       mountCoin();
-      mountBuiltInBankerBox();
-
+  
       if (GM_getValue(K_API_KEY, "")) {
         refreshAll(false);
       }
@@ -1657,8 +1601,7 @@
       ensureStyles();
       ensureSetupButton();
       mountCoin();
-      mountBuiltInBankerBox();
-      ensureOverlay();
+        ensureOverlay();
     });
 
     obs.observe(document.documentElement || document.body, {
@@ -1681,8 +1624,7 @@
       setTimeout(() => {
         if (isTornPage()) {
           mountCoin();
-          mountBuiltInBankerBox();
-          refreshAll(true);
+                refreshAll(true);
         }
       }, 800);
     }
