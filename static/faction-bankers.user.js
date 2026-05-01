@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.6.1
+// @version      0.6.2
 // @description  Faction vault request app with header coin alert and built-in faction page request bar.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -32,9 +32,18 @@
   const K_TARGET_FACTION = "fb_target_faction_v1";
   const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
 
+  // PDA-safe fallback list.
+  // This lets the dropdown still work even if Render is waking up or the new /api/banker/factions endpoint is not live yet.
+  const DEFAULT_FACTIONS = [
+    { faction_id: "52040", faction_name: "Sloth" },
+    { faction_id: "20554", faction_name: "Pride" },
+    { faction_id: "8315", faction_name: "Greed" },
+    { faction_id: "49384", faction_name: "Wrath" },
+  ];
+
   const APP = {
     me: null,
-    factions: [],
+    factions: DEFAULT_FACTIONS.slice(),
     requests: [],
     pendingCount: 0,
     busy: false,
@@ -146,12 +155,15 @@
       }
 
       #fb-bank-coin-clean.fb-fixed-test {
+        display: inline-flex !important;
         position: fixed !important;
         right: 10px !important;
         bottom: 132px !important;
-        z-index: 99998 !important;
-        background: rgba(0,0,0,.72) !important;
-        border-color: rgba(255,211,106,.55) !important;
+        z-index: 100001 !important;
+        width: 36px !important;
+        height: 34px !important;
+        background: rgba(0,0,0,.78) !important;
+        border-color: rgba(255,211,106,.65) !important;
         box-shadow: 0 5px 16px rgba(0,0,0,.55) !important;
       }
 
@@ -337,7 +349,7 @@
         border-radius: 16px;
         box-shadow: 0 18px 50px rgba(0,0,0,.62);
         color: #eee;
-        z-index: 99999;
+        z-index: 100000;
         font-family: Arial, Helvetica, sans-serif;
       }
 
@@ -1005,11 +1017,7 @@
 
 
   function factionOptions(selected = GM_getValue(K_TARGET_FACTION, "")) {
-    const items = Array.isArray(APP.factions) ? APP.factions : [];
-
-    if (!items.length) {
-      return `<option value="">No factions loaded yet</option>`;
-    }
+    const items = Array.isArray(APP.factions) && APP.factions.length ? APP.factions : DEFAULT_FACTIONS;
 
     return [
       `<option value="">Choose faction banker group</option>`,
@@ -1510,8 +1518,17 @@
     APP.lastLoad = Date.now();
 
     try {
-      const factions = await gmRequest("GET", "/api/banker/factions");
-      APP.factions = Array.isArray(factions.items) ? factions.items : [];
+      // Keep dropdown usable even if the new factions endpoint is not deployed yet.
+      APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
+
+      try {
+        const factions = await gmRequest("GET", "/api/banker/factions");
+        if (Array.isArray(factions.items) && factions.items.length) {
+          APP.factions = factions.items;
+        }
+      } catch (factionErr) {
+        APP.factions = DEFAULT_FACTIONS.slice();
+      }
 
       const me = await gmRequest("GET", "/api/banker/me");
       APP.me = me;
@@ -1527,17 +1544,29 @@
 
       if (APP.open) renderBody(activeTab());
     } catch (err) {
+      APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
       setCoinAlert(0);
+      mountCoin();
 
       if (APP.open) {
         setBody(`
           <div class="fb-box">
             <div class="fb-error">${esc(err.message || err)}</div>
             <div class="fb-small" style="margin-top:8px;">
-              Check your API key and backend URL.
+              The app is open, but Render did not answer one of the API calls. Make sure app.py is deployed and the service is awake.
+            </div>
+            <div class="fb-row" style="margin-top:10px;">
+              <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
+              <button id="fb-open-settings2" class="fb-btn" type="button">Settings</button>
             </div>
           </div>
         `);
+
+        $("#fb-retry-network")?.addEventListener("click", () => refreshAll(true));
+        $("#fb-open-settings2")?.addEventListener("click", () => {
+          const settingsTab = document.querySelector('.fb-tab[data-tab="settings"]');
+          if (settingsTab) settingsTab.click();
+        });
       }
     }
   }
