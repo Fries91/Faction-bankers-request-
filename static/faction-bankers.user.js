@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.6.2
-// @description  Faction vault request app with header coin alert and built-in faction page request bar.
+// @version      0.6.3
+// @description  Faction vault request app with faction dropdown, stable coin alert, and safer Render refresh handling.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -50,6 +50,7 @@
     open: false,
     lastLoad: 0,
     booted: false,
+    refreshing: false,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -107,7 +108,7 @@
           "X-Torn-Key": GM_getValue(K_API_KEY, ""),
         },
         data: body ? JSON.stringify(body) : undefined,
-        timeout: 25000,
+        timeout: 45000,
         onload: (res) => {
           let data = {};
           try {
@@ -1432,6 +1433,20 @@
   }
 
 
+
+  function upsertRequestItem(item) {
+    if (!item || !item.id) return;
+
+    const id = String(item.id);
+    const list = Array.isArray(APP.requests) ? APP.requests.slice() : [];
+    const idx = list.findIndex((r) => String(r.id) === id);
+
+    if (idx >= 0) list[idx] = item;
+    else list.unshift(item);
+
+    APP.requests = list;
+  }
+
   function getSeenPendingIds() {
     try {
       const raw = GM_getValue(K_SEEN_PENDING, "[]");
@@ -1510,11 +1525,13 @@
     if (!key) {
       setCoinAlert(0);
       if (APP.open) renderSettings("Add your Torn API key first.");
-      return;
+      return false;
     }
 
-    if (!force && Date.now() - APP.lastLoad < 12000) return;
+    if (!force && Date.now() - APP.lastLoad < 12000) return true;
+    if (APP.refreshing) return true;
 
+    APP.refreshing = true;
     APP.lastLoad = Date.now();
 
     try {
@@ -1543,10 +1560,41 @@
       notifyBankerForNewPending(pendingItems);
 
       if (APP.open) renderBody(activeTab());
+      return true;
     } catch (err) {
       APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
-      setCoinAlert(0);
       mountCoin();
+
+      const subtitle = $("#fb-subtitle");
+      if (subtitle) {
+        subtitle.textContent = `Last refresh failed: ${String(err.message || err).slice(0, 60)}`;
+      }
+
+      // Do not wipe the current screen after a successful request.
+      // Render can briefly miss one API call while waking/redeploying; keeping the last good board is better on PDA.
+      if (APP.me) {
+        if (APP.open) {
+          const body = $("#fb-body");
+          if (body && !body.querySelector("#fb-soft-network-error")) {
+            body.insertAdjacentHTML("afterbegin", `
+              <div id="fb-soft-network-error" class="fb-box">
+                <div class="fb-error">Refresh missed Render once. Your request may still be saved.</div>
+                <div class="fb-row" style="margin-top:8px;">
+                  <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
+                </div>
+              </div>
+            `);
+            $("#fb-retry-network")?.addEventListener("click", () => {
+              const box = $("#fb-soft-network-error");
+              if (box) box.remove();
+              refreshAll(true);
+            });
+          }
+        }
+        return false;
+      }
+
+      setCoinAlert(0);
 
       if (APP.open) {
         setBody(`
@@ -1568,6 +1616,9 @@
           if (settingsTab) settingsTab.click();
         });
       }
+      return false;
+    } finally {
+      APP.refreshing = false;
     }
   }
 
