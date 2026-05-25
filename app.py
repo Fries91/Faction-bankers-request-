@@ -326,10 +326,6 @@ def row_to_item(row):
     }
 
 
-@app.before_request
-def before_request():
-    init_db()
-
 
 @app.get("/")
 def home():
@@ -482,6 +478,7 @@ def list_requests():
 
 @app.post("/api/banker/requests")
 def create_request():
+    init_db()
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -575,6 +572,7 @@ def create_request():
 
 @app.post("/api/banker/requests/<int:req_id>/<action>")
 def banker_action(req_id, action):
+    init_db()
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -674,6 +672,7 @@ def banker_action(req_id, action):
 
 @app.post("/api/banker/clear-completed")
 def clear_completed():
+    init_db()
     user, resp, code = require_user()
     if resp:
         return resp, code
