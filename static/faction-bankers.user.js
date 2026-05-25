@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.5
+// @version      0.7.6
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.5-factional-banking-fries-phone";
+  const FB_BUILD = "0.7.6-profile-coin-only-faction-row";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -935,112 +935,64 @@
   }
 
   function mountCoin() {
-    // On profile pages, use the small coin beside ABSP/BSP instead of the global floating coin.
-    if (isProfilePage()) {
-      const existing = $("#fb-bank-coin-clean");
-      if (existing) existing.remove();
-      document.querySelectorAll("#fb-bank-coin").forEach((oldCoin) => {
-        oldCoin.style.display = "none";
-        oldCoin.remove();
-      });
-      return;
-    }
-
-    document.querySelectorAll("#fb-bank-coin").forEach((oldCoin) => {
+    // No global floating coin. The user only wants:
+    // 1) quick request box inside the own faction page
+    // 2) small coin beside ABSP/BSP on profile pages for settings/login
+    document.querySelectorAll("#fb-bank-coin, #fb-bank-coin-clean").forEach((oldCoin) => {
       oldCoin.style.display = "none";
       oldCoin.remove();
     });
-
-    let coin = $("#fb-bank-coin-clean");
-
-    if (!coin) {
-      coin = document.createElement("button");
-      coin.id = "fb-bank-coin-clean";
-      coin.type = "button";
-      coin.title = "Faction Bankers - tap to open";
-      coin.textContent = "🪙";
-      coin.setAttribute("data-count", "0");
-      coin.addEventListener("click", openBankerBoard);
-    }
-
-    // PDA-safe: keep the coin on the page no matter how Torn rebuilds the header.
-    // It sits below the overlay z-index, so the overlay covers it when open.
-    coin.classList.remove("fb-fixed-header");
-    coin.classList.add("fb-fixed-test", "fb-banker-visible");
-
-    if (coin.parentElement !== document.body) {
-      document.body.appendChild(coin);
-    }
   }
 
   function findFactionBuiltInMount() {
     if (!isOwnFactionPage()) return null;
 
-    // Best PDA placement: under the faction icon controls row, right above the first faction panel
-    // (usually "YOUR FACTION IS NOT IN A WAR", war panel, or chain panel).
-    const anchors = Array.from(document.querySelectorAll("div, section, article, main"));
+    // Strict PDA placement: only mount after the real faction icon/control row.
+    // Do NOT fallback to <main> or body, because that puts the box in Home/header area.
+    const all = Array.from(document.querySelectorAll("div, section, article, ul, nav"));
 
-    const warPanel = anchors.find((el) => {
-      const txt = getCleanText(el).toLowerCase();
+    const factionHeaders = Array.from(document.querySelectorAll("div, h1, h2, h3, span, strong"))
+      .filter((el) => {
+        const txt = getCleanText(el).toLowerCase();
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width < 40 || rect.height < 14) return false;
+        if (rect.top < 250) return false;
+        return txt === "faction";
+      })
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+
+    const headerTop = factionHeaders.length ? factionHeaders[0].getBoundingClientRect().top : 0;
+
+    const iconRows = all.filter((el) => {
       const rect = el.getBoundingClientRect();
-      return rect.width > 260 && (
-        txt.includes("your faction is not in a war") ||
-        txt.includes("no active chain") ||
-        txt.includes("faction announcement") ||
-        txt.includes("rank:") && txt.includes("respect:")
-      );
-    });
+      if (!rect || rect.width < 280 || rect.height < 35 || rect.height > 95) return false;
+      if (headerTop && (rect.top < headerTop + 20 || rect.top > headerTop + 230)) return false;
+      if (!headerTop && rect.top < 300) return false;
 
-    if (warPanel && warPanel.parentElement) {
-      return {
-        parent: warPanel.parentElement,
-        before: warPanel,
-        mode: "before-war-panel",
-      };
-    }
-
-    // Second choice: find the icon/control row with the gear/gun/share icons and insert after it.
-    const iconRows = anchors.filter((el) => {
-      const rect = el.getBoundingClientRect();
-      if (!rect || rect.width < 260 || rect.height < 35 || rect.height > 95) return false;
-      const txt = getCleanText(el).toLowerCase();
       const kids = Array.from(el.children || []);
       const iconishKids = kids.filter((k) => {
         const r = k.getBoundingClientRect();
-        return r.width >= 25 && r.width <= 95 && r.height >= 25 && r.height <= 95;
+        if (!r) return false;
+        return r.width >= 28 && r.width <= 120 && r.height >= 28 && r.height <= 95;
       }).length;
+
+      const txt = getCleanText(el).toLowerCase();
       const hay = [txt, el.className, el.id].map((v) => String(v || "").toLowerCase()).join(" ");
-      return iconishKids >= 5 || hay.includes("controls") || hay.includes("tabs") || hay.includes("faction-menu");
-    });
 
-    if (iconRows.length) {
-      iconRows.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-      const row = iconRows.find((el) => el.getBoundingClientRect().top > 120) || iconRows[0];
-      if (row && row.parentElement) {
-        return {
-          parent: row.parentElement,
-          after: row,
-          mode: "after-icon-row",
-        };
-      }
+      // The Torn faction controls row has many equal-size icon buttons, often near a gear/gun/share/trophy row.
+      return iconishKids >= 5 || hay.includes("controls") || hay.includes("faction-menu") || hay.includes("factiontabs");
+    }).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+
+    const row = iconRows[0];
+    if (row && row.parentElement) {
+      return {
+        parent: row.parentElement,
+        after: row,
+        mode: "strict-after-faction-icons",
+      };
     }
 
-    // Last safe fallback: inside the faction page content, not above the Torn resource bars.
-    const candidates = [
-      "#factions",
-      ".factions-wrap",
-      ".faction-page",
-      ".content-wrapper",
-      ".content",
-      "main",
-    ];
-
-    for (const sel of candidates) {
-      const el = document.querySelector(sel);
-      if (el) return { parent: el, prepend: true, mode: "fallback" };
-    }
-
-    return { parent: document.body, prepend: true, mode: "body-fallback" };
+    return null;
   }
 
   function profileIconHay(el) {
@@ -1173,7 +1125,10 @@
 
     const mountInfo = findFactionBuiltInMount();
     const mount = mountInfo?.parent || mountInfo;
-    if (!mount || !document.body.contains(mount)) return;
+    if (!mount || !document.body.contains(mount)) {
+      if (oldBox) oldBox.remove();
+      return;
+    }
 
     let box = oldBox;
     const selectedFaction = GM_getValue(K_TARGET_FACTION, "");
