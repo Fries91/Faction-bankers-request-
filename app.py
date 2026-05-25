@@ -238,6 +238,75 @@ def require_user():
     return user, None, None
 
 
+def public_base_url():
+    return os.getenv("PUBLIC_BASE_URL", "https://faction-bankers-request.onrender.com").rstrip("/")
+
+
+def pushover_configured():
+    return bool(os.getenv("PUSHOVER_USER_KEY", "").strip() and os.getenv("PUSHOVER_API_TOKEN", "").strip())
+
+
+def send_pushover_alert(title, message, url=None):
+    """Send direct phone ping through Pushover.
+
+    Render env vars needed:
+    PUSHOVER_USER_KEY=your personal Pushover user key
+    PUSHOVER_API_TOKEN=your Pushover application token
+    """
+    user_key = os.getenv("PUSHOVER_USER_KEY", "").strip()
+    api_token = os.getenv("PUSHOVER_API_TOKEN", "").strip()
+
+    if not user_key or not api_token:
+        print("Pushover not configured")
+        return False
+
+    payload = {
+        "token": api_token,
+        "user": user_key,
+        "title": str(title)[:250],
+        "message": str(message)[:1024],
+        "priority": 1,
+    }
+
+    if url:
+        payload["url"] = str(url)[:512]
+        payload["url_title"] = "Open Bank Request"
+
+    try:
+        response = requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data=payload,
+            timeout=10,
+        )
+        print("Pushover:", response.status_code, response.text[:300])
+        return response.ok
+    except Exception as e:
+        print("Pushover error:", e)
+        return False
+
+
+def send_bank_request_ping(item):
+    if not item:
+        return False
+
+    is_full_balance = str(item.get("note") or "") == "__FULL_BALANCE_REQUEST__"
+    amount_text = "Full Balance" if is_full_balance else f"${int(item.get('amount') or 0):,}"
+    request_url = f"{public_base_url()}/?request={item.get('id')}"
+
+    message = (
+        f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
+        f"Amount: {amount_text}\n"
+        f"Faction: {item.get('faction_name')}\n"
+        f"Request ID: #{item.get('id')}"
+    )
+
+    return send_pushover_alert(
+        "🪙 New Torn Bank Request",
+        message,
+        request_url,
+    )
+
+
 def row_to_item(row):
     return {
         "id": row["id"],
@@ -299,11 +368,23 @@ def health():
                 "banker_ids": sorted(BANKER_IDS),
                 "faction_bankers": public_factions(),
                 "admin_player_id": ADMIN_PLAYER_ID,
+                "pushover_configured": pushover_configured(),
+                "public_base_url": public_base_url(),
                 "time": now_iso(),
             }
         )
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.get("/api/test-pushover")
+def test_pushover():
+    ok = send_pushover_alert(
+        "🪙 Test Bank Ping",
+        "Your Faction Bankers Pushover phone alert is working.",
+        f"{public_base_url()}/",
+    )
+    return jsonify({"ok": ok, "pushover_configured": pushover_configured()})
 
 
 @app.get("/static/<path:filename>")
@@ -480,10 +561,14 @@ def create_request():
 
         conn.commit()
 
+    item = row_to_item(row)
+    ping_sent = send_bank_request_ping(item)
+
     return jsonify(
         {
             "ok": True,
-            "item": row_to_item(row),
+            "item": item,
+            "pushover_sent": ping_sent,
         }
     )
 
