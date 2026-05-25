@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.2
+// @version      0.7.3
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.2-profile-absp-settings-coin";
+  const FB_BUILD = "0.7.3-wide-faction-request-bar";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -259,18 +259,22 @@
       }
 
       #fb-built-in-box {
-        width: calc(100% - 18px);
-        box-sizing: border-box;
-        margin: 8px auto 10px auto;
-        padding: 8px;
-        border-radius: 10px;
-        border: 1px solid rgba(255, 211, 106, .35);
-        background: linear-gradient(180deg, rgba(25,25,25,.96), rgba(8,8,8,.96));
-        box-shadow: 0 4px 14px rgba(0,0,0,.45);
-        color: #eee;
-        position: relative;
-        z-index: 15;
-        font-family: Arial, Helvetica, sans-serif;
+        width: calc(100vw - 18px) !important;
+        max-width: 760px !important;
+        box-sizing: border-box !important;
+        margin: 6px auto 8px auto !important;
+        padding: 7px 8px !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(255, 211, 106, .40) !important;
+        background: linear-gradient(180deg, rgba(20,20,20,.97), rgba(7,7,7,.97)) !important;
+        box-shadow: 0 4px 14px rgba(0,0,0,.48) !important;
+        color: #eee !important;
+        position: relative !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        z-index: 15 !important;
+        font-family: Arial, Helvetica, sans-serif !important;
+        clear: both !important;
       }
 
       #fb-built-in-box.fb-built-alert {
@@ -283,14 +287,15 @@
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        margin-bottom: 7px;
+        margin-bottom: 6px;
       }
 
       .fb-built-head b {
         display: block;
         color: #ffd36a;
-        font-size: 13px;
+        font-size: 12px;
         line-height: 1.1;
+        letter-spacing: .2px;
       }
 
       .fb-built-head span {
@@ -298,6 +303,10 @@
         color: #aaa;
         font-size: 10px;
         margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 72vw;
       }
 
       #fb-built-open {
@@ -313,8 +322,13 @@
 
       .fb-built-grid {
         display: grid;
-        grid-template-columns: 1fr;
+        grid-template-columns: 1fr 1fr;
         gap: 6px;
+        align-items: center;
+      }
+
+      #fb-built-bankers {
+        grid-column: 1 / -1;
       }
 
       #fb-built-amount,
@@ -643,6 +657,35 @@
         margin-top: 8px;
       }
 
+      #fb-built-bankers .fb-bankers-list {
+        display: flex;
+        gap: 5px;
+        margin-top: 0;
+        overflow-x: auto;
+        padding-bottom: 1px;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      #fb-built-bankers .fb-banker-line {
+        min-width: 116px;
+        max-width: 156px;
+        padding: 5px 6px;
+        border-radius: 9px;
+        flex: 0 0 auto;
+      }
+
+      #fb-built-bankers .fb-banker-line .fb-pill,
+      #fb-built-bankers .fb-banker-line .fb-small + .fb-small {
+        display: none;
+      }
+
+      #fb-built-bankers .fb-banker-main .fb-small {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 10px;
+      }
+
       .fb-banker-line {
         display: flex;
         align-items: center;
@@ -760,8 +803,13 @@
 
         .fb-built-grid {
         display: grid;
-        grid-template-columns: 1fr;
+        grid-template-columns: 1fr 1fr;
         gap: 6px;
+        align-items: center;
+      }
+
+      #fb-built-bankers {
+        grid-column: 1 / -1;
       }
 
         #fb-built-amount,
@@ -1065,10 +1113,10 @@
     box.innerHTML = `
       <div class="fb-built-head">
         <div>
-          <b>🪙 Faction Bank Request</b>
-          <span id="fb-built-status">Request cash from a banker without leaving the faction tab.</span>
+          <b>🪙 Fries Bank Request <span style="color:#8dffac;">[pings right to phone]</span></b>
+          <span id="fb-built-status">Choose faction, banker, amount — send.</span>
         </div>
-        <button id="fb-built-open" type="button">Open</button>
+        <button id="fb-built-open" type="button">Board</button>
       </div>
 
       <div class="fb-built-grid">
@@ -1351,7 +1399,7 @@
   function bankerStatusPanel() {
     const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
     if (!bankers.length) {
-      return `<div class="fb-small" style="margin-top:8px;">No banker status loaded yet. Tap Refresh after choosing a faction.</div>`;
+      return `<div class="fb-small" style="margin-top:8px;">Banker status loading…</div>`;
     }
 
     return `
