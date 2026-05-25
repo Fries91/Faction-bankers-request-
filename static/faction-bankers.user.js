@@ -6,6 +6,8 @@
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
+// @updateURL    https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
+// @downloadURL  https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
