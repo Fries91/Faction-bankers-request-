@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.0
+// @version      0.7.2
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.0-pushover-pay-prefill";
+  const FB_BUILD = "0.7.2-profile-absp-settings-coin";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -100,6 +100,10 @@
     if (type.includes("profile")) return false;
 
     return true;
+  }
+
+  function isProfilePage() {
+    return location.href.includes("profiles.php") || location.href.includes("/profiles.php");
   }
 
   function gmRequest(method, path, body) {
@@ -216,6 +220,40 @@
         line-height: 13px;
         text-align: center;
         box-shadow: 0 1px 3px rgba(0,0,0,.65);
+      }
+
+      #fb-profile-bank-coin {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        margin: 0 4px !important;
+        border: 1px solid rgba(255,211,106,.55) !important;
+        border-radius: 8px !important;
+        background: rgba(0,0,0,.45) !important;
+        color: #ffd36a !important;
+        font-size: 17px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,.38) !important;
+        vertical-align: middle !important;
+        position: relative !important;
+        z-index: 30 !important;
+      }
+
+      #fb-profile-bank-coin:hover {
+        border-color: rgba(255,211,106,.9) !important;
+        filter: brightness(1.08) !important;
+      }
+
+      #fb-profile-bank-coin.fb-profile-fallback {
+        position: fixed !important;
+        right: 52px !important;
+        bottom: 132px !important;
+        z-index: 100001 !important;
+        background: rgba(0,0,0,.78) !important;
       }
 
       #fb-built-in-box {
@@ -633,7 +671,41 @@
           padding: 10px;
         }
 
-        #fb-built-in-box {
+        #fb-profile-bank-coin {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        margin: 0 4px !important;
+        border: 1px solid rgba(255,211,106,.55) !important;
+        border-radius: 8px !important;
+        background: rgba(0,0,0,.45) !important;
+        color: #ffd36a !important;
+        font-size: 17px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,.38) !important;
+        vertical-align: middle !important;
+        position: relative !important;
+        z-index: 30 !important;
+      }
+
+      #fb-profile-bank-coin:hover {
+        border-color: rgba(255,211,106,.9) !important;
+        filter: brightness(1.08) !important;
+      }
+
+      #fb-profile-bank-coin.fb-profile-fallback {
+        position: fixed !important;
+        right: 52px !important;
+        bottom: 132px !important;
+        z-index: 100001 !important;
+        background: rgba(0,0,0,.78) !important;
+      }
+
+      #fb-built-in-box {
           width: calc(100% - 8px);
           margin: 6px auto 8px auto;
           padding: 7px;
@@ -819,12 +891,164 @@
     return document.body;
   }
 
+  function findAbspProfileIconTarget() {
+    if (!isProfilePage()) return null;
+
+    const nodes = Array.from(document.querySelectorAll("a, button, div, span, img"));
+
+    // Best target: ABSP/BSP icons usually expose text, title, alt, aria-label, href, src, or class names.
+    const exact = nodes.find((el) => {
+      if (el.id === "fb-profile-bank-coin") return false;
+      const hay = [
+        el.textContent,
+        el.getAttribute("title"),
+        el.getAttribute("alt"),
+        el.getAttribute("aria-label"),
+        el.getAttribute("href"),
+        el.getAttribute("src"),
+        el.id,
+        el.className,
+      ].map((v) => String(v || "").toLowerCase()).join(" ");
+
+      return hay.includes("absp") || hay.includes("bsp") || hay.includes("battle stat") || hay.includes("stat predictor") || hay.includes("battle stats");
+    });
+
+    if (exact) return exact;
+
+    // Fallback: profile top/name/icon area, so the coin still appears on profiles even if ABSP loads late.
+    const selectors = [
+      ".profile-wrapper",
+      ".profile-container",
+      ".profile-info",
+      ".profile-header",
+      ".basic-information",
+      ".profile-name",
+      ".content-title",
+      "main",
+    ];
+
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.getBoundingClientRect().width > 120) return el;
+    }
+
+    return document.body;
+  }
+
+  function mountProfileBankCoin() {
+    let coin = $("#fb-profile-bank-coin");
+
+    if (!isProfilePage()) {
+      if (coin) coin.remove();
+      return;
+    }
+
+    const target = findAbspProfileIconTarget();
+    if (!target) return;
+
+    if (!coin) {
+      coin = document.createElement("button");
+      coin.id = "fb-profile-bank-coin";
+      coin.type = "button";
+      coin.textContent = "🪙";
+      coin.title = "Faction Bankers settings / login";
+      coin.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openBankerSettings();
+      });
+    }
+
+    const isAbspTarget = (() => {
+      const hay = [
+        target.textContent,
+        target.getAttribute?.("title"),
+        target.getAttribute?.("alt"),
+        target.getAttribute?.("aria-label"),
+        target.getAttribute?.("href"),
+        target.getAttribute?.("src"),
+        target.id,
+        target.className,
+      ].map((v) => String(v || "").toLowerCase()).join(" ");
+      return hay.includes("absp") || hay.includes("bsp") || hay.includes("battle stat") || hay.includes("stat predictor") || hay.includes("battle stats");
+    })();
+
+    coin.classList.toggle("fb-profile-fallback", !isAbspTarget && target === document.body);
+
+    if (isAbspTarget && target.parentElement) {
+      if (coin.parentElement !== target.parentElement || coin.previousElementSibling !== target) {
+        target.insertAdjacentElement("afterend", coin);
+      }
+      return;
+    }
+
+    if (target !== document.body) {
+      coin.classList.remove("fb-profile-fallback");
+      if (coin.parentElement !== target) target.prepend(coin);
+      return;
+    }
+
+    coin.classList.add("fb-profile-fallback");
+    if (coin.parentElement !== document.body) document.body.appendChild(coin);
+  }
+
   function mountBuiltInBankerBox() {
-    // Removed from faction page for PDA performance.
-    // Coin-only launcher now opens the request overlay.
     const oldBox = $("#fb-built-in-box");
-    if (oldBox) oldBox.remove();
-    return;
+
+    // Only show the quick request box on your own faction page.
+    // Keep it off profiles/other faction pages so it does not clutter the rest of Torn.
+    if (!isOwnFactionPage()) {
+      if (oldBox) oldBox.remove();
+      return;
+    }
+
+    const mount = findFactionBuiltInMount();
+    if (!mount || !document.body.contains(mount)) return;
+
+    let box = oldBox;
+    const selectedFaction = GM_getValue(K_TARGET_FACTION, "");
+
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "fb-built-in-box";
+      box.setAttribute("data-fb-built", "1");
+    }
+
+    box.innerHTML = `
+      <div class="fb-built-head">
+        <div>
+          <b>🪙 Faction Bank Request</b>
+          <span id="fb-built-status">Request cash from a banker without leaving the faction tab.</span>
+        </div>
+        <button id="fb-built-open" type="button">Open</button>
+      </div>
+
+      <div class="fb-built-grid">
+        <select id="fb-built-faction" aria-label="Faction banker group">
+          ${factionOptions(selectedFaction)}
+        </select>
+        <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
+        <button id="fb-built-send" type="button">Send Request</button>
+        <button id="fb-built-full" type="button">Request Full Balance</button>
+      </div>
+    `;
+
+    // Put the request box right under the faction header/control area.
+    if (box.parentElement !== mount) {
+      const firstGoodChild = Array.from(mount.children || []).find((el) => el.id !== "fb-built-in-box");
+      if (firstGoodChild && mount !== document.body) {
+        mount.insertBefore(box, firstGoodChild.nextSibling);
+      } else {
+        mount.prepend(box);
+      }
+    }
+
+    $("#fb-built-open")?.addEventListener("click", openOverlay);
+    $("#fb-built-faction")?.addEventListener("change", () => rememberFactionFromSelect("#fb-built-faction"));
+    $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
+    $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
+
+    setCoinAlert(APP.pendingCount || 0);
   }
 
 
@@ -915,6 +1139,15 @@
     setTimeout(() => {
       const tabName = GM_getValue(K_API_KEY, "") ? "banker" : "settings";
       const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+      if (tab) tab.click();
+    }, 150);
+  }
+
+  function openBankerSettings() {
+    openOverlay();
+
+    setTimeout(() => {
+      const tab = document.querySelector('.fb-tab[data-tab="settings"]');
       if (tab) tab.click();
     }, 150);
   }
@@ -1805,6 +2038,8 @@
     ensureStyles();
     ensureSetupButton();
     mountCoin();
+    mountProfileBankCoin();
+    mountBuiltInBankerBox();
     ensureOverlay();
     setTimeout(tryPrefillFactionBankForm, 800);
     setTimeout(tryPrefillFactionBankForm, 2200);
@@ -1818,6 +2053,8 @@
 
     setInterval(() => {
       mountCoin();
+      mountProfileBankCoin();
+      mountBuiltInBankerBox();
   
       tryPrefillFactionBankForm();
 
@@ -1837,6 +2074,8 @@
       ensureStyles();
       ensureSetupButton();
       mountCoin();
+      mountProfileBankCoin();
+      mountBuiltInBankerBox();
         ensureOverlay();
     });
 
@@ -1860,6 +2099,8 @@
       setTimeout(() => {
         if (isTornPage()) {
           mountCoin();
+          mountProfileBankCoin();
+          mountBuiltInBankerBox();
           tryPrefillFactionBankForm();
                 refreshAll(true);
         }
