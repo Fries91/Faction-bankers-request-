@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.6-profile-coin-only-faction-row";
+  const FB_BUILD = "0.7.7-pda-nofreeze";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -51,12 +51,16 @@
     requests: [],
     bankers: [],
     bankerFactionId: "",
+    bankerStatusError: "",
     pendingCount: 0,
     busy: false,
     open: false,
     lastLoad: 0,
     booted: false,
     refreshing: false,
+    lastBuiltSig: "",
+    lastMountRun: 0,
+    lastProfileMountRun: 0,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -1126,7 +1130,9 @@
     const mountInfo = findFactionBuiltInMount();
     const mount = mountInfo?.parent || mountInfo;
     if (!mount || !document.body.contains(mount)) {
-      if (oldBox) oldBox.remove();
+      // PDA can briefly hide/rebuild the faction icon row while scrolling or refreshing.
+      // If our box is already mounted, keep it instead of removing it and making it disappear.
+      if (oldBox && document.body.contains(oldBox)) return;
       return;
     }
 
@@ -1136,7 +1142,8 @@
     const userIsTyping = !!(box && activeEl && box.contains(activeEl) && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(activeEl.tagName));
     const renderSig = JSON.stringify({
       f: (APP.factions || []).map((x) => [String(x.faction_id || ""), String(x.faction_name || "")]),
-      b: (APP.bankerStatus || []).map((x) => [String(x.player_id || ""), String(x.name || ""), String(x.bucket || x.status_color || ""), String(x.status_text || x.status || "")]),
+      b: (APP.bankers || []).map((x) => [String(x.player_id || ""), String(x.name || ""), String(x.bucket || x.status_color || x.color || ""), String(x.status_text || x.status || x.label || "")]),
+      err: APP.bankerStatusError || "",
       sf: selectedFaction,
     });
 
@@ -1413,6 +1420,7 @@
     if (!fid || !GM_getValue(K_API_KEY, "")) {
       APP.bankers = [];
       APP.bankerFactionId = "";
+      APP.bankerStatusError = "Save API key, then refresh banker status.";
       return false;
     }
 
@@ -1420,10 +1428,23 @@
       const res = await gmRequest("GET", `/api/banker/status?faction_id=${encodeURIComponent(fid)}`);
       APP.bankers = Array.isArray(res.items) ? res.items : [];
       APP.bankerFactionId = fid;
+      APP.bankerStatusError = APP.bankers.length ? "" : "No bankers returned by Render for this faction.";
       return true;
     } catch (err) {
-      APP.bankers = [];
+      // Keep the last good list so the request box does not flicker/disappear on PDA.
       APP.bankerFactionId = fid;
+      APP.bankerStatusError = String(err?.message || err || "Banker status failed");
+      if (!APP.bankers.length) {
+        APP.bankers = [{
+          player_id: "3679030",
+          name: "Fries91",
+          status: "unknown",
+          color: "gray",
+          label: "Status unavailable",
+          details: APP.bankerStatusError,
+          is_available: false,
+        }];
+      }
       return false;
     }
   }
@@ -1458,7 +1479,8 @@
   function bankerStatusPanel() {
     const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
     if (!bankers.length) {
-      return `<div class="fb-small" style="margin-top:8px;">Banker status loading…</div>`;
+      const msg = APP.bankerStatusError || "Banker status loading…";
+      return `<div class="fb-small" style="margin-top:8px;">${esc(msg)}</div>`;
     }
 
     return `
