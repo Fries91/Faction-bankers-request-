@@ -49,6 +49,8 @@
     me: null,
     factions: DEFAULT_FACTIONS.slice(),
     requests: [],
+    bankers: [],
+    bankerFactionId: "",
     pendingCount: 0,
     busy: false,
     open: false,
@@ -317,6 +319,7 @@
 
       #fb-built-amount,
       #fb-built-faction,
+      #fb-built-banker,
       #fb-built-note {
         min-width: 0;
         border: 1px solid rgba(255,255,255,.16);
@@ -632,6 +635,50 @@
         box-shadow: 0 8px 24px rgba(0,0,0,.55);
       }
 
+
+      .fb-bankers-list {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 6px;
+        margin-top: 8px;
+      }
+
+      .fb-banker-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 7px 8px;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,.10);
+        background: rgba(0,0,0,.24);
+      }
+
+      .fb-banker-main {
+        min-width: 0;
+      }
+
+      .fb-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+        background: #888;
+        box-shadow: 0 0 6px rgba(255,255,255,.25);
+      }
+
+      .fb-dot.green { background: #36d86f; box-shadow: 0 0 8px rgba(54,216,111,.75); }
+      .fb-dot.orange { background: #ffac38; box-shadow: 0 0 8px rgba(255,172,56,.65); }
+      .fb-dot.yellow { background: #ffd33d; box-shadow: 0 0 8px rgba(255,211,61,.65); }
+      .fb-dot.blue { background: #55a9ff; box-shadow: 0 0 8px rgba(85,169,255,.65); }
+      .fb-dot.red { background: #ff4d4d; box-shadow: 0 0 8px rgba(255,77,77,.65); }
+      .fb-dot.gray { background: #8b8b8b; }
+
+      .fb-banker-select {
+        margin-top: 8px;
+      }
+
       @media (max-width: 520px) {
   
       #fb-setup-button {
@@ -719,6 +766,7 @@
 
         #fb-built-amount,
         #fb-built-faction,
+        #fb-built-banker,
         #fb-built-send {
           width: 100%;
           box-sizing: border-box;
@@ -1027,6 +1075,10 @@
         <select id="fb-built-faction" aria-label="Faction banker group">
           ${factionOptions(selectedFaction)}
         </select>
+        <select id="fb-built-banker" aria-label="Choose available banker">
+          ${bankerOptions()}
+        </select>
+        <div id="fb-built-bankers">${bankerStatusPanel()}</div>
         <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
         <button id="fb-built-send" type="button">Send Request</button>
         <button id="fb-built-full" type="button">Request Full Balance</button>
@@ -1044,7 +1096,7 @@
     }
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
-    $("#fb-built-faction")?.addEventListener("change", () => rememberFactionFromSelect("#fb-built-faction"));
+    $("#fb-built-faction")?.addEventListener("change", () => handleFactionChangeAndReload("#fb-built-faction", false));
     $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
     $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
 
@@ -1250,6 +1302,80 @@
     return found?.faction_name || id;
   }
 
+  function currentTargetFactionId() {
+    return (
+      $("#fb-target-faction")?.value ||
+      $("#fb-built-faction")?.value ||
+      GM_getValue(K_TARGET_FACTION, "") ||
+      APP.me?.faction_id ||
+      ""
+    );
+  }
+
+  async function loadBankerStatus(factionId = currentTargetFactionId()) {
+    const fid = String(factionId || "").trim();
+    if (!fid || !GM_getValue(K_API_KEY, "")) {
+      APP.bankers = [];
+      APP.bankerFactionId = "";
+      return false;
+    }
+
+    try {
+      const res = await gmRequest("GET", `/api/banker/status?faction_id=${encodeURIComponent(fid)}`);
+      APP.bankers = Array.isArray(res.items) ? res.items : [];
+      APP.bankerFactionId = fid;
+      return true;
+    } catch (err) {
+      APP.bankers = [];
+      APP.bankerFactionId = fid;
+      return false;
+    }
+  }
+
+  function bankerOptions(selected = "") {
+    const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
+    const options = [`<option value="">Any available banker</option>`];
+
+    for (const b of bankers) {
+      const id = String(b.player_id || "");
+      const name = String(b.name || id);
+      const label = String(b.label || "Unknown");
+      const details = String(b.details || "");
+      const available = b.is_available ? "🟢" : (b.color === "yellow" || b.color === "blue" ? "🟡" : "🔴");
+      options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${details ? ` (${esc(details).slice(0, 42)})` : ""}</option>`);
+    }
+
+    return options.join("");
+  }
+
+  function bankerStatusPanel() {
+    const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
+    if (!bankers.length) {
+      return `<div class="fb-small" style="margin-top:8px;">No banker status loaded yet. Tap Refresh after choosing a faction.</div>`;
+    }
+
+    return `
+      <div class="fb-bankers-list">
+        ${bankers.map((b) => `
+          <div class="fb-banker-line">
+            <div class="fb-banker-main">
+              <div class="fb-small"><span class="fb-dot ${esc(b.color || "gray")}"></span><b style="color:#fff;">${esc(b.name || b.player_id)}</b> ${esc(b.label || "Unknown")}</div>
+              <div class="fb-small">${esc(b.details || "")}</div>
+            </div>
+            <span class="fb-pill ${b.is_available ? "approved" : "pending"}">${b.is_available ? "Available" : "Not now"}</span>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  async function handleFactionChangeAndReload(selectId, rerender = true) {
+    const val = rememberFactionFromSelect(selectId);
+    await loadBankerStatus(val);
+    if (rerender && APP.open) renderBody(activeTab());
+    mountBuiltInBankerBox();
+  }
+
   function renderBody(tab = activeTab()) {
     if (!GM_getValue(K_API_KEY, "")) {
       renderSettings("Add your Torn API key first.");
@@ -1287,6 +1413,12 @@
           ${factionOptions()}
         </select>
 
+        <label class="fb-label" style="margin-top:10px;">Choose banker now</label>
+        <select id="fb-target-banker" class="fb-input fb-banker-select">
+          ${bankerOptions()}
+        </select>
+        ${bankerStatusPanel()}
+
         <label class="fb-label" style="margin-top:10px;">Amount requested</label>
         <input id="fb-amount" class="fb-input" inputmode="numeric" placeholder="Example: 25000000">
 
@@ -1305,7 +1437,7 @@
       </div>
     `);
 
-    $("#fb-target-faction")?.addEventListener("change", () => rememberFactionFromSelect("#fb-target-faction"));
+    $("#fb-target-faction")?.addEventListener("change", () => handleFactionChangeAndReload("#fb-target-faction"));
     $("#fb-submit-request")?.addEventListener("click", submitRequest);
     $("#fb-full-request")?.addEventListener("click", submitFullBalanceRequest);
     $("#fb-refresh")?.addEventListener("click", () => refreshAll(true));
@@ -1371,6 +1503,7 @@
           </div>
           <button id="fb-refresh-banker" class="fb-btn" type="button">Refresh</button>
         </div>
+        ${bankerStatusPanel()}
       </div>
       ${cards}
     `);
@@ -1593,6 +1726,9 @@
     const requester = esc(r.requester_name || `User ${r.requester_id || ""}`);
     const targetFaction = esc(r.faction_name || factionLabelById(r.faction_id) || "Faction");
     const handledBy = r.handled_by_name ? `<div class="fb-small">Handled by: ${esc(r.handled_by_name)}</div>` : "";
+    const preferredBanker = r.selected_banker_name || r.selected_banker_id
+      ? `<div class="fb-small">Preferred banker: ${esc(r.selected_banker_name || r.selected_banker_id)}</div>`
+      : `<div class="fb-small">Preferred banker: Any available banker</div>`;
 
     let actions = "";
 
@@ -1631,6 +1767,7 @@
 
         ${String(r.note || "") === FULL_BALANCE_NOTE ? `<div class="fb-request-note">Full balance requested.</div>` : ""}
 
+        ${preferredBanker}
         ${handledBy}
         ${r.bank_note ? `<div class="fb-small">Bank note: ${esc(r.bank_note)}</div>` : ""}
 
@@ -1694,6 +1831,7 @@
 
     const status = $("#fb-built-status");
     const targetFactionId = selectedFactionFromPage();
+    const targetBankerId = $("#fb-target-banker")?.value || $("#fb-built-banker")?.value || "";
 
     if (!GM_getValue(K_API_KEY, "")) {
       if (status) status.textContent = "Save your API key in settings first";
@@ -1715,6 +1853,7 @@
         amount: 1,
         note: FULL_BALANCE_NOTE,
         target_faction_id: targetFactionId,
+        target_banker_id: targetBankerId,
       });
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
@@ -1741,6 +1880,7 @@
     const amount = Number(amountRaw);
     const note = "";
     const targetFactionId = $("#fb-built-faction")?.value || "";
+    const targetBankerId = $("#fb-built-banker")?.value || "";
     const status = $("#fb-built-status");
 
     if (!GM_getValue(K_API_KEY, "")) {
@@ -1767,6 +1907,7 @@
         amount,
         note,
         target_faction_id: targetFactionId,
+        target_banker_id: targetBankerId,
       });
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
@@ -1786,6 +1927,7 @@
     const amount = Number(amountRaw);
     const note = "";
     const targetFactionId = $("#fb-target-faction")?.value || "";
+    const targetBankerId = $("#fb-target-banker")?.value || "";
 
     if (!targetFactionId) {
       renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
@@ -1805,6 +1947,7 @@
         amount,
         note,
         target_faction_id: targetFactionId,
+        target_banker_id: targetBankerId,
       });
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
@@ -1962,6 +2105,8 @@
 
       const list = await gmRequest("GET", "/api/banker/requests");
       APP.requests = Array.isArray(list.items) ? list.items : [];
+
+      await loadBankerStatus(currentTargetFactionId());
 
       const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
       const pending = pendingItems.length;
