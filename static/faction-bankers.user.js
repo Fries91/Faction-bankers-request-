@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.6.4
+// @version      0.7.0
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.6.4-coin-only";
+  const FB_BUILD = "0.7.0-pushover-pay-prefill";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -31,6 +31,7 @@
   const K_OPEN = "fb_overlay_open_v1";
   const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
   const K_TARGET_FACTION = "fb_target_faction_v1";
+  const K_PAY_PREFILL = "fb_pay_prefill_v1";
   const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
 
   // PDA-safe fallback list.
@@ -572,6 +573,23 @@
         color: #ddd;
         line-height: 1.35;
         white-space: pre-wrap;
+      }
+
+      .fb-pay-notice {
+        position: fixed;
+        left: 8px;
+        right: 8px;
+        bottom: 12px;
+        z-index: 100002;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,211,106,.55);
+        background: rgba(10,10,10,.94);
+        color: #ffd36a;
+        font-size: 12px;
+        font-weight: 900;
+        text-align: center;
+        box-shadow: 0 8px 24px rgba(0,0,0,.55);
       }
 
       @media (max-width: 520px) {
@@ -1127,6 +1145,208 @@
     $$("[data-fb-action]").forEach((btn) => {
       btn.addEventListener("click", () => bankerAction(btn.dataset.id, btn.dataset.fbAction));
     });
+
+    $$("[data-fb-pay]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (btn.dataset.fbPay === "approve-open") approveAndOpenBank(btn.dataset.id);
+        else openSavedRequestInBank(btn.dataset.id);
+      });
+    });
+  }
+
+
+  function normalizedPayAmount(r) {
+    if (!r || String(r.note || "") === FULL_BALANCE_NOTE) return "";
+    const amount = Number(r.amount || 0);
+    return Number.isFinite(amount) && amount > 0 ? String(Math.floor(amount)) : "";
+  }
+
+  function showPayNotice(text) {
+    let notice = document.querySelector("#fb-pay-prefill-notice");
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.id = "fb-pay-prefill-notice";
+      notice.className = "fb-pay-notice";
+      document.body.appendChild(notice);
+    }
+    notice.textContent = text;
+    clearTimeout(showPayNotice._timer);
+    showPayNotice._timer = setTimeout(() => notice.remove(), 7000);
+  }
+
+  function savePayPrefill(r) {
+    if (!r) return false;
+    const payload = {
+      requestId: String(r.id || ""),
+      playerId: String(r.requester_id || ""),
+      playerName: String(r.requester_name || ""),
+      amount: normalizedPayAmount(r),
+      factionName: String(r.faction_name || ""),
+      savedAt: Date.now(),
+    };
+    GM_setValue(K_PAY_PREFILL, JSON.stringify(payload));
+    try {
+      localStorage.setItem(K_PAY_PREFILL, JSON.stringify(payload));
+    } catch {
+      // PDA can block localStorage in some modes; GM storage is enough.
+    }
+    return true;
+  }
+
+  function getPayPrefill() {
+    let raw = GM_getValue(K_PAY_PREFILL, "");
+    if (!raw) {
+      try { raw = localStorage.getItem(K_PAY_PREFILL) || ""; } catch { raw = ""; }
+    }
+    if (!raw) return null;
+    try {
+      const data = JSON.parse(raw);
+      if (!data || !data.playerId) return null;
+      if (Date.now() - Number(data.savedAt || 0) > 20 * 60 * 1000) {
+        clearPayPrefill();
+        return null;
+      }
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearPayPrefill() {
+    GM_setValue(K_PAY_PREFILL, "");
+    try { localStorage.removeItem(K_PAY_PREFILL); } catch {}
+  }
+
+  function openBankingPageForRequest(r) {
+    if (!r) return;
+    savePayPrefill(r);
+    showPayNotice("Opening Torn faction bank. Player and amount will auto-fill when the bank form loads. You still manually press Give Money.");
+    window.location.href = "https://www.torn.com/factions.php?step=your#/tab=controls";
+  }
+
+  function setNativeValue(input, value) {
+    if (!input) return false;
+    const proto = Object.getPrototypeOf(input);
+    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    if (descriptor && descriptor.set) descriptor.set.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "0" }));
+    return true;
+  }
+
+  function visibleInput(el) {
+    if (!el || el.disabled || el.readOnly) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 30 && rect.height > 12;
+  }
+
+  function scoreInputFor(input, kind) {
+    const s = [
+      input.id,
+      input.name,
+      input.placeholder,
+      input.getAttribute("aria-label"),
+      input.className,
+      input.closest("div")?.textContent,
+    ].map((v) => String(v || "").toLowerCase()).join(" ");
+
+    if (kind === "player") {
+      return (s.includes("player") ? 40 : 0) +
+        (s.includes("user") ? 25 : 0) +
+        (s.includes("member") ? 25 : 0) +
+        (s.includes("recipient") ? 35 : 0) +
+        (s.includes("name") ? 15 : 0) +
+        (s.includes("id") ? 10 : 0) -
+        (s.includes("amount") || s.includes("money") || s.includes("cash") ? 50 : 0);
+    }
+
+    return (s.includes("amount") ? 45 : 0) +
+      (s.includes("money") ? 30 : 0) +
+      (s.includes("cash") ? 30 : 0) +
+      (s.includes("give") ? 18 : 0) +
+      (input.inputMode === "numeric" ? 15 : 0) +
+      (input.type === "number" || input.type === "tel" ? 20 : 0) -
+      (s.includes("player") || s.includes("user") || s.includes("member") ? 45 : 0);
+  }
+
+  function bestInput(kind) {
+    const inputs = Array.from(document.querySelectorAll("input, textarea"))
+      .filter(visibleInput)
+      .filter((el) => !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
+
+    const scored = inputs.map((el) => ({ el, score: scoreInputFor(el, kind) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.el || null;
+  }
+
+  function clickTextButton(words) {
+    const wanted = words.map((w) => String(w).toLowerCase());
+    const nodes = Array.from(document.querySelectorAll("button, a, div, span, li"));
+    const found = nodes.find((el) => {
+      const text = getCleanText(el).toLowerCase();
+      if (!text || text.length > 60) return false;
+      return wanted.some((w) => text === w || text.includes(w));
+    });
+    if (found) {
+      try { found.click(); } catch {}
+      return true;
+    }
+    return false;
+  }
+
+  function tryPrefillFactionBankForm() {
+    if (!isFactionPage()) return;
+    const data = getPayPrefill();
+    if (!data) return;
+
+    // Try to expose the controls/banking form if Torn has it hidden behind tabs.
+    clickTextButton(["controls", "bank", "give money", "vault"]);
+
+    const playerInput = bestInput("player");
+    const amountInput = bestInput("amount");
+    let filled = false;
+
+    if (playerInput) {
+      filled = setNativeValue(playerInput, `${data.playerName} [${data.playerId}]`) || filled;
+    }
+
+    if (amountInput && data.amount) {
+      filled = setNativeValue(amountInput, String(data.amount)) || filled;
+    }
+
+    if (filled) {
+      showPayNotice(`Bank prefill ready for ${data.playerName} [${data.playerId}]${data.amount ? ` — $${Number(data.amount).toLocaleString()}` : " — Full Balance request"}. Manually press Give Money.`);
+    }
+  }
+
+  function openSavedRequestInBank(id) {
+    const r = APP.requests.find((x) => String(x.id) === String(id));
+    if (!r) return;
+    openBankingPageForRequest(r);
+  }
+
+  async function approveAndOpenBank(id) {
+    if (APP.busy || !id) return;
+    const r = APP.requests.find((x) => String(x.id) === String(id));
+    if (!r) return;
+
+    APP.busy = true;
+    try {
+      await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/approve`, { note: "" });
+      openBankingPageForRequest(r);
+    } catch (err) {
+      setBody(`
+        <div class="fb-box">
+          <div class="fb-error">${esc(err.message || err)}</div>
+        </div>
+      `);
+    } finally {
+      APP.busy = false;
+    }
   }
 
   function requestCard(r) {
@@ -1145,7 +1365,8 @@
       actions = `
         <div class="fb-row" style="margin-top:10px;">
           <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
-          <button class="fb-btn green" data-id="${id}" data-fb-action="approve" type="button">Approve</button>
+          <button class="fb-btn gold" data-id="${id}" data-fb-pay="approve-open" type="button">Approve + Open Bank</button>
+          <button class="fb-btn green" data-id="${id}" data-fb-action="approve" type="button">Approve Only</button>
           <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
           <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
         </div>
@@ -1156,6 +1377,7 @@
       actions = `
         <div class="fb-row" style="margin-top:10px;">
           <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
+          <button class="fb-btn gold" data-id="${id}" data-fb-pay="open" type="button">Open Bank Page</button>
           <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
           <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
         </div>
@@ -1203,6 +1425,13 @@
           <button id="fb-save-key" class="fb-btn gold" type="button">Save Key</button>
           <button id="fb-test-login" class="fb-btn" type="button">Test Login</button>
           <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable In-App Ping</button>
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">Phone Pushover Ping</div>
+        <div class="fb-small" style="margin-top:6px;">
+          Your phone ping is sent by Render when a request is created. Add these Render env vars: PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN. Test with /api/test-pushover.
         </div>
       </div>
 
@@ -1575,6 +1804,9 @@
     ensureSetupButton();
     mountCoin();
     ensureOverlay();
+    setTimeout(tryPrefillFactionBankForm, 800);
+    setTimeout(tryPrefillFactionBankForm, 2200);
+    setTimeout(tryPrefillFactionBankForm, 4500);
 
     APP.booted = true;
 
@@ -1585,6 +1817,8 @@
     setInterval(() => {
       mountCoin();
   
+      tryPrefillFactionBankForm();
+
       if (GM_getValue(K_API_KEY, "")) {
         refreshAll(false);
       }
@@ -1624,6 +1858,7 @@
       setTimeout(() => {
         if (isTornPage()) {
           mountCoin();
+          tryPrefillFactionBankForm();
                 refreshAll(true);
         }
       }, 800);
