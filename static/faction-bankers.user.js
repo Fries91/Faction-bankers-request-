@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.6
+// @version      0.7.7
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -1132,13 +1132,28 @@
 
     let box = oldBox;
     const selectedFaction = GM_getValue(K_TARGET_FACTION, "");
+    const activeEl = document.activeElement;
+    const userIsTyping = !!(box && activeEl && box.contains(activeEl) && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(activeEl.tagName));
+    const renderSig = JSON.stringify({
+      f: (APP.factions || []).map((x) => [String(x.faction_id || ""), String(x.faction_name || "")]),
+      b: (APP.bankerStatus || []).map((x) => [String(x.player_id || ""), String(x.name || ""), String(x.bucket || x.status_color || ""), String(x.status_text || x.status || "")]),
+      sf: selectedFaction,
+    });
 
     if (!box) {
       box = document.createElement("div");
       box.id = "fb-built-in-box";
       box.setAttribute("data-fb-built", "1");
+    } else if (box.dataset.sig === renderSig || userIsTyping) {
+      // PDA-safe: do not rebuild while the user is tapping/typing.
+      // Rebuilding the DOM during Torn/PDA mutations was causing freezes and blocked clicks.
+      if (mountInfo?.after && document.body.contains(mountInfo.after) && box.previousElementSibling !== mountInfo.after) {
+        mountInfo.after.insertAdjacentElement("afterend", box);
+      }
+      return;
     }
 
+    box.dataset.sig = renderSig;
     box.innerHTML = `
       <div class="fb-built-head">
         <div>
@@ -2269,57 +2284,91 @@
     }
   }
 
-  function boot() {
+  function clearBankerUiOnWrongPage() {
+    if (!isOwnFactionPage()) {
+      const box = document.querySelector("#fb-built-in-box");
+      if (box) box.remove();
+    }
+
+    if (!isProfilePage()) {
+      const profileCoin = document.querySelector("#fb-profile-bank-coin");
+      if (profileCoin) profileCoin.remove();
+    }
+
+    // Never allow the old floating coin to remain on normal pages.
+    document.querySelectorAll("#fb-bank-coin, #fb-bank-coin-clean").forEach((el) => el.remove());
+  }
+
+  let mountTimer = null;
+  let mountTries = 0;
+
+  function pageMount(reason = "manual") {
     if (!isTornPage()) return;
 
     ensureStyles();
-    ensureSetupButton();
-    mountCoin();
-    mountProfileBankCoin();
-    mountBuiltInBankerBox();
-    ensureOverlay();
-    setTimeout(tryPrefillFactionBankForm, 800);
-    setTimeout(tryPrefillFactionBankForm, 2200);
-    setTimeout(tryPrefillFactionBankForm, 4500);
+    clearBankerUiOnWrongPage();
+
+    // Only create the overlay when the user opens the app or already had it open.
+    if (GM_getValue(K_OPEN, false) || APP.open) ensureOverlay();
+
+    if (isOwnFactionPage()) {
+      mountBuiltInBankerBox();
+
+      // Load data for faction dropdown/status once, but do not spam PDA.
+      if (GM_getValue(K_API_KEY, "") && (Date.now() - APP.lastLoad > 45000 || reason === "url")) {
+        refreshAll(false);
+      }
+    }
+
+    if (isProfilePage()) {
+      mountProfileBankCoin();
+    }
+  }
+
+  function scheduleMount(reason = "scheduled") {
+    clearTimeout(mountTimer);
+    mountTimer = setTimeout(() => pageMount(reason), 450);
+  }
+
+  function boot() {
+    if (!isTornPage() || APP.booted) return;
+
+    ensureStyles();
+    clearBankerUiOnWrongPage();
 
     APP.booted = true;
 
     if (GM_getValue(K_OPEN, false)) openOverlay();
 
-    setTimeout(() => refreshAll(true), 1800);
+    pageMount("boot");
 
+    // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
+    mountTries = 0;
+    const limitedRetry = setInterval(() => {
+      mountTries += 1;
+      pageMount("limited-retry");
+      if (mountTries >= 8) clearInterval(limitedRetry);
+    }, 1600);
+
+    // Very light refresh only on pages where the app is visible/open.
     setInterval(() => {
-      mountCoin();
-      mountProfileBankCoin();
-      mountBuiltInBankerBox();
-  
-      tryPrefillFactionBankForm();
+      if (!isTornPage()) return;
+      clearBankerUiOnWrongPage();
 
-      if (GM_getValue(K_API_KEY, "")) {
+      const usefulPage = APP.open || isOwnFactionPage() || isProfilePage();
+      if (!usefulPage) return;
+
+      pageMount("slow");
+
+      if (GM_getValue(K_API_KEY, "") && (APP.open || isOwnFactionPage()) && Date.now() - APP.lastLoad > 90000) {
         refreshAll(false);
       }
-    }, 15000);
+    }, 30000);
   }
 
   function startWhenReady() {
     if (!isTornPage()) return;
-
     boot();
-
-    const obs = new MutationObserver(() => {
-      if (!isTornPage()) return;
-      ensureStyles();
-      ensureSetupButton();
-      mountCoin();
-      mountProfileBankCoin();
-      mountBuiltInBankerBox();
-        ensureOverlay();
-    });
-
-    obs.observe(document.documentElement || document.body, {
-      childList: true,
-      subtree: true,
-    });
   }
 
   if (document.readyState === "loading") {
@@ -2332,16 +2381,16 @@
   setInterval(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
-
-      setTimeout(() => {
-        if (isTornPage()) {
-          mountCoin();
-          mountProfileBankCoin();
-          mountBuiltInBankerBox();
-          tryPrefillFactionBankForm();
-                refreshAll(true);
-        }
-      }, 800);
+      mountTries = 0;
+      scheduleMount("url");
+      setTimeout(() => pageMount("url-retry-1"), 1600);
+      setTimeout(() => pageMount("url-retry-2"), 3400);
     }
-  }, 1000);
+  }, 2500);
+
+  // Prefill only on faction banking page and only a few times. This prevents PDA freezing.
+  if (isFactionPage()) {
+    setTimeout(tryPrefillFactionBankForm, 1000);
+    setTimeout(tryPrefillFactionBankForm, 2600);
+  }
 })();
