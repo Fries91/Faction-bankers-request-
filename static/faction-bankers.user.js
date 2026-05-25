@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.3
+// @version      0.7.5
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.3-wide-faction-request-bar";
+  const FB_BUILD = "0.7.5-factional-banking-fries-phone";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -251,18 +251,22 @@
       }
 
       #fb-profile-bank-coin.fb-profile-fallback {
-        position: fixed !important;
-        right: 52px !important;
-        bottom: 132px !important;
-        z-index: 100001 !important;
-        background: rgba(0,0,0,.78) !important;
+        display: none !important;
+      }
+
+      .fb-bsp-coin-slot {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-left: 4px !important;
+        vertical-align: middle !important;
       }
 
       #fb-built-in-box {
-        width: calc(100vw - 18px) !important;
-        max-width: 760px !important;
+        width: calc(100% - 14px) !important;
+        max-width: 680px !important;
         box-sizing: border-box !important;
-        margin: 6px auto 8px auto !important;
+        margin: 7px auto 9px auto !important;
         padding: 7px 8px !important;
         border-radius: 12px !important;
         border: 1px solid rgba(255, 211, 106, .40) !important;
@@ -788,11 +792,15 @@
       }
 
       #fb-profile-bank-coin.fb-profile-fallback {
-        position: fixed !important;
-        right: 52px !important;
-        bottom: 132px !important;
-        z-index: 100001 !important;
-        background: rgba(0,0,0,.78) !important;
+        display: none !important;
+      }
+
+      .fb-bsp-coin-slot {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-left: 4px !important;
+        vertical-align: middle !important;
       }
 
       #fb-built-in-box {
@@ -927,6 +935,17 @@
   }
 
   function mountCoin() {
+    // On profile pages, use the small coin beside ABSP/BSP instead of the global floating coin.
+    if (isProfilePage()) {
+      const existing = $("#fb-bank-coin-clean");
+      if (existing) existing.remove();
+      document.querySelectorAll("#fb-bank-coin").forEach((oldCoin) => {
+        oldCoin.style.display = "none";
+        oldCoin.remove();
+      });
+      return;
+    }
+
     document.querySelectorAll("#fb-bank-coin").forEach((oldCoin) => {
       oldCoin.style.display = "none";
       oldCoin.remove();
@@ -955,22 +974,59 @@
   }
 
   function findFactionBuiltInMount() {
-    const exactFactionHeader = Array.from(document.querySelectorAll("div, h1, h2, h3, span"))
-      .find((el) => String(el.textContent || "").trim().toLowerCase() === "faction");
+    if (!isOwnFactionPage()) return null;
 
-    if (exactFactionHeader) {
-      let p = exactFactionHeader.parentElement;
-      for (let i = 0; i < 4 && p; i += 1) {
-        if (p.offsetWidth > 250) return p;
-        p = p.parentElement;
+    // Best PDA placement: under the faction icon controls row, right above the first faction panel
+    // (usually "YOUR FACTION IS NOT IN A WAR", war panel, or chain panel).
+    const anchors = Array.from(document.querySelectorAll("div, section, article, main"));
+
+    const warPanel = anchors.find((el) => {
+      const txt = getCleanText(el).toLowerCase();
+      const rect = el.getBoundingClientRect();
+      return rect.width > 260 && (
+        txt.includes("your faction is not in a war") ||
+        txt.includes("no active chain") ||
+        txt.includes("faction announcement") ||
+        txt.includes("rank:") && txt.includes("respect:")
+      );
+    });
+
+    if (warPanel && warPanel.parentElement) {
+      return {
+        parent: warPanel.parentElement,
+        before: warPanel,
+        mode: "before-war-panel",
+      };
+    }
+
+    // Second choice: find the icon/control row with the gear/gun/share icons and insert after it.
+    const iconRows = anchors.filter((el) => {
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width < 260 || rect.height < 35 || rect.height > 95) return false;
+      const txt = getCleanText(el).toLowerCase();
+      const kids = Array.from(el.children || []);
+      const iconishKids = kids.filter((k) => {
+        const r = k.getBoundingClientRect();
+        return r.width >= 25 && r.width <= 95 && r.height >= 25 && r.height <= 95;
+      }).length;
+      const hay = [txt, el.className, el.id].map((v) => String(v || "").toLowerCase()).join(" ");
+      return iconishKids >= 5 || hay.includes("controls") || hay.includes("tabs") || hay.includes("faction-menu");
+    });
+
+    if (iconRows.length) {
+      iconRows.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      const row = iconRows.find((el) => el.getBoundingClientRect().top > 120) || iconRows[0];
+      if (row && row.parentElement) {
+        return {
+          parent: row.parentElement,
+          after: row,
+          mode: "after-icon-row",
+        };
       }
     }
 
+    // Last safe fallback: inside the faction page content, not above the Torn resource bars.
     const candidates = [
-      ".faction-info-wrap",
-      ".faction-info",
-      ".faction-tabs",
-      ".content-title",
       "#factions",
       ".factions-wrap",
       ".faction-page",
@@ -981,38 +1037,54 @@
 
     for (const sel of candidates) {
       const el = document.querySelector(sel);
-      if (el) return el;
+      if (el) return { parent: el, prepend: true, mode: "fallback" };
     }
 
-    return document.body;
+    return { parent: document.body, prepend: true, mode: "body-fallback" };
+  }
+
+  function profileIconHay(el) {
+    return [
+      el?.textContent,
+      el?.getAttribute?.("title"),
+      el?.getAttribute?.("alt"),
+      el?.getAttribute?.("aria-label"),
+      el?.getAttribute?.("href"),
+      el?.getAttribute?.("src"),
+      el?.id,
+      el?.className,
+    ].map((v) => String(v || "").toLowerCase()).join(" ");
+  }
+
+  function looksLikeBspIcon(el) {
+    if (!el || el.id === "fb-profile-bank-coin" || el.closest?.("#fb-profile-bank-coin")) return false;
+    const hay = profileIconHay(el);
+    return (
+      hay.includes("absp") ||
+      hay.includes("bsp") ||
+      hay.includes("battle stat") ||
+      hay.includes("battle-stats") ||
+      hay.includes("battlestat") ||
+      hay.includes("stat predictor") ||
+      hay.includes("stat-predictor") ||
+      hay.includes("battle stats") ||
+      hay.includes("bs-predict") ||
+      hay.includes("tornstats")
+    );
   }
 
   function findAbspProfileIconTarget() {
     if (!isProfilePage()) return null;
 
-    const nodes = Array.from(document.querySelectorAll("a, button, div, span, img"));
+    const nodes = Array.from(document.querySelectorAll("a, button, div, span, img, i, svg"));
 
-    // Best target: ABSP/BSP icons usually expose text, title, alt, aria-label, href, src, or class names.
-    const exact = nodes.find((el) => {
-      if (el.id === "fb-profile-bank-coin") return false;
-      const hay = [
-        el.textContent,
-        el.getAttribute("title"),
-        el.getAttribute("alt"),
-        el.getAttribute("aria-label"),
-        el.getAttribute("href"),
-        el.getAttribute("src"),
-        el.id,
-        el.className,
-      ].map((v) => String(v || "").toLowerCase()).join(" ");
+    // Best: real ABSP/BSP icon by title/class/href/src/text.
+    const exact = nodes.find(looksLikeBspIcon);
+    if (exact) return { target: exact, exact: true };
 
-      return hay.includes("absp") || hay.includes("bsp") || hay.includes("battle stat") || hay.includes("stat predictor") || hay.includes("battle stats");
-    });
-
-    if (exact) return exact;
-
-    // Fallback: profile top/name/icon area, so the coin still appears on profiles even if ABSP loads late.
-    const selectors = [
+    // Good fallback: on profile pages, many helper scripts create a compact icon cluster near the profile header.
+    // Pick a compact visible icon inside the profile header area and place our coin beside it.
+    const headerSelectors = [
       ".profile-wrapper",
       ".profile-container",
       ".profile-info",
@@ -1023,12 +1095,32 @@
       "main",
     ];
 
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el && el.getBoundingClientRect().width > 120) return el;
+    for (const sel of headerSelectors) {
+      const root = document.querySelector(sel);
+      if (!root) continue;
+
+      const icons = Array.from(root.querySelectorAll("a, button, img, span, div")).filter((el) => {
+        if (el.id === "fb-profile-bank-coin") return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width < 16 || rect.width > 70 || rect.height < 16 || rect.height > 70) return false;
+        if (rect.top < 60 || rect.top > 420) return false;
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || Number(cs.opacity || 1) === 0) return false;
+        return true;
+      });
+
+      if (icons.length) {
+        icons.sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return (ar.top - br.top) || (br.left - ar.left);
+        });
+        return { target: icons[0], exact: false };
+      }
     }
 
-    return document.body;
+    // Do not use a fixed floating fallback on profile pages; the user wants it beside BSP/ABSP only.
+    return null;
   }
 
   function mountProfileBankCoin() {
@@ -1039,8 +1131,13 @@
       return;
     }
 
-    const target = findAbspProfileIconTarget();
-    if (!target) return;
+    const found = findAbspProfileIconTarget();
+    if (!found || !found.target) {
+      if (coin) coin.remove();
+      return;
+    }
+
+    const target = found.target;
 
     if (!coin) {
       coin = document.createElement("button");
@@ -1055,37 +1152,13 @@
       });
     }
 
-    const isAbspTarget = (() => {
-      const hay = [
-        target.textContent,
-        target.getAttribute?.("title"),
-        target.getAttribute?.("alt"),
-        target.getAttribute?.("aria-label"),
-        target.getAttribute?.("href"),
-        target.getAttribute?.("src"),
-        target.id,
-        target.className,
-      ].map((v) => String(v || "").toLowerCase()).join(" ");
-      return hay.includes("absp") || hay.includes("bsp") || hay.includes("battle stat") || hay.includes("stat predictor") || hay.includes("battle stats");
-    })();
+    coin.classList.remove("fb-profile-fallback");
 
-    coin.classList.toggle("fb-profile-fallback", !isAbspTarget && target === document.body);
-
-    if (isAbspTarget && target.parentElement) {
+    if (target.parentElement) {
       if (coin.parentElement !== target.parentElement || coin.previousElementSibling !== target) {
         target.insertAdjacentElement("afterend", coin);
       }
-      return;
     }
-
-    if (target !== document.body) {
-      coin.classList.remove("fb-profile-fallback");
-      if (coin.parentElement !== target) target.prepend(coin);
-      return;
-    }
-
-    coin.classList.add("fb-profile-fallback");
-    if (coin.parentElement !== document.body) document.body.appendChild(coin);
   }
 
   function mountBuiltInBankerBox() {
@@ -1098,7 +1171,8 @@
       return;
     }
 
-    const mount = findFactionBuiltInMount();
+    const mountInfo = findFactionBuiltInMount();
+    const mount = mountInfo?.parent || mountInfo;
     if (!mount || !document.body.contains(mount)) return;
 
     let box = oldBox;
@@ -1113,7 +1187,7 @@
     box.innerHTML = `
       <div class="fb-built-head">
         <div>
-          <b>🪙 Fries Bank Request <span style="color:#8dffac;">[pings right to phone]</span></b>
+          <b>🪙 Factional Banking</b>
           <span id="fb-built-status">Choose faction, banker, amount — send.</span>
         </div>
         <button id="fb-built-open" type="button">Board</button>
@@ -1133,14 +1207,18 @@
       </div>
     `;
 
-    // Put the request box right under the faction header/control area.
-    if (box.parentElement !== mount) {
-      const firstGoodChild = Array.from(mount.children || []).find((el) => el.id !== "fb-built-in-box");
-      if (firstGoodChild && mount !== document.body) {
-        mount.insertBefore(box, firstGoodChild.nextSibling);
-      } else {
-        mount.prepend(box);
+    // Put the request box under the faction icon controls and above the faction panels.
+    if (mountInfo?.before && document.body.contains(mountInfo.before)) {
+      if (box.parentElement !== mount || box.nextElementSibling !== mountInfo.before) {
+        mount.insertBefore(box, mountInfo.before);
       }
+    } else if (mountInfo?.after && document.body.contains(mountInfo.after)) {
+      if (box.parentElement !== mount || box.previousElementSibling !== mountInfo.after) {
+        mountInfo.after.insertAdjacentElement("afterend", box);
+      }
+    } else if (box.parentElement !== mount) {
+      if (mountInfo?.prepend && mount.prepend) mount.prepend(box);
+      else mount.appendChild(box);
     }
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
@@ -1380,6 +1458,16 @@
     }
   }
 
+  function isFries91Banker(b) {
+    const id = String(b?.player_id || "").trim();
+    const name = String(b?.name || "").trim().toLowerCase();
+    return id === "3679030" || name === "fries91";
+  }
+
+  function friesPhoneText(b) {
+    return isFries91Banker(b) ? " • pings directly to phone" : "";
+  }
+
   function bankerOptions(selected = "") {
     const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
     const options = [`<option value="">Any available banker</option>`];
@@ -1390,7 +1478,8 @@
       const label = String(b.label || "Unknown");
       const details = String(b.details || "");
       const available = b.is_available ? "🟢" : (b.color === "yellow" || b.color === "blue" ? "🟡" : "🔴");
-      options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${details ? ` (${esc(details).slice(0, 42)})` : ""}</option>`);
+      const phoneText = friesPhoneText(b);
+      options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${phoneText}${details ? ` (${esc(details).slice(0, 42)})` : ""}</option>`);
     }
 
     return options.join("");
@@ -1407,7 +1496,7 @@
         ${bankers.map((b) => `
           <div class="fb-banker-line">
             <div class="fb-banker-main">
-              <div class="fb-small"><span class="fb-dot ${esc(b.color || "gray")}"></span><b style="color:#fff;">${esc(b.name || b.player_id)}</b> ${esc(b.label || "Unknown")}</div>
+              <div class="fb-small"><span class="fb-dot ${esc(b.color || "gray")}"></span><b style="color:#fff;">${esc(b.name || b.player_id)}</b> ${esc(b.label || "Unknown")}<span style="color:#8dffac;font-weight:900;">${esc(friesPhoneText(b))}</span></div>
               <div class="fb-small">${esc(b.details || "")}</div>
             </div>
             <span class="fb-pill ${b.is_available ? "approved" : "pending"}">${b.is_available ? "Available" : "Not now"}</span>
