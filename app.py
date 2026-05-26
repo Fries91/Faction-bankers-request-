@@ -92,11 +92,24 @@ FACTION_BANKERS = load_faction_bankers()
 BANKER_STATUS_CACHE = {}
 BANKER_STATUS_TTL = int(os.getenv("BANKER_STATUS_TTL", "45"))
 
+# Dynamic role mode: lets any faction use the app without hard-coded faction lists.
+# By default, members with a faction role/position named Banker/Treasurer/Leader/Co-leader are treated as bankers.
+# You can change this in Render with BANKER_ROLE_NAMES=Banker,Treasurer,Leader,Co-leader
+BANKER_ROLE_NAMES = {
+    x.strip().lower()
+    for x in os.getenv("BANKER_ROLE_NAMES", "Banker,Treasurer,Leader,Co-leader,Co Leader").replace(";", ",").split(",")
+    if x.strip()
+}
+FACTION_ROLE_BANKER_CACHE = {}
+FACTION_ROLE_BANKER_TTL = int(os.getenv("FACTION_ROLE_BANKER_TTL", "90"))
+
 # Safety fallback: if Render Postgres/DATABASE_URL is missing or broken,
 # requests still work in memory instead of crashing with HTML 500.
 # Memory requests reset when Render restarts, so Postgres is still recommended.
 MEMORY_REQUESTS = []
 MEMORY_NEXT_ID = 1
+MEMORY_MANUAL_BANKERS = {}  # faction_id -> list of manual banker dicts
+MEMORY_BANKER_ROLE_NAMES = {}  # faction_id -> list of role names leaders entered
 
 def is_hidden_banker_name_or_id(name_or_id):
     """Hide bankers the owner removed from the user-facing app.
@@ -109,6 +122,280 @@ def is_hidden_banker_name_or_id(name_or_id):
     hidden_ids = {x.strip().lower() for x in os.getenv("HIDDEN_BANKER_IDS", "").split(",") if x.strip()}
     hidden_names = {x.strip().lower() for x in os.getenv("HIDDEN_BANKER_NAMES", "pulsearts,pulse").split(",") if x.strip()}
     return value in hidden_ids or value in hidden_names or value.startswith("pulsearts")
+
+def clean_pushover_key(value):
+    return str(value or "").strip()[:128]
+
+def normalize_manual_banker(item):
+    if not isinstance(item, dict):
+        return None
+    bid = str(item.get("banker_id") or item.get("id") or item.get("player_id") or "").strip()
+    if not bid:
+        return None
+    name = str(item.get("banker_name") or item.get("name") or bid).strip()
+    return {
+        "id": bid,
+        "player_id": bid,
+        "name": name,
+        "banker_id": bid,
+        "banker_name": name,
+        "pushover_key": clean_pushover_key(item.get("pushover_key") or item.get("pushover") or ""),
+        "source": "leaders",
+    }
+
+def env_manual_bankers_for_faction(faction_id):
+    """Optional Render env fallback. Format:
+    MANUAL_BANKERS={"12345":[{"id":"3679030","name":"Fries91","pushover_key":"..."}]}
+    """
+    fid = str(faction_id or "").strip()
+    raw = os.getenv("MANUAL_BANKERS", "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        rows = data.get(fid) or data.get("default") or []
+        out = []
+        for row in rows:
+            norm = normalize_manual_banker(row)
+            if norm and not is_hidden_banker_name_or_id(norm.get("id")) and not is_hidden_banker_name_or_id(norm.get("name")):
+                out.append(norm)
+        return out
+    except Exception as e:
+        print("MANUAL_BANKERS env parse failed:", e)
+        return []
+
+def manual_bankers_for_faction(faction_id):
+    fid = str(faction_id or "").strip()
+    if not fid:
+        return []
+
+    # Memory fallback first when DB is unavailable.
+    mem = [x for x in MEMORY_MANUAL_BANKERS.get(fid, []) if not is_hidden_banker_name_or_id(x.get("id")) and not is_hidden_banker_name_or_id(x.get("name"))]
+
+    db_items = []
+    if DATABASE_URL:
+        try:
+            init_db()
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT banker_id, banker_name, pushover_key
+                        FROM faction_manual_bankers
+                        WHERE faction_id = %s AND is_active = TRUE
+                        ORDER BY banker_name ASC
+                        """,
+                        (fid,),
+                    )
+                    for row in cur.fetchall():
+                        norm = normalize_manual_banker(row)
+                        if norm and not is_hidden_banker_name_or_id(norm.get("id")) and not is_hidden_banker_name_or_id(norm.get("name")):
+                            db_items.append(norm)
+        except Exception as e:
+            print("Manual banker DB lookup failed; using memory/env:", e)
+
+    # Env fallback allows pre-seeding without UI.
+    env_items = env_manual_bankers_for_faction(fid)
+
+    seen = set()
+    out = []
+    for item in db_items + mem + env_items:
+        bid = str(item.get("id") or "").strip()
+        if bid and bid not in seen:
+            seen.add(bid)
+            out.append(item)
+    return out
+
+def manual_banker_ids_for_faction(faction_id):
+    return [str(x.get("id")) for x in manual_bankers_for_faction(faction_id) if x.get("id")]
+
+def manual_banker_name_for_id(faction_id, banker_id):
+    bid = str(banker_id or "").strip()
+    for item in manual_bankers_for_faction(faction_id):
+        if str(item.get("id")) == bid:
+            return str(item.get("name") or bid).strip()
+    return ""
+
+def manual_pushover_keys_for_request(item):
+    fid = str(item.get("faction_id") or "").strip()
+    selected = str(item.get("selected_banker_id") or "").strip()
+    rows = manual_bankers_for_faction(fid)
+    keys = []
+    for row in rows:
+        if selected and str(row.get("id")) != selected:
+            continue
+        k = clean_pushover_key(row.get("pushover_key"))
+        if k:
+            keys.append(k)
+    # If no selected banker key, ping every keyed manual banker.
+    if selected and not keys:
+        keys = [clean_pushover_key(x.get("pushover_key")) for x in rows if clean_pushover_key(x.get("pushover_key"))]
+    return list(dict.fromkeys(keys))
+
+def can_manage_leaders(user):
+    if not user:
+        return False
+    if user.get("is_admin"):
+        return True
+    # Allow current bankers/treasurers/leaders to open the Leaders tab and maintain their faction banker list.
+    # Factions can still restrict this by only giving the API key to leaders they trust.
+    return bool(user.get("is_banker"))
+
+
+def clean_role_name(value):
+    return str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+
+def banker_role_names_for_faction(faction_id):
+    """Return role names that should count as bankers for this faction.
+
+    Leaders can add these in the Leaders tab. If none are saved, the Render
+    BANKER_ROLE_NAMES env var is used as the default.
+    """
+    fid = str(faction_id or "").strip()
+    roles = []
+
+    # Memory fallback first.
+    for role in MEMORY_BANKER_ROLE_NAMES.get(fid, []):
+        role = str(role or "").strip()
+        if role and role not in roles:
+            roles.append(role)
+
+    # Database saved faction roles.
+    if DATABASE_URL:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT role_name
+                        FROM faction_banker_roles
+                        WHERE faction_id = %s
+                          AND is_active = TRUE
+                        ORDER BY role_name ASC
+                        """,
+                        (fid,),
+                    )
+                    for row in cur.fetchall():
+                        role = str(row.get("role_name") or "").strip()
+                        if role and role not in roles:
+                            roles.append(role)
+        except Exception as e:
+            print("Faction banker role DB lookup failed; using memory/env:", e)
+
+    if not roles:
+        roles = sorted(BANKER_ROLE_NAMES)
+
+    return roles
+
+
+def is_banker_role(value, faction_id=None):
+    role = clean_role_name(value)
+    if not role:
+        return False
+    allowed = banker_role_names_for_faction(faction_id) if faction_id else BANKER_ROLE_NAMES
+    return role in {clean_role_name(x) for x in allowed}
+
+def member_position(member):
+    if not isinstance(member, dict):
+        return ""
+    # Torn responses have varied over time/scripts; accept common role/position keys.
+    for key in ("position", "role", "rank", "title", "faction_position", "faction_role"):
+        val = member.get(key)
+        if val:
+            return str(val)
+    return ""
+
+def parse_faction_members_payload(data):
+    members = data.get("members") if isinstance(data, dict) else None
+    if isinstance(members, dict):
+        out = []
+        for mid, info in members.items():
+            info = info if isinstance(info, dict) else {}
+            item = dict(info)
+            item["player_id"] = str(item.get("player_id") or item.get("id") or mid).strip()
+            item["name"] = str(item.get("name") or item.get("player_name") or item.get("player_id") or mid).strip()
+            out.append(item)
+        return out
+    if isinstance(members, list):
+        out = []
+        for info in members:
+            if not isinstance(info, dict):
+                continue
+            item = dict(info)
+            item["player_id"] = str(item.get("player_id") or item.get("id") or item.get("xid") or "").strip()
+            item["name"] = str(item.get("name") or item.get("player_name") or item.get("player_id") or "").strip()
+            if item["player_id"]:
+                out.append(item)
+        return out
+    return []
+
+def torn_get_role_bankers(key, faction_id):
+    """Return bankers detected from the user's faction member roles.
+
+    This is what makes the app work for any faction: no fixed Wrath/Sloth/Greed/Pride list needed.
+    It looks for members whose faction position/role matches BANKER_ROLE_NAMES.
+    """
+    fid = str(faction_id or "").strip()
+    cache_key = f"rolebankers:{fid}:{key[-6:] if key else ''}"
+    cached = FACTION_ROLE_BANKER_CACHE.get(cache_key)
+    if cached and time.time() - cached.get("ts", 0) < FACTION_ROLE_BANKER_TTL:
+        return cached.get("items", [])
+
+    items = []
+    if key:
+        urls = []
+        if fid:
+            urls.append(f"{TORN_API_BASE}/faction/{fid}?selections=basic&key={key}")
+        urls.append(f"{TORN_API_BASE}/faction/?selections=basic&key={key}")
+
+        for url in urls:
+            try:
+                r = requests.get(url, timeout=REQUEST_TIMEOUT)
+                data = r.json()
+                if not isinstance(data, dict) or data.get("error"):
+                    continue
+                for member in parse_faction_members_payload(data):
+                    pos = member_position(member)
+                    if is_banker_role(pos, fid):
+                        pid = str(member.get("player_id") or "").strip()
+                        name = str(member.get("name") or pid).strip()
+                        if pid and not is_hidden_banker_name_or_id(pid) and not is_hidden_banker_name_or_id(name):
+                            items.append({"id": pid, "name": name, "role": pos})
+                if items:
+                    break
+            except Exception as e:
+                print("Role banker lookup failed:", e)
+
+    # Always include Fries91/admin safety fallback unless hidden.
+    if ADMIN_PLAYER_ID and not any(str(x.get("id")) == ADMIN_PLAYER_ID for x in items):
+        items.insert(0, {"id": ADMIN_PLAYER_ID, "name": "Fries91", "role": "Admin"})
+
+    # Keep unique by ID while preserving order.
+    seen = set()
+    unique = []
+    for item in items:
+        pid = str(item.get("id") or "").strip()
+        if pid and pid not in seen:
+            seen.add(pid)
+            unique.append(item)
+
+    FACTION_ROLE_BANKER_CACHE[cache_key] = {"ts": time.time(), "items": unique}
+    return unique
+
+def dynamic_banker_ids_for_faction(key, faction_id):
+    manual = manual_banker_ids_for_faction(faction_id)
+    role = [str(x.get("id")) for x in torn_get_role_bankers(key, faction_id) if x.get("id")]
+    return list(dict.fromkeys(manual + role))
+
+def dynamic_banker_name_for_id(key, faction_id, banker_id):
+    bid = str(banker_id or "").strip()
+    manual_name = manual_banker_name_for_id(faction_id, bid)
+    if manual_name:
+        return manual_name
+    for item in torn_get_role_bankers(key, faction_id):
+        if str(item.get("id")) == bid:
+            return str(item.get("name") or bid).strip()
+    return banker_name_from_config(faction_id, bid)
 
 
 def all_configured_faction_ids():
@@ -359,6 +646,38 @@ def init_db():
 
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS faction_manual_bankers (
+                    faction_id TEXT NOT NULL,
+                    faction_name TEXT NOT NULL DEFAULT '',
+                    banker_id TEXT NOT NULL,
+                    banker_name TEXT NOT NULL DEFAULT '',
+                    pushover_key TEXT NOT NULL DEFAULT '',
+                    added_by_id TEXT NOT NULL DEFAULT '',
+                    added_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    PRIMARY KEY (faction_id, banker_id)
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS faction_banker_roles (
+                    faction_id TEXT NOT NULL,
+                    faction_name TEXT NOT NULL DEFAULT '',
+                    role_name TEXT NOT NULL,
+                    added_by_id TEXT NOT NULL DEFAULT '',
+                    added_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    PRIMARY KEY (faction_id, role_name)
+                )
+                """
+            )
+
+            cur.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_banker_requests_faction_active
                 ON banker_requests (faction_id, is_active, created_ts DESC)
                 """
@@ -410,12 +729,15 @@ def torn_get_user(key):
     if not faction_id:
         return None, "You must be in a faction to use Faction Bankers"
 
-    banker_factions = banker_factions_for_player(player_id)
-
-    # Keep BANKER_IDS working as a legacy fallback if FACTION_BANKERS is not configured yet.
+    configured_banker_factions = banker_factions_for_player(player_id)
+    role_banker_ids = set(dynamic_banker_ids_for_faction(key, faction_id))
+    manual_banker_ids = set(manual_banker_ids_for_faction(faction_id))
     legacy_banker = player_id in BANKER_IDS or player_id == ADMIN_PLAYER_ID
-    if legacy_banker and not banker_factions and "default" in FACTION_BANKERS:
-        banker_factions = [faction_id]
+    dynamic_role_banker = player_id in role_banker_ids
+    manual_banker = player_id in manual_banker_ids
+
+    # In dynamic/manual mode, a banker handles their own faction only. Admin can see all configured groups plus own faction.
+    banker_factions = sorted(set(configured_banker_factions + ([faction_id] if (legacy_banker or dynamic_role_banker or manual_banker) else [])))
 
     user = {
         "player_id": player_id,
@@ -423,7 +745,7 @@ def torn_get_user(key):
         "faction_id": faction_id,
         "faction_name": faction_name,
         "is_admin": player_id == ADMIN_PLAYER_ID,
-        "is_banker": bool(banker_factions) or legacy_banker,
+        "is_banker": bool(banker_factions) or legacy_banker or dynamic_role_banker or manual_banker,
         "banker_factions": banker_factions,
     }
 
@@ -448,20 +770,12 @@ def pushover_configured():
     return bool(os.getenv("PUSHOVER_USER_KEY", "").strip() and os.getenv("PUSHOVER_API_TOKEN", "").strip())
 
 
-def send_pushover_alert(title, message, url=None):
-    """Send direct phone ping through Pushover.
-
-    Render env vars needed:
-    PUSHOVER_USER_KEY=your personal Pushover user key
-    PUSHOVER_API_TOKEN=your Pushover application token
-    """
-    user_key = os.getenv("PUSHOVER_USER_KEY", "").strip()
+def send_pushover_to_key(user_key, title, message, url=None):
     api_token = os.getenv("PUSHOVER_API_TOKEN", "").strip()
-
+    user_key = clean_pushover_key(user_key)
     if not user_key or not api_token:
         print("Pushover not configured")
         return False
-
     payload = {
         "token": api_token,
         "user": user_key,
@@ -469,22 +783,25 @@ def send_pushover_alert(title, message, url=None):
         "message": str(message)[:1024],
         "priority": 1,
     }
-
     if url:
         payload["url"] = str(url)[:512]
         payload["url_title"] = "Open Bank Request"
-
     try:
-        response = requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data=payload,
-            timeout=10,
-        )
+        response = requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
         print("Pushover:", response.status_code, response.text[:300])
         return response.ok
     except Exception as e:
         print("Pushover error:", e)
         return False
+
+def send_pushover_alert(title, message, url=None):
+    """Send direct phone ping through the default/global Pushover key.
+
+    Render env vars needed:
+    PUSHOVER_USER_KEY=your personal Pushover user key
+    PUSHOVER_API_TOKEN=your Pushover application token
+    """
+    return send_pushover_to_key(os.getenv("PUSHOVER_USER_KEY", "").strip(), title, message, url)
 
 
 def send_bank_request_ping(item):
@@ -503,11 +820,22 @@ def send_bank_request_ping(item):
         f"Request ID: #{item.get('id')}"
     )
 
-    return send_pushover_alert(
-        "🪙 New Torn Bank Request",
-        message,
-        request_url,
-    )
+    title = "🪙 New Torn Bank Request"
+    sent = False
+    seen_keys = set()
+
+    # Ping manual banker keys from the Leaders tab first.
+    for k in manual_pushover_keys_for_request(item):
+        if k and k not in seen_keys:
+            seen_keys.add(k)
+            sent = send_pushover_to_key(k, title, message, request_url) or sent
+
+    # Also keep the owner's/global Fries91 ping active as fallback.
+    default_key = clean_pushover_key(os.getenv("PUSHOVER_USER_KEY", ""))
+    if default_key and default_key not in seen_keys:
+        sent = send_pushover_to_key(default_key, title, message, request_url) or sent
+
+    return sent
 
 
 def row_to_item(row):
@@ -651,6 +979,9 @@ def health():
         "admin_player_id": ADMIN_PLAYER_ID,
         "pushover_configured": pushover_configured(),
         "public_base_url": public_base_url(),
+        "banker_role_names": banker_role_names_for_faction(user["faction_id"]),
+        "manual_bankers_memory_count": sum(len(v) for v in MEMORY_MANUAL_BANKERS.values()),
+        "manual_role_names_memory_count": sum(len(v) for v in MEMORY_BANKER_ROLE_NAMES.values()),
         "time": now_iso(),
     })
 
@@ -673,13 +1004,13 @@ def static_files(filename):
 
 @app.get("/api/banker/factions")
 def banker_factions():
-    return jsonify(
-        {
-            "ok": True,
-            "items": public_factions(),
-            "count": len(public_factions()),
-        }
-    )
+    # Dynamic mode: only show the logged-in user's own faction.
+    # This removes Wrath/Sloth/Greed/Pride choices and lets any faction use the app.
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    items = [{"faction_id": user["faction_id"], "faction_name": user["faction_name"]}]
+    return jsonify({"ok": True, "items": items, "count": len(items), "mode": "dynamic_role"})
 
 @app.get("/api/banker/status")
 def banker_status():
@@ -693,16 +1024,31 @@ def banker_status():
     if not requested_faction_id:
         requested_faction_id = user.get("faction_id") or ""
 
-    if requested_faction_id not in FACTION_BANKERS:
-        # Do not break the PDA userscript if the dropdown has a faction that Render env does not yet know.
-        # Use legacy/admin bankers so members still see Fries91 and can send a request.
-        banker_ids = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
-        faction_name = requested_faction_id or "Faction"
+    # Prefer bankers entered by faction leaders. If none are entered, fall back to dynamic role detection/config/admin.
+    manual_bankers = manual_bankers_for_faction(requested_faction_id)
+    if manual_bankers:
+        banker_ids = [str(x.get("id")) for x in manual_bankers if x.get("id")]
+        faction_name = user.get("faction_name") or faction_name_for_id(requested_faction_id) or requested_faction_id or "Faction"
     else:
-        banker_ids = bankers_for_faction(requested_faction_id)
-        faction_name = faction_name_for_id(requested_faction_id)
+        role_bankers = torn_get_role_bankers(key, requested_faction_id)
+        if role_bankers:
+            banker_ids = [str(x.get("id")) for x in role_bankers if x.get("id")]
+            faction_name = user.get("faction_name") or faction_name_for_id(requested_faction_id) or requested_faction_id or "Faction"
+        elif requested_faction_id in FACTION_BANKERS:
+            banker_ids = bankers_for_faction(requested_faction_id)
+            faction_name = faction_name_for_id(requested_faction_id)
+        else:
+            banker_ids = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
+            faction_name = user.get("faction_name") or requested_faction_id or "Faction"
 
-    items = [torn_get_banker_status(key, bid, requested_faction_id) for bid in banker_ids]
+    manual_by_id = {str(x.get("id")): x for x in manual_bankers_for_faction(requested_faction_id)}
+    items = []
+    for bid in banker_ids:
+        st = torn_get_banker_status(key, bid, requested_faction_id)
+        if str(bid) in manual_by_id:
+            st["source"] = "leaders"
+            st["has_pushover"] = bool(manual_by_id[str(bid)].get("pushover_key")) or str(bid) == ADMIN_PLAYER_ID
+        items.append(st)
     items = [x for x in items if not is_hidden_banker_name_or_id(x.get("player_id")) and not is_hidden_banker_name_or_id(x.get("name"))]
 
     # Available bankers first, then traveling/idle/offline.
@@ -735,7 +1081,9 @@ def banker_me():
             "is_admin": user["is_admin"],
             "is_banker": user["is_banker"],
             "banker_factions": user.get("banker_factions", []),
-            "available_factions": public_factions(),
+            "available_factions": [{"faction_id": user["faction_id"], "faction_name": user["faction_name"]}],
+            "banker_role_names": banker_role_names_for_faction(user["faction_id"]),
+            "can_manage_leaders": can_manage_leaders(user),
         }
     )
 
@@ -754,9 +1102,7 @@ def list_requests():
     with get_db() as conn:
         with conn.cursor() as cur:
             if user["is_admin"]:
-                faction_ids = all_configured_faction_ids()
-                if not faction_ids:
-                    faction_ids = [user["faction_id"]]
+                faction_ids = sorted(set(all_configured_faction_ids() + [user["faction_id"]]))
             elif user["is_banker"]:
                 faction_ids = user.get("banker_factions", []) or [user["faction_id"]]
             else:
@@ -802,6 +1148,205 @@ def list_requests():
 
 
 
+@app.get("/api/banker/leaders")
+def get_leader_bankers():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    if not can_manage_leaders(user):
+        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+    fid = user.get("faction_id")
+    return jsonify({
+        "ok": True,
+        "faction_id": fid,
+        "faction_name": user.get("faction_name"),
+        "items": [
+            {
+                "banker_id": x.get("id"),
+                "banker_name": x.get("name"),
+                "has_pushover": bool(x.get("pushover_key")),
+                "source": x.get("source", "leaders"),
+            }
+            for x in manual_bankers_for_faction(fid)
+        ],
+        "role_names": banker_role_names_for_faction(fid),
+        "default_role_names": sorted(BANKER_ROLE_NAMES),
+        "can_manage": True,
+    })
+
+@app.post("/api/banker/leaders/roles/add")
+def add_leader_banker_role():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    if not can_manage_leaders(user):
+        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    role_name = str(data.get("role_name") or "").strip()
+    if not role_name:
+        return jsonify({"ok": False, "error": "Enter the banker role name"}), 400
+    if len(role_name) > 80:
+        role_name = role_name[:80]
+
+    fid = user.get("faction_id")
+    fname = user.get("faction_name")
+
+    db_ok, db_msg = db_ready()
+    if db_ok:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO faction_banker_roles (
+                        faction_id, faction_name, role_name, added_by_id, added_by_name, created_at, is_active
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,TRUE)
+                    ON CONFLICT (faction_id, role_name) DO UPDATE SET
+                        faction_name = EXCLUDED.faction_name,
+                        added_by_id = EXCLUDED.added_by_id,
+                        added_by_name = EXCLUDED.added_by_name,
+                        created_at = EXCLUDED.created_at,
+                        is_active = TRUE
+                    """,
+                    (fid, fname, role_name, user.get("player_id"), user.get("name"), now_iso()),
+                )
+            conn.commit()
+    else:
+        rows = MEMORY_BANKER_ROLE_NAMES.setdefault(fid, [])
+        if role_name not in rows:
+            rows.append(role_name)
+
+    FACTION_ROLE_BANKER_CACHE.clear()
+    BANKER_STATUS_CACHE.clear()
+    return jsonify({"ok": True, "role_name": role_name, "role_names": banker_role_names_for_faction(fid), "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
+
+
+@app.post("/api/banker/leaders/roles/remove")
+def remove_leader_banker_role():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    if not can_manage_leaders(user):
+        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    role_name = str(data.get("role_name") or "").strip()
+    if not role_name:
+        return jsonify({"ok": False, "error": "Missing role name"}), 400
+
+    fid = user.get("faction_id")
+    db_ok, db_msg = db_ready()
+    if db_ok:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE faction_banker_roles SET is_active = FALSE WHERE faction_id = %s AND role_name = %s",
+                    (fid, role_name),
+                )
+            conn.commit()
+    else:
+        rows = MEMORY_BANKER_ROLE_NAMES.setdefault(fid, [])
+        rows[:] = [x for x in rows if str(x) != role_name]
+
+    FACTION_ROLE_BANKER_CACHE.clear()
+    BANKER_STATUS_CACHE.clear()
+    return jsonify({"ok": True, "removed": role_name, "role_names": banker_role_names_for_faction(fid), "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
+
+
+@app.post("/api/banker/leaders/add")
+def add_leader_banker():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    if not can_manage_leaders(user):
+        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    banker_id = str(data.get("banker_id") or "").replace("[", "").replace("]", "").strip()
+    banker_name = str(data.get("banker_name") or banker_id).strip()
+    pushover_key = clean_pushover_key(data.get("pushover_key") or "")
+    if not banker_id:
+        return jsonify({"ok": False, "error": "Enter the banker Torn ID"}), 400
+    if len(banker_name) > 60:
+        banker_name = banker_name[:60]
+
+    fid = user.get("faction_id")
+    fname = user.get("faction_name")
+    item = {"id": banker_id, "name": banker_name, "pushover_key": pushover_key, "source": "leaders"}
+
+    db_ok, db_msg = db_ready()
+    if db_ok:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO faction_manual_bankers (
+                        faction_id, faction_name, banker_id, banker_name, pushover_key, added_by_id, added_by_name, created_at, is_active
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                    ON CONFLICT (faction_id, banker_id) DO UPDATE SET
+                        faction_name = EXCLUDED.faction_name,
+                        banker_name = EXCLUDED.banker_name,
+                        pushover_key = EXCLUDED.pushover_key,
+                        added_by_id = EXCLUDED.added_by_id,
+                        added_by_name = EXCLUDED.added_by_name,
+                        created_at = EXCLUDED.created_at,
+                        is_active = TRUE
+                    """,
+                    (fid, fname, banker_id, banker_name, pushover_key, user.get("player_id"), user.get("name"), now_iso()),
+                )
+            conn.commit()
+    else:
+        rows = MEMORY_MANUAL_BANKERS.setdefault(fid, [])
+        rows[:] = [x for x in rows if str(x.get("id")) != banker_id]
+        rows.append(item)
+
+    # Clear banker cache so the dropdown/status refresh immediately.
+    FACTION_ROLE_BANKER_CACHE.clear()
+    BANKER_STATUS_CACHE.clear()
+
+    test_ping = False
+    if pushover_key:
+        test_ping = send_pushover_to_key(
+            pushover_key,
+            "🪙 Added as Faction Banker",
+            f"{user.get('name')} added you as a banker for {fname}. You can now receive bank request pings.",
+            "https://www.torn.com/factions.php?step=your#/tab=controls",
+        )
+
+    return jsonify({"ok": True, "item": item, "test_ping_sent": test_ping, "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
+
+@app.post("/api/banker/leaders/remove")
+def remove_leader_banker():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    if not can_manage_leaders(user):
+        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+    data = request.get_json(silent=True) or {}
+    banker_id = str(data.get("banker_id") or "").strip()
+    if not banker_id:
+        return jsonify({"ok": False, "error": "Missing banker ID"}), 400
+    fid = user.get("faction_id")
+
+    db_ok, db_msg = db_ready()
+    if db_ok:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE faction_manual_bankers SET is_active = FALSE WHERE faction_id = %s AND banker_id = %s",
+                    (fid, banker_id),
+                )
+            conn.commit()
+    else:
+        rows = MEMORY_MANUAL_BANKERS.setdefault(fid, [])
+        rows[:] = [x for x in rows if str(x.get("id")) != banker_id]
+
+    FACTION_ROLE_BANKER_CACHE.clear()
+    BANKER_STATUS_CACHE.clear()
+    return jsonify({"ok": True, "removed": banker_id, "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
+
 @app.get("/api/banker/requests/<int:req_id>")
 def get_request(req_id):
     db_ok, db_msg = db_ready()
@@ -813,9 +1358,9 @@ def get_request(req_id):
     if not user.get("is_banker"):
         return jsonify({"ok": False, "error": "Banker access required"}), 403
 
-    allowed_factions = all_configured_faction_ids() if user.get("is_admin") else user.get("banker_factions", [])
+    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
     if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
 
     if not db_ok:
         item = memory_get_visible_request(req_id, user)
@@ -868,35 +1413,21 @@ def create_request():
     if len(note) > 500:
         note = note[:500]
 
-    configured = all_configured_faction_ids()
-
-    if configured:
-        if not selected_faction_id:
-            # If their own faction is configured, default to it. Otherwise force dropdown choice.
-            if user["faction_id"] in FACTION_BANKERS:
-                selected_faction_id = user["faction_id"]
-            else:
-                return jsonify({"ok": False, "error": "Choose a faction banker group"}), 400
-
-        if selected_faction_id not in FACTION_BANKERS:
-            return jsonify({"ok": False, "error": "Selected faction is not configured"}), 400
-
-        target_faction_id = selected_faction_id
-        target_faction_name = faction_name_for_id(selected_faction_id)
-    else:
-        target_faction_id = user["faction_id"]
-        target_faction_name = user["faction_name"]
+    # Dynamic mode: requests always go to the user's own faction.
+    # This removes all hard-coded faction groups and lets any faction use the same app.
+    target_faction_id = user["faction_id"]
+    target_faction_name = user["faction_name"]
 
     selected_banker_name = ""
     if selected_banker_id:
-        allowed_bankers = set(bankers_for_faction(target_faction_id))
+        allowed_bankers = set(dynamic_banker_ids_for_faction(get_key(), target_faction_id) or bankers_for_faction(target_faction_id))
         if selected_banker_id not in allowed_bankers:
-            return jsonify({"ok": False, "error": "Selected banker is not assigned to that faction group"}), 400
+            return jsonify({"ok": False, "error": "Selected banker is not assigned to your faction banker role"}), 400
         try:
             selected_banker_status = torn_get_banker_status(get_key(), selected_banker_id, target_faction_id)
-            selected_banker_name = str(selected_banker_status.get("name") or selected_banker_id).strip()
+            selected_banker_name = str(selected_banker_status.get("name") or dynamic_banker_name_for_id(get_key(), target_faction_id, selected_banker_id) or selected_banker_id).strip()
         except Exception:
-            selected_banker_name = selected_banker_id
+            selected_banker_name = dynamic_banker_name_for_id(get_key(), target_faction_id, selected_banker_id) or selected_banker_id
 
     created_at = now_iso()
     created_ts = time.time()
@@ -996,10 +1527,10 @@ def banker_action(req_id, action):
     # Complete/denied requests are removed from active list.
     is_active = new_status not in {"complete", "denied"}
 
-    allowed_factions = all_configured_faction_ids() if user["is_admin"] else user.get("banker_factions", [])
+    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
 
     if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
 
     if not db_ok:
         item = memory_update_request(req_id, user, new_status, bank_note)
@@ -1076,10 +1607,10 @@ def clear_completed():
     if not user["is_banker"]:
         return jsonify({"ok": False, "error": "Banker access required"}), 403
 
-    allowed_factions = all_configured_faction_ids() if user["is_admin"] else user.get("banker_factions", [])
+    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
 
     if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
 
     if not db_ok:
         before = len(MEMORY_REQUESTS)
