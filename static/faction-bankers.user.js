@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.8
+// @version      0.8.9
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -190,10 +190,24 @@
       }
 
             #fb-bank-coin-clean.fb-fixed-header {
+        display: inline-flex !important;
         position: relative !important;
         left: auto !important;
         top: auto !important;
-        z-index: 20 !important;
+        z-index: 40 !important;
+        flex: 0 0 auto !important;
+        vertical-align: middle !important;
+      }
+
+      #fb-bank-coin-clean.fb-header-fallback {
+        position: fixed !important;
+        right: 10px !important;
+        top: 108px !important;
+        z-index: 100001 !important;
+        width: 34px !important;
+        height: 32px !important;
+        background: rgba(0,0,0,.72) !important;
+        border-color: rgba(255,211,106,.65) !important;
       }
 
       .fb-coin-mount-row {
@@ -945,14 +959,65 @@
     return null;
   }
 
+  function openHeaderCoinBoard() {
+    openOverlay();
+
+    setTimeout(() => {
+      let tabName = "request";
+      if (!GM_getValue(K_API_KEY, "")) tabName = "settings";
+      else if (APP.me?.is_banker || APP.me?.is_admin) tabName = "banker";
+
+      const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+      if (tab) tab.click();
+    }, 150);
+  }
+
+  function makeHeaderCoin() {
+    let coin = $("#fb-bank-coin-clean");
+
+    if (!coin) {
+      coin = document.createElement("button");
+      coin.id = "fb-bank-coin-clean";
+      coin.type = "button";
+      coin.title = "Factional Banking";
+      coin.textContent = "🪙";
+      coin.setAttribute("data-count", "0");
+      coin.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openHeaderCoinBoard();
+      });
+    }
+
+    return coin;
+  }
+
   function mountCoin() {
-    // No global floating coin. The user only wants:
-    // 1) quick request box inside the own faction page
-    // 2) small coin beside ABSP/BSP on profile pages for settings/login
-    document.querySelectorAll("#fb-bank-coin, #fb-bank-coin-clean").forEach((oldCoin) => {
-      oldCoin.style.display = "none";
-      oldCoin.remove();
-    });
+    if (!isTornPage()) return;
+
+    // Main banker alert coin: lives in Torn's header/resource row, not as a random floating page icon.
+    const coin = makeHeaderCoin();
+    coin.classList.remove("fb-fixed-test", "fb-header-fallback");
+    coin.classList.add("fb-fixed-header", "fb-banker-visible");
+
+    const row = findTornResourceRow();
+    const target = row ? findGenderInsertTarget(row) : null;
+
+    if (target && target.parentElement) {
+      const parent = target.parentElement;
+      if (coin.parentElement !== parent || coin.previousElementSibling !== target) {
+        target.insertAdjacentElement("afterend", coin);
+      }
+    } else if (row) {
+      if (coin.parentElement !== row) row.appendChild(coin);
+    } else {
+      // Last resort so bankers can still see pending requests if Torn changes the header.
+      coin.classList.remove("fb-fixed-header");
+      coin.classList.add("fb-header-fallback");
+      if (coin.parentElement !== document.body) document.body.appendChild(coin);
+    }
+
+    setCoinAlert(APP.pendingCount || 0);
   }
 
   function findFactionBuiltInMount() {
@@ -1319,7 +1384,11 @@
   }
 
   function setCoinAlert(count) {
-    const coin = $("#fb-bank-coin-clean");
+    let coin = $("#fb-bank-coin-clean");
+    if (!coin && isTornPage()) {
+      mountCoin();
+      coin = $("#fb-bank-coin-clean");
+    }
     const setupBtn = $("#fb-setup-button");
     const n = Number(count || 0);
     const hasKey = !!GM_getValue(K_API_KEY, "");
@@ -1329,15 +1398,15 @@
     if (coin) {
       coin.setAttribute("data-count", String(n > 99 ? "99+" : n));
 
-      // Always show the coin so members can open the app and send requests.
-      coin.classList.add("fb-banker-visible", "fb-fixed-test");
+      // Header coin stays visible; only turns red for bankers/admin with pending requests.
+      coin.classList.add("fb-banker-visible");
 
       if (canBank && n > 0) {
         coin.classList.add("fb-alert");
-        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to pay members`;
+        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to approve and send`;
       } else {
         coin.classList.remove("fb-alert");
-        coin.title = hasKey ? "Faction Bankers" : "Faction Bankers setup";
+        coin.title = hasKey ? "Factional Banking" : "Factional Banking setup/login";
       }
     }
 
@@ -2935,6 +3004,40 @@
     }
   }
 
+  async function refreshHeaderCoinBadge(force = false) {
+    const key = GM_getValue(K_API_KEY, "");
+    if (!key || APP.headerRefreshing) return false;
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 90000) return true;
+
+    APP.headerRefreshing = true;
+    APP.lastHeaderBadgeLoad = Date.now();
+
+    try {
+      const me = APP.me || await gmRequest("GET", "/api/banker/me");
+      APP.me = me;
+
+      if (!(me?.is_banker || me?.is_admin)) {
+        setCoinAlert(0);
+        return true;
+      }
+
+      const list = await gmRequest("GET", "/api/banker/requests");
+      const items = Array.isArray(list.items) ? list.items : [];
+      APP.requests = items;
+
+      const pendingItems = items.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      setCoinAlert(pendingItems.length);
+      notifyBankerForNewPending(pendingItems);
+      return true;
+    } catch (err) {
+      const coin = $("#fb-bank-coin-clean");
+      if (coin) coin.title = `Factional Banking — refresh missed Render once: ${String(err.message || err).slice(0, 80)}`;
+      return false;
+    } finally {
+      APP.headerRefreshing = false;
+    }
+  }
+
   async function refreshAll(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key) {
@@ -3054,8 +3157,8 @@
       if (profileCoin) profileCoin.remove();
     }
 
-    // Never allow the old floating coin to remain on normal pages.
-    document.querySelectorAll("#fb-bank-coin, #fb-bank-coin-clean").forEach((el) => el.remove());
+    // Keep the new header coin. Only remove old legacy coin ids if they appear.
+    document.querySelectorAll("#fb-bank-coin").forEach((el) => el.remove());
   }
 
   let mountTimer = null;
@@ -3066,8 +3169,9 @@
 
     ensureStyles();
     clearBankerUiOnWrongPage();
+    mountCoin();
 
-    // Only create the overlay when the user taps Board/profile coin. Never auto-open it on normal pages.
+    // Only create the overlay when the user taps Board/profile/header coin. Never auto-open it on normal pages.
     if (APP.open) ensureOverlay();
 
     if (isOwnFactionPage()) {
@@ -3095,6 +3199,7 @@
 
     ensureStyles();
     clearBankerUiOnWrongPage();
+    mountCoin();
 
     APP.booted = true;
 
@@ -3103,6 +3208,7 @@
     APP.open = false;
 
     pageMount("boot");
+    if (GM_getValue(K_API_KEY, "")) setTimeout(() => refreshHeaderCoinBadge(true), 2200);
 
     // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
     mountTries = 0;
@@ -3117,11 +3223,11 @@
       if (!isTornPage()) return;
       clearBankerUiOnWrongPage();
 
-      const usefulPage = APP.open || isOwnFactionPage() || isProfilePage();
-      if (!usefulPage) return;
-
       pageMount("slow");
 
+      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 90000) {
+        refreshHeaderCoinBadge(false);
+      }
       if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 90000) {
         refreshAll(false);
       }
