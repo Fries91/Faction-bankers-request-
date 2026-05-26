@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.6
+// @version      0.8.7
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.8.6-leaders-role-names";
+  const FB_BUILD = "0.8.7-amount-pushover-fix";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -2013,8 +2013,97 @@
     if (!amountInput) return false;
 
     const ok = setNativeValue(amountInput, cleanAmount);
-    try { amountInput.focus(); amountInput.blur(); } catch {}
+    try {
+      amountInput.focus();
+      amountInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "1" }));
+      amountInput.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "1" }));
+      amountInput.blur();
+    } catch {}
     return ok;
+  }
+
+  function clickPlayerAutocompleteChoice(data) {
+    const name = String(data?.playerName || "").toLowerCase();
+    const id = String(data?.playerId || "");
+    if (!name && !id) return false;
+
+    const choices = Array.from(document.querySelectorAll("li, div, span, a, button"))
+      .filter((el) => !el.closest?.("#fb-built-in-box") && !el.closest?.("#fb-overlay"))
+      .filter((el) => {
+        const txt = getCleanText(el).toLowerCase();
+        if (!txt || txt.length > 120) return false;
+        if (id && !txt.includes(id)) return false;
+        return !name || txt.includes(name);
+      })
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return (br.width * br.height) - (ar.width * ar.height);
+      });
+
+    const choice = choices[0];
+    if (!choice) return false;
+    try {
+      choice.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      choice.click();
+      choice.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function forceFillTornDollarAmount(amount) {
+    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+
+    const ownSelectors = "#fb-built-in-box, #fb-overlay";
+    const player = bestInput("player");
+    const inputs = Array.from(document.querySelectorAll("input, textarea"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
+      .filter((el) => el !== player && !looksLikePlayerInput(el))
+      .filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 40 && r.height > 14;
+      });
+
+    const dollarRects = Array.from(document.querySelectorAll("div, span, label, b, strong"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => getCleanText(el).trim() === "$" || /^\$\s*$/.test(getCleanText(el).trim()))
+      .map((el) => el.getBoundingClientRect());
+
+    let candidates = inputs.map((input) => {
+      const r = input.getBoundingClientRect();
+      let score = 999999;
+      for (const d of dollarRects) {
+        const sameRow = Math.abs((r.top + r.height / 2) - (d.top + d.height / 2));
+        const rightOfDollar = Math.max(0, r.left - d.right);
+        score = Math.min(score, sameRow * 8 + rightOfDollar + Math.abs(r.top - d.top));
+      }
+      if (player) {
+        const pr = player.getBoundingClientRect();
+        if (r.top > pr.bottom - 6 && r.top < pr.bottom + 180) score -= 250;
+        if (r.left > pr.left - 80 && r.left < pr.left + 160) score -= 80;
+      }
+      return { input, score };
+    }).sort((a, b) => a.score - b.score);
+
+    for (const c of candidates.slice(0, 4)) {
+      const el = c.input;
+      if (el.disabled) continue;
+      if (setNativeValue(el, cleanAmount)) {
+        try {
+          el.focus();
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          el.blur();
+        } catch {}
+        if (String(el.value || "").replace(/[^0-9]/g, "") === cleanAmount) return true;
+      }
+    }
+
+    return false;
   }
 
   function clickTextButton(words) {
@@ -2045,17 +2134,24 @@
 
     if (playerInput) {
       filled = setNativeValue(playerInput, `${data.playerName} [${data.playerId}]`) || filled;
+      setTimeout(() => clickPlayerAutocompleteChoice(data), 250);
+      setTimeout(() => clickPlayerAutocompleteChoice(data), 650);
+      setTimeout(() => clickPlayerAutocompleteChoice(data), 1200);
     }
 
     if (data.amount) {
-      filled = fillTornAmountStrong(playerInput, data.amount) || filled;
+      filled = fillTornAmountStrong(playerInput, data.amount) || forceFillTornDollarAmount(data.amount) || filled;
     }
 
-    // Some Torn/PDA builds reveal/replace the amount field after player search changes.
-    // Keep trying, but ignore this script's own amount input so the money lands in Torn's $ field.
+    // Some Torn/PDA builds enable/replace the amount field only after the player autocomplete is selected.
+    // Keep trying and force the money into Torn's real $ input, never this script's amount box.
     if (playerInput && data.amount) {
-      [600, 1200, 2200, 3600, 5200].forEach((delay) => {
-        setTimeout(() => fillTornAmountStrong(playerInput, data.amount), delay);
+      [350, 800, 1400, 2400, 3800, 5600, 7600].forEach((delay) => {
+        setTimeout(() => {
+          clickPlayerAutocompleteChoice(data);
+          fillTornAmountStrong(playerInput, data.amount);
+          forceFillTornDollarAmount(data.amount);
+        }, delay);
       });
     }
 
@@ -2514,7 +2610,7 @@
     renderRequestTab(`<div class="fb-muted">Sending request...</div>`);
 
     try {
-      await gmRequest("POST", "/api/banker/requests", {
+      const res = await gmRequest("POST", "/api/banker/requests", {
         amount,
         note,
         target_faction_id: targetFactionId,
@@ -2522,7 +2618,10 @@
       });
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
-      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>`);
+      const pingMsg = res && res.pushover_sent === false
+        ? `<div class="fb-error" style="margin-top:6px;">Request saved, but Pushover did not confirm. Check Render env PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN, or add banker Pushover keys in Leaders.</div>`
+        : `<div class="fb-success" style="margin-top:6px;">Phone ping sent/queued.</div>`;
+      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>${pingMsg}`);
     } catch (err) {
       renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
