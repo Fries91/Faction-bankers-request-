@@ -8,10 +8,20 @@ import psycopg2.extras
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
+
+
+@app.errorhandler(Exception)
+def json_error_handler(e):
+    # Make PDA/userscript errors readable instead of returning a raw HTML 500 page.
+    if isinstance(e, HTTPException):
+        return jsonify({"ok": False, "error": e.description or e.name}), e.code or 500
+    print("Unhandled server error:", repr(e))
+    return jsonify({"ok": False, "error": str(e) or e.__class__.__name__}), 500
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -66,16 +76,29 @@ def load_faction_bankers():
             # Keep the app alive even if the env var is temporarily malformed.
             pass
 
-    # Backwards-compatible fallback for older Render setup.
+    # PDA-safe fallback if FACTION_BANKERS is missing or malformed.
+    # This keeps the status list working instead of returning "Selected faction is not configured"
+    # while Render env vars are being adjusted. Fries91/Admin is included by default.
+    fallback_bankers = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
     return {
-        "default": {
-            "name": "Default",
-            "bankers": sorted(BANKER_IDS),
-        }
+        "49384": {"name": "Wrath", "bankers": fallback_bankers},
+        "52040": {"name": "Sloth", "bankers": fallback_bankers},
+        "8315": {"name": "Greed", "bankers": fallback_bankers},
+        "20554": {"name": "Pride", "bankers": fallback_bankers},
     }
 
 
 FACTION_BANKERS = load_faction_bankers()
+BANKER_STATUS_CACHE = {}
+BANKER_STATUS_TTL = int(os.getenv("BANKER_STATUS_TTL", "45"))
+
+# Safety fallback: if Render Postgres/DATABASE_URL is missing or broken,
+# requests still work in memory instead of crashing with HTML 500.
+# Memory requests reset when Render restarts, so Postgres is still recommended.
+MEMORY_REQUESTS = []
+MEMORY_NEXT_ID = 1
+
+
 
 
 def all_configured_faction_ids():
@@ -116,6 +139,161 @@ def public_factions():
     ]
 
 
+def bankers_for_faction(faction_id):
+    fid = str(faction_id or "").strip()
+    info = FACTION_BANKERS.get(fid) or {}
+    bankers = []
+
+    for raw in info.get("bankers", []) or []:
+        if isinstance(raw, dict):
+            bid = str(raw.get("id") or raw.get("player_id") or raw.get("xid") or "").strip()
+        else:
+            bid = str(raw).strip()
+        if bid and bid not in bankers:
+            bankers.append(bid)
+
+    # If a faction exists but has no banker list, still show the legacy/admin bankers.
+    if not bankers:
+        bankers = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
+
+    # Always include Fries91/admin as a banker safety fallback.
+    if ADMIN_PLAYER_ID and ADMIN_PLAYER_ID not in bankers:
+        bankers.insert(0, ADMIN_PLAYER_ID)
+
+    return bankers
+
+
+def banker_name_from_config(faction_id, banker_id):
+    fid = str(faction_id or "").strip()
+    bid = str(banker_id or "").strip()
+    info = FACTION_BANKERS.get(fid) or {}
+    for raw in info.get("bankers", []) or []:
+        if isinstance(raw, dict):
+            rid = str(raw.get("id") or raw.get("player_id") or raw.get("xid") or "").strip()
+            if rid == bid:
+                return str(raw.get("name") or raw.get("player_name") or bid).strip()
+    if bid == ADMIN_PLAYER_ID:
+        return "Fries91"
+    return bid
+
+
+def classify_banker_status(data):
+    status_obj = data.get("status") if isinstance(data, dict) else {}
+    last_action = data.get("last_action") if isinstance(data, dict) else {}
+    travel = data.get("travel") if isinstance(data, dict) else {}
+
+    details = ""
+    state = "Unknown"
+    torn_color = ""
+
+    if isinstance(status_obj, dict):
+        state = str(status_obj.get("state") or "Unknown")
+        details = str(status_obj.get("details") or state)
+        torn_color = str(status_obj.get("color") or "")
+    elif status_obj:
+        details = str(status_obj)
+        state = details
+
+    last_status = ""
+    last_relative = ""
+    if isinstance(last_action, dict):
+        last_status = str(last_action.get("status") or "")
+        last_relative = str(last_action.get("relative") or "")
+
+    travel_text = ""
+    if isinstance(travel, dict) and travel:
+        dest = travel.get("destination") or travel.get("dest") or ""
+        timestamp = travel.get("timestamp") or travel.get("time_left") or ""
+        if dest:
+            travel_text = f"Traveling: {dest}"
+        if timestamp:
+            travel_text = (travel_text + f" • {timestamp}").strip(" •")
+
+    combined = " ".join([state, details, last_status, travel_text]).lower()
+
+    if any(x in combined for x in ["travel", "flying", "returning", "abroad"]):
+        app_status = "traveling"
+        app_color = "yellow" if "return" in combined or "travel" in combined or "flying" in combined else "blue"
+        app_label = "Traveling / Abroad"
+    elif "online" in combined or torn_color == "green":
+        app_status = "online"
+        app_color = "green"
+        app_label = "Online"
+    elif "idle" in combined or torn_color == "orange":
+        app_status = "idle"
+        app_color = "orange"
+        app_label = "Idle"
+    elif "hospital" in combined:
+        app_status = "hospital"
+        app_color = "red"
+        app_label = "Hospital"
+    elif "jail" in combined:
+        app_status = "jail"
+        app_color = "red"
+        app_label = "Jail"
+    elif "offline" in combined or torn_color == "red":
+        app_status = "offline"
+        app_color = "red"
+        app_label = "Offline"
+    else:
+        app_status = "unknown"
+        app_color = "gray"
+        app_label = "Unknown"
+
+    subtitle = travel_text or details or last_relative or state
+    return app_status, app_color, app_label, subtitle
+
+
+def torn_get_banker_status(key, banker_id, faction_id=""):
+    bid = str(banker_id or "").strip()
+    cache_key = f"{bid}:{key[-6:] if key else ''}"
+    cached = BANKER_STATUS_CACHE.get(cache_key)
+    if cached and time.time() - cached.get("ts", 0) < BANKER_STATUS_TTL:
+        return cached.get("item")
+
+    item = {
+        "player_id": bid,
+        "name": banker_name_from_config(faction_id, bid),
+        "status": "unknown",
+        "color": "gray",
+        "label": "Unknown",
+        "details": "Status unavailable",
+        "is_available": False,
+    }
+
+    if not bid:
+        return item
+
+    if not key:
+        BANKER_STATUS_CACHE[cache_key] = {"ts": time.time(), "item": item}
+        return item
+
+    url = f"{TORN_API_BASE}/user/{bid}?selections=profile&key={key}"
+    try:
+        r = requests.get(url, timeout=REQUEST_TIMEOUT)
+        data = r.json()
+        if isinstance(data, dict) and not data.get("error"):
+            name = str(data.get("name") or banker_name_from_config(faction_id, bid) or bid).strip()
+            status, color, label, details = classify_banker_status(data)
+            item = {
+                "player_id": bid,
+                "name": name,
+                "status": status,
+                "color": color,
+                "label": label,
+                "details": details or label,
+                "is_available": status in {"online", "idle"},
+            }
+        elif isinstance(data, dict) and data.get("error"):
+            err = data.get("error") or {}
+            item["details"] = str(err.get("error") or "Torn API denied status check")[:160]
+    except Exception as e:
+        item["details"] = f"Status check failed: {e}"[:160]
+
+    BANKER_STATUS_CACHE[cache_key] = {"ts": time.time(), "item": item}
+    return item
+
+
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -128,6 +306,15 @@ def get_db():
         DATABASE_URL,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
+
+
+def db_error_response(prefix="Database is not ready"):
+    if not DATABASE_URL:
+        return jsonify({
+            "ok": False,
+            "error": "DATABASE_URL is missing in Render. Attach a Postgres database or add DATABASE_URL in Environment."
+        }), 503
+    return jsonify({"ok": False, "error": prefix}), 500
 
 
 def init_db():
@@ -154,6 +341,9 @@ def init_db():
                 )
                 """
             )
+
+            cur.execute("ALTER TABLE banker_requests ADD COLUMN IF NOT EXISTS selected_banker_id TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE banker_requests ADD COLUMN IF NOT EXISTS selected_banker_name TEXT NOT NULL DEFAULT ''")
 
             cur.execute(
                 """
@@ -297,6 +487,7 @@ def send_bank_request_ping(item):
         f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
         f"Amount: {amount_text}\n"
         f"Faction: {item.get('faction_name')}\n"
+        f"Preferred Banker: {item.get('selected_banker_name') or 'Any available banker'}\n"
         f"Request ID: #{item.get('id')}"
     )
 
@@ -323,8 +514,72 @@ def row_to_item(row):
         "handled_by_name": row["handled_by_name"] or "",
         "handled_at": row["handled_at"] or "",
         "bank_note": row["bank_note"] or "",
+        "selected_banker_id": row.get("selected_banker_id", "") or "",
+        "selected_banker_name": row.get("selected_banker_name", "") or "",
     }
 
+
+
+def db_ready():
+    if not DATABASE_URL:
+        return False, "DATABASE_URL missing; using memory fallback"
+    try:
+        init_db()
+        return True, "postgres"
+    except Exception as e:
+        print("DB unavailable; using memory fallback:", e)
+        return False, str(e)
+
+
+def memory_visible_items(user):
+    if user.get("is_admin"):
+        faction_ids = set(all_configured_faction_ids() or [user.get("faction_id")])
+        return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
+    if user.get("is_banker"):
+        faction_ids = set(user.get("banker_factions") or [user.get("faction_id")])
+        return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
+    return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and r.get("requester_id") == user.get("player_id")]
+
+
+def memory_insert_request(user, amount, note, target_faction_id, target_faction_name, selected_banker_id="", selected_banker_name=""):
+    global MEMORY_NEXT_ID
+    item = {
+        "id": MEMORY_NEXT_ID,
+        "status": "pending",
+        "amount": int(amount or 0),
+        "note": note or "",
+        "requester_id": user["player_id"],
+        "requester_name": user["name"],
+        "faction_id": target_faction_id,
+        "faction_name": target_faction_name,
+        "selected_banker_id": selected_banker_id or "",
+        "selected_banker_name": selected_banker_name or "",
+        "created_at": now_iso(),
+        "created_ts": time.time(),
+        "handled_by_id": "",
+        "handled_by_name": "",
+        "handled_at": "",
+        "bank_note": "",
+        "is_active": True,
+    }
+    MEMORY_NEXT_ID += 1
+    MEMORY_REQUESTS.insert(0, item)
+    return item
+
+
+def memory_update_request(req_id, user, new_status, bank_note=""):
+    allowed_factions = set(all_configured_faction_ids() if user.get("is_admin") else user.get("banker_factions", []))
+    for item in MEMORY_REQUESTS:
+        if int(item.get("id", 0)) == int(req_id) and item.get("is_active", True) and item.get("faction_id") in allowed_factions:
+            item["status"] = new_status
+            item["handled_by_id"] = user["player_id"]
+            item["handled_by_name"] = user["name"]
+            item["handled_at"] = now_iso()
+            if bank_note:
+                item["bank_note"] = bank_note
+            item["is_active"] = new_status not in {"complete", "denied"}
+            return item
+    return None
 
 
 @app.get("/")
@@ -346,31 +601,39 @@ def home():
 
 @app.get("/api/health")
 def health():
-    try:
-        init_db()
+    ready, db_msg = db_ready()
+    active_count = 0
+    mode = "memory"
+    if ready:
+        mode = "postgres"
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) AS count FROM banker_requests WHERE is_active = TRUE")
+                    row = cur.fetchone()
+                    active_count = int(row["count"] or 0)
+        except Exception as e:
+            ready = False
+            db_msg = str(e)
+            active_count = len([r for r in MEMORY_REQUESTS if r.get("is_active", True)])
+            mode = "memory"
+    else:
+        active_count = len([r for r in MEMORY_REQUESTS if r.get("is_active", True)])
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS count FROM banker_requests WHERE is_active = TRUE")
-                row = cur.fetchone()
-                active_count = int(row["count"] or 0)
-
-        return jsonify(
-            {
-                "ok": True,
-                "app": "Faction Bankers",
-                "mode": "postgres",
-                "active_requests": active_count,
-                "banker_ids": sorted(BANKER_IDS),
-                "faction_bankers": public_factions(),
-                "admin_player_id": ADMIN_PLAYER_ID,
-                "pushover_configured": pushover_configured(),
-                "public_base_url": public_base_url(),
-                "time": now_iso(),
-            }
-        )
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({
+        "ok": True,
+        "app": "Faction Bankers",
+        "mode": mode,
+        "db_ready": ready,
+        "db_message": db_msg,
+        "active_requests": active_count,
+        "banker_ids": sorted(BANKER_IDS),
+        "faction_bankers": public_factions(),
+        "admin_player_id": ADMIN_PLAYER_ID,
+        "pushover_configured": pushover_configured(),
+        "public_base_url": public_base_url(),
+        "time": now_iso(),
+    })
 
 
 @app.get("/api/test-pushover")
@@ -399,6 +662,43 @@ def banker_factions():
         }
     )
 
+@app.get("/api/banker/status")
+def banker_status():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    key = get_key()
+    requested_faction_id = str(request.args.get("faction_id") or "").strip()
+
+    if not requested_faction_id:
+        requested_faction_id = user.get("faction_id") or ""
+
+    if requested_faction_id not in FACTION_BANKERS:
+        # Do not break the PDA userscript if the dropdown has a faction that Render env does not yet know.
+        # Use legacy/admin bankers so members still see Fries91 and can send a request.
+        banker_ids = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
+        faction_name = requested_faction_id or "Faction"
+    else:
+        banker_ids = bankers_for_faction(requested_faction_id)
+        faction_name = faction_name_for_id(requested_faction_id)
+
+    items = [torn_get_banker_status(key, bid, requested_faction_id) for bid in banker_ids]
+
+    # Available bankers first, then traveling/idle/offline.
+    rank = {"online": 0, "idle": 1, "traveling": 2, "hospital": 3, "jail": 4, "offline": 5, "unknown": 6}
+    items.sort(key=lambda x: (rank.get(str(x.get("status")), 9), str(x.get("name") or "").lower()))
+
+    return jsonify({
+        "ok": True,
+        "faction_id": requested_faction_id,
+        "faction_name": faction_name,
+        "items": items,
+        "count": len(items),
+        "time": now_iso(),
+    })
+
+
 @app.get("/api/banker/me")
 def banker_me():
     user, resp, code = require_user()
@@ -425,6 +725,11 @@ def list_requests():
     user, resp, code = require_user()
     if resp:
         return resp, code
+
+    db_ok, db_msg = db_ready()
+    if not db_ok:
+        items = [dict(x) for x in memory_visible_items(user)]
+        return jsonify({"ok": True, "items": items, "count": len(items), "mode": "memory", "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -478,7 +783,8 @@ def list_requests():
 
 @app.post("/api/banker/requests")
 def create_request():
-    init_db()
+    db_ok, db_msg = db_ready()
+
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -488,6 +794,7 @@ def create_request():
     amount = data.get("amount", 0)
     note = str(data.get("note") or "").strip()
     selected_faction_id = str(data.get("target_faction_id") or "").strip()
+    selected_banker_id = str(data.get("target_banker_id") or "").strip()
 
     try:
         amount = int(str(amount).replace(",", "").replace("$", "").strip())
@@ -519,8 +826,24 @@ def create_request():
         target_faction_id = user["faction_id"]
         target_faction_name = user["faction_name"]
 
+    selected_banker_name = ""
+    if selected_banker_id:
+        allowed_bankers = set(bankers_for_faction(target_faction_id))
+        if selected_banker_id not in allowed_bankers:
+            return jsonify({"ok": False, "error": "Selected banker is not assigned to that faction group"}), 400
+        try:
+            selected_banker_status = torn_get_banker_status(get_key(), selected_banker_id, target_faction_id)
+            selected_banker_name = str(selected_banker_status.get("name") or selected_banker_id).strip()
+        except Exception:
+            selected_banker_name = selected_banker_id
+
     created_at = now_iso()
     created_ts = time.time()
+
+    if not db_ok:
+        item = memory_insert_request(user, amount, note, target_faction_id, target_faction_name, selected_banker_id, selected_banker_name)
+        ping_sent = send_bank_request_ping(item)
+        return jsonify({"ok": True, "item": item, "pushover_sent": ping_sent, "mode": "memory", "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -534,11 +857,13 @@ def create_request():
                     requester_name,
                     faction_id,
                     faction_name,
+                    selected_banker_id,
+                    selected_banker_name,
                     created_at,
                     created_ts,
                     is_active
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                 RETURNING *
                 """,
                 (
@@ -549,6 +874,8 @@ def create_request():
                     user["name"],
                     target_faction_id,
                     target_faction_name,
+                    selected_banker_id,
+                    selected_banker_name,
                     created_at,
                     created_ts,
                 ),
@@ -572,7 +899,8 @@ def create_request():
 
 @app.post("/api/banker/requests/<int:req_id>/<action>")
 def banker_action(req_id, action):
-    init_db()
+    db_ok, db_msg = db_ready()
+
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -611,6 +939,12 @@ def banker_action(req_id, action):
 
     if not allowed_factions:
         return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+
+    if not db_ok:
+        item = memory_update_request(req_id, user, new_status, bank_note)
+        if not item:
+            return jsonify({"ok": False, "error": "Active request not found for your banker faction"}), 404
+        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -672,7 +1006,8 @@ def banker_action(req_id, action):
 
 @app.post("/api/banker/clear-completed")
 def clear_completed():
-    init_db()
+    db_ok, db_msg = db_ready()
+
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -684,6 +1019,11 @@ def clear_completed():
 
     if not allowed_factions:
         return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+
+    if not db_ok:
+        before = len(MEMORY_REQUESTS)
+        MEMORY_REQUESTS[:] = [r for r in MEMORY_REQUESTS if not (r.get("faction_id") in set(allowed_factions) and not r.get("is_active", True))]
+        return jsonify({"ok": True, "removed": before - len(MEMORY_REQUESTS), "mode": "memory", "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -705,5 +1045,8 @@ def clear_completed():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        print("DB init skipped at startup:", e)
     app.run(host="0.0.0.0", port=port)
