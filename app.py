@@ -1011,6 +1011,91 @@ def static_files(filename):
 
 
 
+
+def scan_json_for_balance(obj, player_id=""):
+    """Best-effort scan for a user's faction bank balance in Torn API JSON.
+
+    Torn may not expose this for every key/faction setup. This deliberately avoids
+    guessing from unrelated money fields unless the key name/context mentions balance.
+    """
+    pid = str(player_id or "").strip()
+    candidates = []
+
+    def walk(x, path=""):
+        if isinstance(x, dict):
+            # If a dict appears to be the logged-in/member row, inspect balance-ish fields.
+            row_id = str(x.get("player_id") or x.get("id") or x.get("user_id") or "").strip()
+            row_name = str(x.get("name") or "").strip().lower()
+            row_context_bonus = 20 if pid and row_id == pid else 0
+
+            for k, v in x.items():
+                key = str(k or "").lower()
+                pth = f"{path}.{key}" if path else key
+                if isinstance(v, (int, float)) and "balance" in key:
+                    score = 50 + row_context_bonus
+                    if "faction" in pth or "bank" in pth or "member" in pth:
+                        score += 20
+                    candidates.append((score, int(v), pth))
+                elif isinstance(v, str) and "balance" in key:
+                    cleaned = v.replace("$", "").replace(",", "").strip()
+                    if cleaned.isdigit():
+                        score = 50 + row_context_bonus
+                        candidates.append((score, int(cleaned), pth))
+                walk(v, pth)
+        elif isinstance(x, list):
+            for idx, item in enumerate(x[:500]):
+                walk(item, f"{path}[{idx}]")
+
+    walk(obj)
+    if not candidates:
+        return None, ""
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return candidates[0][1], candidates[0][2]
+
+
+def torn_get_faction_balance(key, user):
+    if not key:
+        return None, "Missing Torn API key", ""
+
+    faction_id = str((user or {}).get("faction_id") or "").strip()
+    player_id = str((user or {}).get("player_id") or "").strip()
+
+    urls = []
+    if faction_id:
+        urls.extend([
+            f"{TORN_API_BASE}/faction/{faction_id}?selections=basic&key={key}",
+            f"{TORN_API_BASE}/faction/{faction_id}?selections=money&key={key}",
+            f"{TORN_API_BASE}/faction/{faction_id}?selections=members&key={key}",
+        ])
+    urls.extend([
+        f"{TORN_API_BASE}/faction/?selections=basic&key={key}",
+        f"{TORN_API_BASE}/faction/?selections=money&key={key}",
+        f"{TORN_API_BASE}/faction/?selections=members&key={key}",
+        f"{TORN_API_BASE}/user/?selections=profile&key={key}",
+    ])
+
+    last_error = "Balance unavailable with this key"
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=REQUEST_TIMEOUT)
+            data = r.json()
+        except Exception as e:
+            last_error = f"Torn balance lookup failed: {e}"
+            continue
+
+        if not isinstance(data, dict):
+            continue
+        if data.get("error"):
+            err = data.get("error") or {}
+            last_error = err.get("error", "Torn API error") if isinstance(err, dict) else str(err)
+            continue
+
+        bal, source = scan_json_for_balance(data, player_id)
+        if bal is not None:
+            return bal, None, source or "api"
+
+    return None, last_error, ""
+
 @app.get("/api/banker/factions")
 def banker_factions():
     # Dynamic mode: only show the logged-in user's own faction.
@@ -1020,6 +1105,33 @@ def banker_factions():
         return resp, code
     items = [{"faction_id": user["faction_id"], "faction_name": user["faction_name"]}]
     return jsonify({"ok": True, "items": items, "count": len(items), "mode": "dynamic_role"})
+
+
+@app.get("/api/banker/balance")
+def banker_balance():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    key = get_key()
+    balance, err, source = torn_get_faction_balance(key, user)
+
+    if balance is None:
+        return jsonify({
+            "ok": False,
+            "balance": None,
+            "message": err or "Balance unavailable with this key",
+            "source": source,
+        })
+
+    return jsonify({
+        "ok": True,
+        "balance": int(balance),
+        "source": source or "api",
+        "player_id": user.get("player_id"),
+        "faction_id": user.get("faction_id"),
+    })
+
 
 @app.get("/api/banker/status")
 def banker_status():
