@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.2
+// @version      0.8.3
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.8.1-strong-bank-amount-prefill";
+  const FB_BUILD = "0.8.3-ignore-own-box-bank-amount-prefill";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1816,6 +1816,17 @@
     return true;
   }
 
+  function isFactionBankerOwnInput(el) {
+    return !!(
+      el &&
+      (el.closest?.("#fb-built-in-box") ||
+       el.closest?.("#fb-overlay") ||
+       el.closest?.("#fb-profile-bank-coin") ||
+       el.id?.startsWith?.("fb-") ||
+       String(el.className || "").includes("fb-"))
+    );
+  }
+
   function visibleInput(el) {
     if (!el || el.disabled || el.readOnly) return false;
     const rect = el.getBoundingClientRect();
@@ -1868,6 +1879,7 @@
 
   function allUsableInputs() {
     return Array.from(document.querySelectorAll("input, textarea"))
+      .filter((el) => !isFactionBankerOwnInput(el))
       .filter(visibleInput)
       .filter((el) => !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
   }
@@ -1958,6 +1970,55 @@
     return scored[0]?.el || null;
   }
 
+  function findTornFactionAmountInput(playerInput) {
+    const rawAmount = getPayPrefill()?.amount ? String(getPayPrefill().amount).replace(/[^0-9]/g, "") : "";
+    const inputs = allUsableInputs().filter((el) => el !== playerInput && !looksLikePlayerInput(el));
+    if (!inputs.length) return null;
+
+    // Prefer the real Torn vault amount field: it is usually directly beside/below a lone "$" prefix.
+    const dollarEls = Array.from(document.querySelectorAll("div, span, label, b, strong"))
+      .filter((el) => !el.closest?.("#fb-built-in-box") && !el.closest?.("#fb-overlay"))
+      .filter((el) => getCleanText(el).trim() === "$" || getCleanText(el).trim() === "$")
+      .map((el) => el.getBoundingClientRect());
+
+    if (dollarEls.length) {
+      const scored = inputs.map((input) => {
+        const r = input.getBoundingClientRect();
+        let best = 999999;
+        for (const d of dollarEls) {
+          // amount box normally starts just to the right of the $ prefix and on the same row
+          const dist = Math.abs(r.top - d.top) * 3 + Math.abs(r.left - d.right);
+          best = Math.min(best, dist);
+        }
+        return { input, score: best };
+      }).sort((a, b) => a.score - b.score);
+      if (scored[0] && scored[0].score < 900) return scored[0].input;
+    }
+
+    if (playerInput) {
+      const pr = playerInput.getBoundingClientRect();
+      const below = inputs
+        .map((input) => ({ input, r: input.getBoundingClientRect() }))
+        .filter(({ r }) => r.top > pr.bottom - 8 && r.top < pr.bottom + 180)
+        .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
+      if (below.length) return below[0].input;
+    }
+
+    return bestInput("amount", playerInput);
+  }
+
+  function fillTornAmountStrong(playerInput, amount) {
+    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+
+    const amountInput = findTornFactionAmountInput(playerInput);
+    if (!amountInput) return false;
+
+    const ok = setNativeValue(amountInput, cleanAmount);
+    try { amountInput.focus(); amountInput.blur(); } catch {}
+    return ok;
+  }
+
   function clickTextButton(words) {
     const wanted = words.map((w) => String(w).toLowerCase());
     const nodes = Array.from(document.querySelectorAll("button, a, div, span, li"));
@@ -1982,27 +2043,22 @@
     clickTextButton(["controls", "bank", "give money", "vault"]);
 
     const playerInput = bestInput("player");
-    const amountInput = bestInput("amount", playerInput);
     let filled = false;
 
     if (playerInput) {
       filled = setNativeValue(playerInput, `${data.playerName} [${data.playerId}]`) || filled;
     }
 
-    if (amountInput && data.amount) {
-      filled = setNativeValue(amountInput, String(data.amount).replace(/[^0-9]/g, "")) || filled;
+    if (data.amount) {
+      filled = fillTornAmountStrong(playerInput, data.amount) || filled;
     }
 
     // Some Torn/PDA builds reveal/replace the amount field after player search changes.
+    // Keep trying, but ignore this script's own amount input so the money lands in Torn's $ field.
     if (playerInput && data.amount) {
-      setTimeout(() => {
-        const lateAmount = bestInput("amount", playerInput);
-        if (lateAmount) setNativeValue(lateAmount, String(data.amount).replace(/[^0-9]/g, ""));
-      }, 900);
-      setTimeout(() => {
-        const lateAmount = bestInput("amount", playerInput);
-        if (lateAmount) setNativeValue(lateAmount, String(data.amount).replace(/[^0-9]/g, ""));
-      }, 2200);
+      [600, 1200, 2200, 3600, 5200].forEach((delay) => {
+        setTimeout(() => fillTornAmountStrong(playerInput, data.amount), delay);
+      });
     }
 
     if (filled) {
