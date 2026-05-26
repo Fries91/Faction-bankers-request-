@@ -98,7 +98,17 @@ BANKER_STATUS_TTL = int(os.getenv("BANKER_STATUS_TTL", "45"))
 MEMORY_REQUESTS = []
 MEMORY_NEXT_ID = 1
 
-
+def is_hidden_banker_name_or_id(name_or_id):
+    """Hide bankers the owner removed from the user-facing app.
+    Default hides PulseArts/Pulse unless OVERRIDE env is provided.
+    Add more via HIDDEN_BANKER_IDS=123,456 or HIDDEN_BANKER_NAMES=Name1,Name2.
+    """
+    value = str(name_or_id or "").strip().lower()
+    if not value:
+        return False
+    hidden_ids = {x.strip().lower() for x in os.getenv("HIDDEN_BANKER_IDS", "").split(",") if x.strip()}
+    hidden_names = {x.strip().lower() for x in os.getenv("HIDDEN_BANKER_NAMES", "pulsearts,pulse").split(",") if x.strip()}
+    return value in hidden_ids or value in hidden_names or value.startswith("pulsearts")
 
 
 def all_configured_faction_ids():
@@ -147,9 +157,11 @@ def bankers_for_faction(faction_id):
     for raw in info.get("bankers", []) or []:
         if isinstance(raw, dict):
             bid = str(raw.get("id") or raw.get("player_id") or raw.get("xid") or "").strip()
+            bname = str(raw.get("name") or raw.get("player_name") or "").strip()
         else:
             bid = str(raw).strip()
-        if bid and bid not in bankers:
+            bname = ""
+        if bid and not is_hidden_banker_name_or_id(bid) and not is_hidden_banker_name_or_id(bname) and bid not in bankers:
             bankers.append(bid)
 
     # If a faction exists but has no banker list, still show the legacy/admin bankers.
@@ -481,7 +493,7 @@ def send_bank_request_ping(item):
 
     is_full_balance = str(item.get("note") or "") == "__FULL_BALANCE_REQUEST__"
     amount_text = "Full Balance" if is_full_balance else f"${int(item.get('amount') or 0):,}"
-    request_url = f"{public_base_url()}/?request={item.get('id')}"
+    request_url = f"https://www.torn.com/factions.php?step=your&fb_bank_req={item.get('id')}#/tab=controls"
 
     message = (
         f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
@@ -539,6 +551,13 @@ def memory_visible_items(user):
         faction_ids = set(user.get("banker_factions") or [user.get("faction_id")])
         return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
     return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and r.get("requester_id") == user.get("player_id")]
+
+
+def memory_get_visible_request(req_id, user):
+    for item in memory_visible_items(user):
+        if int(item.get("id", 0)) == int(req_id):
+            return item
+    return None
 
 
 def memory_insert_request(user, amount, note, target_faction_id, target_faction_name, selected_banker_id="", selected_banker_name=""):
@@ -641,7 +660,7 @@ def test_pushover():
     ok = send_pushover_alert(
         "🪙 Test Bank Ping",
         "Your Faction Bankers Pushover phone alert is working.",
-        f"{public_base_url()}/",
+        "https://www.torn.com/factions.php?step=your#/tab=controls",
     )
     return jsonify({"ok": ok, "pushover_configured": pushover_configured()})
 
@@ -684,6 +703,7 @@ def banker_status():
         faction_name = faction_name_for_id(requested_faction_id)
 
     items = [torn_get_banker_status(key, bid, requested_faction_id) for bid in banker_ids]
+    items = [x for x in items if not is_hidden_banker_name_or_id(x.get("player_id")) and not is_hidden_banker_name_or_id(x.get("name"))]
 
     # Available bankers first, then traveling/idle/offline.
     rank = {"online": 0, "idle": 1, "traveling": 2, "hospital": 3, "jail": 4, "offline": 5, "unknown": 6}
@@ -780,6 +800,47 @@ def list_requests():
         }
     )
 
+
+
+@app.get("/api/banker/requests/<int:req_id>")
+def get_request(req_id):
+    db_ok, db_msg = db_ready()
+
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    if not user.get("is_banker"):
+        return jsonify({"ok": False, "error": "Banker access required"}), 403
+
+    allowed_factions = all_configured_faction_ids() if user.get("is_admin") else user.get("banker_factions", [])
+    if not allowed_factions:
+        return jsonify({"ok": False, "error": "No banker factions configured for your account"}), 403
+
+    if not db_ok:
+        item = memory_get_visible_request(req_id, user)
+        if not item:
+            return jsonify({"ok": False, "error": "Request not found"}), 404
+        return jsonify({"ok": True, "item": item, "mode": "memory", "warning": db_msg})
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM banker_requests
+                WHERE id = %s
+                  AND faction_id = ANY(%s)
+                  AND is_active = TRUE
+                """,
+                (req_id, allowed_factions),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return jsonify({"ok": False, "error": "Request not found"}), 404
+
+    return jsonify({"ok": True, "item": row_to_item(row)})
 
 @app.post("/api/banker/requests")
 def create_request():
