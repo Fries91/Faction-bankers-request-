@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.1
+// @version      0.8.2
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -1183,7 +1183,7 @@
           ${factionOptions(selectedFaction)}
         </select>
         <select id="fb-built-banker" aria-label="Choose available banker">
-          ${bankerOptions()}
+          ${bankerOptions($("#fb-built-banker")?.value || "")}
         </select>
         <div id="fb-built-bankers">${bankerStatusPanel()}</div>
         <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
@@ -1479,16 +1479,35 @@
 
   function bankerOptions(selected = "") {
     const bankers = visibleBankers();
-    const options = [`<option value="">Any available banker</option>`];
+    const onlineCount = bankers.filter((b) => b.is_available || String(b.color || "").toLowerCase() === "green").length;
+    const travelingCount = bankers.filter((b) => ["yellow", "blue"].includes(String(b.color || "").toLowerCase())).length;
+    const offlineCount = Math.max(0, bankers.length - onlineCount - travelingCount);
+
+    let anyLabel = "Any available banker";
+    if (bankers.length) {
+      const bits = [];
+      if (onlineCount) bits.push(`${onlineCount} online`);
+      if (travelingCount) bits.push(`${travelingCount} traveling`);
+      if (offlineCount) bits.push(`${offlineCount} offline`);
+      anyLabel = `Any available banker — ${bits.join(", ") || bankers.length + " listed"}`;
+    } else if (APP.bankerStatusError) {
+      anyLabel = "Any available banker — status unavailable";
+    } else {
+      anyLabel = "Any available banker — loading status";
+    }
+
+    const options = [`<option value="">${esc(anyLabel)}</option>`];
 
     for (const b of bankers) {
       const id = String(b.player_id || "");
       const name = String(b.name || id);
-      const label = String(b.label || "Unknown");
+      const label = String(b.label || b.status_text || b.status || "Unknown");
       const details = String(b.details || "");
-      const available = b.is_available ? "🟢" : (b.color === "yellow" || b.color === "blue" ? "🟡" : "🔴");
+      const c = String(b.color || b.status_color || "").toLowerCase();
+      const available = b.is_available || c === "green" ? "🟢" : (c === "yellow" || c === "blue" ? "🟡" : "🔴");
       const phoneText = friesPhoneText(b);
-      options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${phoneText}${details ? ` (${esc(details).slice(0, 42)})` : ""}</option>`);
+      const extra = details ? ` (${esc(details).slice(0, 42)})` : "";
+      options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${phoneText}${extra}</option>`);
     }
 
     return options.join("");
@@ -1546,7 +1565,7 @@
 
         <label class="fb-label" style="margin-top:10px;">Choose banker now</label>
         <select id="fb-target-banker" class="fb-input fb-banker-select">
-          ${bankerOptions()}
+          ${bankerOptions($("#fb-target-banker")?.value || "")}
         </select>
         ${bankerStatusPanel()}
 
