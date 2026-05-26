@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.7
+// @version      0.8.8
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.8.7-amount-pushover-fix";
+  const FB_BUILD = "0.8.8-torn-dollar-field-fix";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1780,24 +1780,32 @@
     try { input.focus(); } catch {}
     try { input.click(); } catch {}
 
-    // React/Torn-safe value setter. Some Torn fields ignore plain input.value = x.
-    const proto = Object.getPrototypeOf(input);
-    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-    const ownDescriptor = Object.getOwnPropertyDescriptor(input, "value");
+    const isEditable = !!input.isContentEditable || String(input.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
 
-    if (descriptor && descriptor.set && (!ownDescriptor || ownDescriptor.set !== descriptor.set)) {
-      descriptor.set.call(input, val);
+    if (isEditable) {
+      try { input.textContent = val; } catch {}
+      try { input.innerText = val; } catch {}
+      try { input.setAttribute("data-value", val); } catch {}
     } else {
-      input.value = val;
-    }
+      // React/Torn-safe value setter. Some Torn fields ignore plain input.value = x.
+      const proto = Object.getPrototypeOf(input);
+      const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+      const ownDescriptor = Object.getOwnPropertyDescriptor(input, "value");
 
-    try { input.setAttribute("value", val); } catch {}
+      if (descriptor && descriptor.set && (!ownDescriptor || ownDescriptor.set !== descriptor.set)) {
+        descriptor.set.call(input, val);
+      } else {
+        input.value = val;
+      }
+
+      try { input.setAttribute("value", val); } catch {}
+    }
 
     const events = [
       new Event("input", { bubbles: true }),
       new Event("change", { bubbles: true }),
-      new KeyboardEvent("keydown", { bubbles: true, key: "0" }),
-      new KeyboardEvent("keyup", { bubbles: true, key: "0" }),
+      new KeyboardEvent("keydown", { bubbles: true, key: val.slice(-1) || "0" }),
+      new KeyboardEvent("keyup", { bubbles: true, key: val.slice(-1) || "0" }),
       new Event("blur", { bubbles: true }),
     ];
 
@@ -1826,7 +1834,9 @@
   }
 
   function visibleInput(el) {
-    if (!el || el.disabled || el.readOnly) return false;
+    if (!el || el.disabled) return false;
+    const isEditable = !!el.isContentEditable || String(el.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+    if (el.readOnly && !isEditable) return false;
     const rect = el.getBoundingClientRect();
     return rect.width > 30 && rect.height > 12;
   }
@@ -1876,10 +1886,10 @@
   }
 
   function allUsableInputs() {
-    return Array.from(document.querySelectorAll("input, textarea"))
+    return Array.from(document.querySelectorAll("input, textarea, [contenteditable=\"true\"]"))
       .filter((el) => !isFactionBankerOwnInput(el))
       .filter(visibleInput)
-      .filter((el) => !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
+      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
   }
 
   function looksLikePlayerInput(el) {
@@ -2022,35 +2032,156 @@
     return ok;
   }
 
+  function tapElementHard(el) {
+    if (!el) return false;
+    try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
+    const r = el.getBoundingClientRect?.();
+    const x = r ? Math.max(2, Math.min(window.innerWidth - 2, r.left + Math.min(r.width - 2, Math.max(2, r.width / 2)))) : 10;
+    const y = r ? Math.max(2, Math.min(window.innerHeight - 2, r.top + Math.min(r.height - 2, Math.max(2, r.height / 2)))) : 10;
+    const target = document.elementFromPoint?.(x, y) || el;
+    const chain = Array.from(new Set([target, target?.parentElement, el, el.closest?.("li, a, button, div")].filter(Boolean)));
+    let ok = false;
+
+    for (const node of chain) {
+      try {
+        node.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch", clientX: x, clientY: y }));
+      } catch {}
+      try { node.dispatchEvent(new TouchEvent("touchstart", { bubbles: true, cancelable: true })); } catch {}
+      try { node.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
+      try { node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
+      try { node.click(); ok = true; } catch {}
+      try { node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
+      try { node.dispatchEvent(new TouchEvent("touchend", { bubbles: true, cancelable: true })); } catch {}
+      try { node.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, pointerType: "touch", clientX: x, clientY: y })); } catch {}
+    }
+    return ok;
+  }
+
+  function closeKeyboardAndAutocomplete(playerInput) {
+    try {
+      const el = playerInput || document.activeElement;
+      if (el) {
+        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        el.blur();
+      }
+    } catch {}
+  }
+
   function clickPlayerAutocompleteChoice(data) {
     const name = String(data?.playerName || "").toLowerCase();
     const id = String(data?.playerId || "");
     if (!name && !id) return false;
 
-    const choices = Array.from(document.querySelectorAll("li, div, span, a, button"))
-      .filter((el) => !el.closest?.("#fb-built-in-box") && !el.closest?.("#fb-overlay"))
+    const ownSelectors = "#fb-built-in-box, #fb-overlay";
+    const all = Array.from(document.querySelectorAll("li, div, span, a, button"))
+      .filter((el) => !el.closest?.(ownSelectors))
       .filter((el) => {
+        const r = el.getBoundingClientRect?.();
+        if (!r || r.width < 25 || r.height < 10 || r.top < 0 || r.top > window.innerHeight) return false;
         const txt = getCleanText(el).toLowerCase();
-        if (!txt || txt.length > 120) return false;
+        if (!txt || txt.length > 180) return false;
         if (id && !txt.includes(id)) return false;
-        return !name || txt.includes(name);
+        if (name && !txt.includes(name)) return false;
+        if (txt.includes("friends") || txt.includes("company") || txt === "all" || txt === "faction") return false;
+        return true;
       })
-      .sort((a, b) => {
-        const ar = a.getBoundingClientRect();
-        const br = b.getBoundingClientRect();
-        return (br.width * br.height) - (ar.width * ar.height);
-      });
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const txt = getCleanText(el).toLowerCase();
+        let score = 0;
+        if (id && txt.includes(id)) score += 150;
+        if (name && txt.includes(name)) score += 100;
+        if (/\[[0-9]+\]/.test(txt)) score += 45;
+        if (el.tagName === "LI") score += 55;
+        if (el.tagName === "A" || el.tagName === "BUTTON") score += 35;
+        if (r.height >= 22 && r.height <= 58) score += 45;
+        if (r.width >= 120 && r.width <= 620) score += 20;
+        score -= Math.max(0, (r.width * r.height - 35000) / 900); // avoid giant wrappers
+        return { el, score };
+      })
+      .sort((a, b) => b.score - a.score);
 
-    const choice = choices[0];
-    if (!choice) return false;
+    const choice = all[0]?.el;
+    let ok = false;
+    if (choice) ok = tapElementHard(choice);
+
+    // PDA fallback: Enter often accepts the highlighted Torn autocomplete result.
+    const active = document.activeElement;
     try {
-      choice.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-      choice.click();
-      choice.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-      return true;
-    } catch {
-      return false;
+      if (active) {
+        active.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        active.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+      }
+    } catch {}
+
+    setTimeout(() => closeKeyboardAndAutocomplete(active), 120);
+    return ok;
+  }
+
+  function findInputBesideDollarPrefix() {
+    const ownSelectors = "#fb-built-in-box, #fb-overlay";
+    const dollarEls = Array.from(document.querySelectorAll("div, span, label, b, strong, i"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => /^\s*\$\s*$/.test(String(el.textContent || "")) || /^\s*\$\s*$/.test(String(el.getAttribute?.("aria-label") || "")));
+
+    for (const dollar of dollarEls) {
+      const scopes = [
+        dollar.parentElement,
+        dollar.parentElement?.parentElement,
+        dollar.closest?.("div"),
+        dollar.closest?.("li"),
+      ].filter(Boolean);
+
+      for (const scope of scopes) {
+        const inputs = Array.from(scope.querySelectorAll?.("input, textarea, [contenteditable=\"true\"]") || [])
+          .filter((el) => !el.closest?.(ownSelectors))
+          .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
+          .filter((el) => !looksLikePlayerInput(el))
+          .filter((el) => {
+            const r = el.getBoundingClientRect?.();
+            return r && r.width > 45 && r.height > 14;
+          });
+        if (inputs.length) return inputs[0];
+      }
+
+      // PDA Torn sometimes renders the $ block and the input as neighboring siblings.
+      let n = dollar.nextElementSibling;
+      for (let i = 0; i < 5 && n; i += 1, n = n.nextElementSibling) {
+        const input = n.matches?.("input, textarea, [contenteditable=\"true\"]") ? n : n.querySelector?.("input, textarea, [contenteditable=\"true\"]");
+        if (input && !input.closest?.(ownSelectors) && !looksLikePlayerInput(input)) return input;
+      }
     }
+
+    // Visual fallback: choose the first blank input below the selected player field and inside the Give Money block.
+    const player = bestInput("player");
+    if (player) {
+      const pr = player.getBoundingClientRect();
+      const candidates = allUsableInputs()
+        .filter((el) => el !== player && !looksLikePlayerInput(el))
+        .map((el) => ({ el, r: el.getBoundingClientRect() }))
+        .filter(({ r }) => r.top > pr.bottom - 4 && r.top < pr.bottom + 160 && r.width > 100)
+        .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
+      if (candidates[0]) return candidates[0].el;
+    }
+
+    return null;
+  }
+
+  function setTornAmountDirect(amount) {
+    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+    const el = findInputBesideDollarPrefix();
+    if (!el) return false;
+    const ok = setNativeValue(el, cleanAmount);
+    try {
+      el.focus();
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: cleanAmount.slice(-1) || "0" }));
+      el.blur();
+    } catch {}
+    return ok && String(el.value || "").replace(/[^0-9]/g, "") === cleanAmount;
   }
 
   function forceFillTornDollarAmount(amount) {
@@ -2059,9 +2190,9 @@
 
     const ownSelectors = "#fb-built-in-box, #fb-overlay";
     const player = bestInput("player");
-    const inputs = Array.from(document.querySelectorAll("input, textarea"))
+    const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable=\"true\"]"))
       .filter((el) => !el.closest?.(ownSelectors))
-      .filter((el) => !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
+      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
       .filter((el) => el !== player && !looksLikePlayerInput(el))
       .filter((el) => {
         const r = el.getBoundingClientRect();
@@ -2140,17 +2271,21 @@
     }
 
     if (data.amount) {
-      filled = fillTornAmountStrong(playerInput, data.amount) || forceFillTornDollarAmount(data.amount) || filled;
+      filled = setTornAmountDirect(data.amount) || fillTornAmountStrong(playerInput, data.amount) || forceFillTornDollarAmount(data.amount) || filled;
     }
 
     // Some Torn/PDA builds enable/replace the amount field only after the player autocomplete is selected.
     // Keep trying and force the money into Torn's real $ input, never this script's amount box.
     if (playerInput && data.amount) {
-      [350, 800, 1400, 2400, 3800, 5600, 7600].forEach((delay) => {
+      [250, 550, 900, 1400, 2200, 3400, 5200, 7600, 10500, 13500, 16500].forEach((delay) => {
         setTimeout(() => {
           clickPlayerAutocompleteChoice(data);
-          fillTornAmountStrong(playerInput, data.amount);
-          forceFillTornDollarAmount(data.amount);
+          closeKeyboardAndAutocomplete(playerInput);
+          setTimeout(() => {
+            setTornAmountDirect(data.amount);
+            fillTornAmountStrong(playerInput, data.amount);
+            forceFillTornDollarAmount(data.amount);
+          }, 220);
         }, delay);
       });
     }
