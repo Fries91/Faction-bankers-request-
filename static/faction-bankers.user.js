@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.9
+// @version      0.8.0
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.9-pda-stable";
+  const FB_BUILD = "0.8.0-pushover-torn-link";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1434,7 +1434,7 @@
 
     try {
       const res = await gmRequest("GET", `/api/banker/status?faction_id=${encodeURIComponent(fid)}`);
-      APP.bankers = Array.isArray(res.items) ? res.items : [];
+      APP.bankers = (Array.isArray(res.items) ? res.items : []).filter((b) => !isHiddenBanker(b));
       APP.bankerFactionId = fid;
       APP.bankerStatusError = APP.bankers.length ? "" : "No bankers returned by Render for this faction.";
       return true;
@@ -1467,8 +1467,18 @@
     return isFries91Banker(b) ? " • pings directly to phone" : "";
   }
 
+  function isHiddenBanker(b) {
+    const id = String(b?.player_id || "").trim().toLowerCase();
+    const name = String(b?.name || "").trim().toLowerCase();
+    return id === "pulsearts" || name === "pulsearts" || name.startsWith("pulsearts") || name === "pulse";
+  }
+
+  function visibleBankers() {
+    return (Array.isArray(APP.bankers) ? APP.bankers : []).filter((b) => !isHiddenBanker(b));
+  }
+
   function bankerOptions(selected = "") {
-    const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
+    const bankers = visibleBankers();
     const options = [`<option value="">Any available banker</option>`];
 
     for (const b of bankers) {
@@ -1485,25 +1495,9 @@
   }
 
   function bankerStatusPanel() {
-    const bankers = Array.isArray(APP.bankers) ? APP.bankers : [];
-    if (!bankers.length) {
-      const msg = APP.bankerStatusError || "Banker status loading…";
-      return `<div class="fb-small" style="margin-top:8px;">${esc(msg)}</div>`;
-    }
-
-    return `
-      <div class="fb-bankers-list">
-        ${bankers.map((b) => `
-          <div class="fb-banker-line">
-            <div class="fb-banker-main">
-              <div class="fb-small"><span class="fb-dot ${esc(b.color || "gray")}"></span><b style="color:#fff;">${esc(b.name || b.player_id)}</b> ${esc(b.label || "Unknown")}<span style="color:#8dffac;font-weight:900;">${esc(friesPhoneText(b))}</span></div>
-              <div class="fb-small">${esc(b.details || "")}</div>
-            </div>
-            <span class="fb-pill ${b.is_available ? "approved" : "pending"}">${b.is_available ? "Available" : "Not now"}</span>
-          </div>
-        `).join("")}
-      </div>
-    `;
+    // Banker availability stays inside the dropdown only.
+    // This keeps the faction page compact and avoids showing banker chips/rows under the dropdown.
+    return "";
   }
 
   async function handleFactionChangeAndReload(selectId, rerender = true) {
@@ -1720,6 +1714,35 @@
   function clearPayPrefill() {
     GM_setValue(K_PAY_PREFILL, "");
     try { localStorage.removeItem(K_PAY_PREFILL); } catch {}
+  }
+
+
+  function incomingRequestIdFromUrl() {
+    try {
+      const url = new URL(location.href);
+      return String(url.searchParams.get("fb_bank_req") || "").replace(/\D/g, "");
+    } catch {
+      return "";
+    }
+  }
+
+  async function handleIncomingBankRequestUrl() {
+    const reqId = incomingRequestIdFromUrl();
+    if (!reqId || !GM_getValue(K_API_KEY, "")) return false;
+
+    try {
+      const res = await gmRequest("GET", `/api/banker/requests/${encodeURIComponent(reqId)}`);
+      const item = res && res.item;
+      if (!item) return false;
+      savePayPrefill(item);
+      showPayNotice("Bank request loaded from phone ping. Player and amount will auto-fill. Manually press Give Money.");
+      setTimeout(tryPrefillFactionBankForm, 800);
+      setTimeout(tryPrefillFactionBankForm, 2200);
+      return true;
+    } catch (err) {
+      showPayNotice(`Could not load bank request #${reqId}: ${String(err.message || err).slice(0, 90)}`);
+      return false;
+    }
   }
 
   function openBankingPageForRequest(r) {
@@ -2480,7 +2503,7 @@
 
   // Prefill only on faction banking page and only a few times. This prevents PDA freezing.
   if (isFactionPage()) {
-    setTimeout(tryPrefillFactionBankForm, 1000);
+    setTimeout(() => { handleIncomingBankRequestUrl(); tryPrefillFactionBankForm(); }, 1000);
     setTimeout(tryPrefillFactionBankForm, 2600);
   }
 })();
