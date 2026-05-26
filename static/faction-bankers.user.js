@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.0
+// @version      0.9.1
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.9.0-faction-balance";
+  const FB_BUILD = "0.9.1-true-member-balance";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1561,7 +1561,7 @@
     if (Number.isFinite(cached) && cached >= 0 && cachedText) {
       APP.balanceAmount = Math.floor(cached);
       APP.balanceText = cachedText;
-      APP.balanceSource = "last seen";
+      APP.balanceSource = "last verified";
       return true;
     }
 
@@ -1574,29 +1574,42 @@
   function detectFactionBalanceFromPage() {
     if (!isOwnFactionPage()) return false;
 
-    const roots = Array.from(document.querySelectorAll("div, span, li, td, p, section"));
+    // Be strict: only read the MEMBER'S own faction-bank balance, not faction vault money,
+    // points, jackpot, or our own request amount field.
+    const roots = Array.from(document.querySelectorAll("div, span, li, td, p, section, label"));
     let best = null;
+
+    const badWords = [
+      "request", "requested", "amount", "vault", "funds", "faction money",
+      "money:", "points:", "merits:", "respect", "cost", "price", "donation",
+      "armoury", "stock", "banker", "available banker"
+    ];
 
     for (const el of roots) {
       if (!el || el.closest("#fb-built-in-box, #fb-overlay")) continue;
       const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
-      if (!text || text.length > 260 || !text.includes("$")) continue;
+      if (!text || text.length > 180 || !text.includes("$")) continue;
 
       const lower = text.toLowerCase();
+      if (badWords.some((w) => lower.includes(w))) continue;
+
+      // Torn normally labels this as Your balance / Balance / Faction balance near the personal banking row.
+      // We do NOT accept generic dollar amounts anymore because that caused wrong balances.
       let score = 0;
-      if (lower.includes("your balance")) score += 100;
-      if (lower.includes("balance")) score += 45;
-      if (lower.includes("bank")) score += 20;
-      if (lower.includes("faction")) score += 8;
-      if (lower.includes("vault")) score += 5;
-      if (score <= 0) continue;
+      if (/\byour\s+(faction\s+)?balance\b/i.test(text)) score += 120;
+      if (/\bmy\s+(faction\s+)?balance\b/i.test(text)) score += 100;
+      if (/\bbalance\s*[:\-]?\s*\$/i.test(text)) score += 70;
+      if (/\$[\d,]+\s*\b(balance)\b/i.test(text)) score += 50;
+      if (lower.includes("member balance")) score += 90;
+      if (lower.includes("bank balance")) score += 35;
+      if (score < 70) continue;
 
       const amount = parseMoneyAmount(text);
       if (amount === null) continue;
       if (!best || score > best.score) best = { amount, score, text };
     }
 
-    if (best) return setFactionBalance(best.amount, "page");
+    if (best) return setFactionBalance(best.amount, "page verified");
     return false;
   }
 
@@ -1630,7 +1643,7 @@
     const has = Number.isFinite(Number(APP.balanceAmount));
     const label = has ? money(APP.balanceAmount) : esc(APP.balanceText || "Balance unavailable");
     const src = APP.balanceSource ? ` (${APP.balanceSource})` : "";
-    return `<div class="fb-balance-line"><div>Your faction balance: <b>${label}</b></div><span>${esc(src || "")}</span></div>`;
+    return `<div class="fb-balance-line"><div>Your balance: <b>${label}</b></div><span>${esc(src || "")}</span></div>`;
   }
 
   function currentTargetFactionId() {
