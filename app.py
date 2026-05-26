@@ -1013,37 +1013,38 @@ def static_files(filename):
 
 
 def scan_json_for_balance(obj, player_id=""):
-    """Best-effort scan for a user's faction bank balance in Torn API JSON.
+    """Strict scan for the logged-in user's own faction-bank balance.
 
-    Torn may not expose this for every key/faction setup. This deliberately avoids
-    guessing from unrelated money fields unless the key name/context mentions balance.
+    This intentionally does NOT use generic faction money/funds/vault values,
+    because those are not the user's personal faction balance and caused false totals.
     """
     pid = str(player_id or "").strip()
+    if not pid:
+        return None, ""
+
     candidates = []
 
     def walk(x, path=""):
         if isinstance(x, dict):
-            # If a dict appears to be the logged-in/member row, inspect balance-ish fields.
             row_id = str(x.get("player_id") or x.get("id") or x.get("user_id") or "").strip()
-            row_name = str(x.get("name") or "").strip().lower()
-            row_context_bonus = 20 if pid and row_id == pid else 0
+            is_player_row = bool(row_id and row_id == pid)
 
             for k, v in x.items():
                 key = str(k or "").lower()
                 pth = f"{path}.{key}" if path else key
-                if isinstance(v, (int, float)) and "balance" in key:
-                    score = 50 + row_context_bonus
-                    if "faction" in pth or "bank" in pth or "member" in pth:
-                        score += 20
-                    candidates.append((score, int(v), pth))
-                elif isinstance(v, str) and "balance" in key:
-                    cleaned = v.replace("$", "").replace(",", "").strip()
-                    if cleaned.isdigit():
-                        score = 50 + row_context_bonus
-                        candidates.append((score, int(cleaned), pth))
+
+                # Only accept balance fields from the row that belongs to the logged-in player.
+                if is_player_row and "balance" in key:
+                    if isinstance(v, (int, float)):
+                        candidates.append((100, int(v), pth))
+                    elif isinstance(v, str):
+                        cleaned = v.replace("$", "").replace(",", "").strip()
+                        if cleaned.isdigit():
+                            candidates.append((100, int(cleaned), pth))
+
                 walk(v, pth)
         elif isinstance(x, list):
-            for idx, item in enumerate(x[:500]):
+            for idx, item in enumerate(x[:1000]):
                 walk(item, f"{path}[{idx}]")
 
     walk(obj)
@@ -1051,7 +1052,6 @@ def scan_json_for_balance(obj, player_id=""):
         return None, ""
     candidates.sort(key=lambda t: t[0], reverse=True)
     return candidates[0][1], candidates[0][2]
-
 
 def torn_get_faction_balance(key, user):
     if not key:
@@ -1062,19 +1062,10 @@ def torn_get_faction_balance(key, user):
 
     urls = []
     if faction_id:
-        urls.extend([
-            f"{TORN_API_BASE}/faction/{faction_id}?selections=basic&key={key}",
-            f"{TORN_API_BASE}/faction/{faction_id}?selections=money&key={key}",
-            f"{TORN_API_BASE}/faction/{faction_id}?selections=members&key={key}",
-        ])
-    urls.extend([
-        f"{TORN_API_BASE}/faction/?selections=basic&key={key}",
-        f"{TORN_API_BASE}/faction/?selections=money&key={key}",
-        f"{TORN_API_BASE}/faction/?selections=members&key={key}",
-        f"{TORN_API_BASE}/user/?selections=profile&key={key}",
-    ])
+        urls.append(f"{TORN_API_BASE}/faction/{faction_id}?selections=members&key={key}")
+    urls.append(f"{TORN_API_BASE}/faction/?selections=members&key={key}")
 
-    last_error = "Balance unavailable with this key"
+    last_error = "Your personal faction balance is unavailable with this key/page"
     for url in urls:
         try:
             r = requests.get(url, timeout=REQUEST_TIMEOUT)
