@@ -830,6 +830,14 @@ def send_bank_request_ping(item):
             seen_keys.add(k)
             sent = send_pushover_to_key(k, title, message, request_url) or sent
 
+    # Optional: ping extra banker keys from Render env, comma-separated.
+    # PUSHOVER_BANKER_KEYS=key1,key2,key3
+    for raw in os.getenv("PUSHOVER_BANKER_KEYS", "").split(","):
+        k = clean_pushover_key(raw)
+        if k and k not in seen_keys:
+            seen_keys.add(k)
+            sent = send_pushover_to_key(k, title, message, request_url) or sent
+
     # Also keep the owner's/global Fries91 ping active as fallback.
     default_key = clean_pushover_key(os.getenv("PUSHOVER_USER_KEY", ""))
     if default_key and default_key not in seen_keys:
@@ -978,6 +986,7 @@ def health():
         "faction_bankers": public_factions(),
         "admin_player_id": ADMIN_PLAYER_ID,
         "pushover_configured": pushover_configured(),
+                "extra_pushover_keys_configured": bool(os.getenv("PUSHOVER_BANKER_KEYS", "").strip()),
         "public_base_url": public_base_url(),
         "banker_role_names": banker_role_names_for_faction(user["faction_id"]),
         "manual_bankers_memory_count": sum(len(v) for v in MEMORY_MANUAL_BANKERS.values()),
