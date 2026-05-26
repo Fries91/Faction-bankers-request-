@@ -136,7 +136,7 @@
               .replace(/\s+/g, " ")
               .trim()
               .slice(0, 160);
-            data = { ok: false, error: clean || "Render returned a non-JSON error. Check app.py deploy logs." };
+            data = { ok: false, error: (res.status >= 500 ? "Render backend 500. Replace/redeploy app.py or check DATABASE_URL. Details: " : "") + (clean || "Render returned a non-JSON error. Check app.py deploy logs.") };
           }
 
           if (res.status >= 200 && res.status < 300) {
@@ -2210,6 +2210,60 @@
     saveSeenPendingIds([...seen, ...fresh.map((r) => String(r.id))]);
   }
 
+  async function refreshFactionBoxData(force = false) {
+    const key = GM_getValue(K_API_KEY, "");
+    if (!key) {
+      APP.bankerStatusError = "Save API key in Settings first.";
+      mountBuiltInBankerBox();
+      return false;
+    }
+
+    if (APP.quickRefreshing) return true;
+    if (!force && Date.now() - (APP.lastQuickLoad || 0) < 45000) return true;
+
+    APP.quickRefreshing = true;
+    APP.lastQuickLoad = Date.now();
+
+    try {
+      APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
+
+      try {
+        const factions = await gmRequest("GET", "/api/banker/factions");
+        if (Array.isArray(factions.items) && factions.items.length) APP.factions = factions.items;
+      } catch (ignore) {
+        APP.factions = DEFAULT_FACTIONS.slice();
+      }
+
+      try {
+        const me = await gmRequest("GET", "/api/banker/me");
+        APP.me = me;
+      } catch (meErr) {
+        APP.bankerStatusError = String(meErr.message || meErr).slice(0, 90);
+      }
+
+      await loadBankerStatus(currentTargetFactionId());
+      mountBuiltInBankerBox();
+      return true;
+    } catch (err) {
+      APP.bankerStatusError = String(err.message || err).slice(0, 120);
+      if (!APP.bankers || !APP.bankers.length) {
+        APP.bankers = [{
+          player_id: "3679030",
+          name: "Fries91",
+          status: "unknown",
+          color: "gray",
+          label: "Status check failed",
+          details: APP.bankerStatusError,
+          is_available: false,
+        }];
+      }
+      mountBuiltInBankerBox();
+      return false;
+    } finally {
+      APP.quickRefreshing = false;
+    }
+  }
+
   async function refreshAll(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key) {
@@ -2338,15 +2392,16 @@
     ensureStyles();
     clearBankerUiOnWrongPage();
 
-    // Only create the overlay when the user opens the app or already had it open.
-    if (GM_getValue(K_OPEN, false) || APP.open) ensureOverlay();
+    // Only create the overlay when the user taps Board/profile coin. Never auto-open it on normal pages.
+    if (APP.open) ensureOverlay();
 
     if (isOwnFactionPage()) {
       mountBuiltInBankerBox();
 
-      // Load data for faction dropdown/status once, but do not spam PDA.
-      if (GM_getValue(K_API_KEY, "") && (Date.now() - APP.lastLoad > 45000 || reason === "url")) {
-        refreshAll(false);
+      // PDA-safe: only load factions/me/banker status for the quick box.
+      // Do not call /api/banker/requests here because that uses the database and caused 500s.
+      if (GM_getValue(K_API_KEY, "") && (Date.now() - (APP.lastQuickLoad || 0) > 45000 || reason === "url")) {
+        refreshFactionBoxData(false);
       }
     }
 
@@ -2368,7 +2423,9 @@
 
     APP.booted = true;
 
-    if (GM_getValue(K_OPEN, false)) openOverlay();
+    // Do not restore an old open board on app start. This stops the board from appearing on Gym/Home/etc.
+    GM_setValue(K_OPEN, false);
+    APP.open = false;
 
     pageMount("boot");
 
@@ -2390,8 +2447,11 @@
 
       pageMount("slow");
 
-      if (GM_getValue(K_API_KEY, "") && (APP.open || isOwnFactionPage()) && Date.now() - APP.lastLoad > 90000) {
+      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 90000) {
         refreshAll(false);
+      }
+      if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
+        refreshFactionBoxData(false);
       }
     }, 30000);
   }
