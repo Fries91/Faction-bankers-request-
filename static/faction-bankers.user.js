@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.7.7
+// @version      0.7.8
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.7.7-pda-nofreeze";
+  const FB_BUILD = "0.7.8-json-error-safe";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -128,7 +128,15 @@
           try {
             data = JSON.parse(res.responseText || "{}");
           } catch {
-            data = { ok: false, error: res.responseText || "Bad JSON response" };
+            const raw = String(res.responseText || "");
+            const clean = raw
+              .replace(/<script[\s\S]*?<\/script>/gi, " ")
+              .replace(/<style[\s\S]*?<\/style>/gi, " ")
+              .replace(/<[^>]+>/g, " ")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 160);
+            data = { ok: false, error: clean || "Render returned a non-JSON error. Check app.py deploy logs." };
           }
 
           if (res.status >= 200 && res.status < 300) {
@@ -2251,7 +2259,7 @@
 
       const subtitle = $("#fb-subtitle");
       if (subtitle) {
-        subtitle.textContent = `Last refresh failed: ${String(err.message || err).slice(0, 60)}`;
+        subtitle.textContent = `Last refresh failed: ${String(err.message || err).slice(0, 80)}`;
       }
 
       // Do not wipe the current screen after a successful request.
