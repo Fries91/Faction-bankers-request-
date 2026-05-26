@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.0
+// @version      0.8.1
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.8.0-pushover-torn-link";
+  const FB_BUILD = "0.8.1-strong-bank-amount-prefill";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1736,8 +1736,10 @@
       if (!item) return false;
       savePayPrefill(item);
       showPayNotice("Bank request loaded from phone ping. Player and amount will auto-fill. Manually press Give Money.");
-      setTimeout(tryPrefillFactionBankForm, 800);
-      setTimeout(tryPrefillFactionBankForm, 2200);
+      setTimeout(tryPrefillFactionBankForm, 600);
+      setTimeout(tryPrefillFactionBankForm, 1600);
+      setTimeout(tryPrefillFactionBankForm, 3200);
+      setTimeout(tryPrefillFactionBankForm, 5500);
       return true;
     } catch (err) {
       showPayNotice(`Could not load bank request #${reqId}: ${String(err.message || err).slice(0, 90)}`);
@@ -1754,13 +1756,44 @@
 
   function setNativeValue(input, value) {
     if (!input) return false;
+
+    const val = String(value ?? "");
+
+    try { input.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
+    try { input.focus(); } catch {}
+    try { input.click(); } catch {}
+
+    // React/Torn-safe value setter. Some Torn fields ignore plain input.value = x.
     const proto = Object.getPrototypeOf(input);
     const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-    if (descriptor && descriptor.set) descriptor.set.call(input, value);
-    else input.value = value;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "0" }));
+    const ownDescriptor = Object.getOwnPropertyDescriptor(input, "value");
+
+    if (descriptor && descriptor.set && (!ownDescriptor || ownDescriptor.set !== descriptor.set)) {
+      descriptor.set.call(input, val);
+    } else {
+      input.value = val;
+    }
+
+    try { input.setAttribute("value", val); } catch {}
+
+    const events = [
+      new Event("input", { bubbles: true }),
+      new Event("change", { bubbles: true }),
+      new KeyboardEvent("keydown", { bubbles: true, key: "0" }),
+      new KeyboardEvent("keyup", { bubbles: true, key: "0" }),
+      new Event("blur", { bubbles: true }),
+    ];
+
+    // InputEvent is not always available in PDA, so keep it optional.
+    try {
+      events.unshift(new InputEvent("input", { bubbles: true, inputType: "insertText", data: val }));
+    } catch {}
+
+    events.forEach((ev) => {
+      try { input.dispatchEvent(ev); } catch {}
+    });
+
+    try { input.focus(); } catch {}
     return true;
   }
 
@@ -1799,10 +1832,105 @@
       (s.includes("player") || s.includes("user") || s.includes("member") ? 45 : 0);
   }
 
-  function bestInput(kind) {
-    const inputs = Array.from(document.querySelectorAll("input, textarea"))
+  function inputSignature(el) {
+    const bits = [
+      el?.id,
+      el?.name,
+      el?.placeholder,
+      el?.getAttribute?.("aria-label"),
+      el?.className,
+      el?.closest?.("label")?.textContent,
+      el?.parentElement?.textContent,
+      el?.parentElement?.previousElementSibling?.textContent,
+      el?.parentElement?.parentElement?.textContent,
+    ];
+    return bits.map((v) => String(v || "").toLowerCase()).join(" ");
+  }
+
+  function allUsableInputs() {
+    return Array.from(document.querySelectorAll("input, textarea"))
       .filter(visibleInput)
       .filter((el) => !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
+  }
+
+  function looksLikePlayerInput(el) {
+    const s = inputSignature(el);
+    return s.includes("search player") ||
+      s.includes("player") ||
+      s.includes("recipient") ||
+      s.includes("user") ||
+      s.includes("member") ||
+      s.includes("name") ||
+      s.includes("xid");
+  }
+
+  function looksLikeAmountInput(el) {
+    const s = inputSignature(el);
+    const type = String(el.type || "").toLowerCase();
+    const mode = String(el.inputMode || "").toLowerCase();
+
+    if (looksLikePlayerInput(el) && !s.includes("amount")) return false;
+
+    return s.includes("amount") ||
+      s.includes("money") ||
+      s.includes("cash") ||
+      s.includes("give money") ||
+      s.includes("change balance") ||
+      s.includes("$") ||
+      mode === "numeric" ||
+      type === "number" ||
+      type === "tel";
+  }
+
+  function bestAmountInputNearDollar(inputs, playerInput) {
+    const dollarNodes = Array.from(document.querySelectorAll("div, span, label, p"))
+      .filter((el) => getCleanText(el).trim() === "$" || getCleanText(el).trim().startsWith("$"))
+      .map((el) => el.getBoundingClientRect());
+
+    const playerRect = playerInput?.getBoundingClientRect?.();
+
+    const candidates = inputs.filter((input) => input !== playerInput && !looksLikePlayerInput(input));
+
+    if (dollarNodes.length && candidates.length) {
+      const scored = candidates.map((input) => {
+        const r = input.getBoundingClientRect();
+        let best = 999999;
+        for (const d of dollarNodes) {
+          const dist = Math.abs(r.top - d.top) + Math.abs(r.left - d.right);
+          best = Math.min(best, dist);
+        }
+        return { input, score: best };
+      }).sort((a, b) => a.score - b.score);
+      if (scored[0] && scored[0].score < 250) return scored[0].input;
+    }
+
+    // Torn banking page often has player search first, then amount field below it.
+    if (playerRect) {
+      const below = candidates
+        .filter((input) => {
+          const r = input.getBoundingClientRect();
+          return r.top > playerRect.top - 6;
+        })
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      if (below.length) return below[0];
+    }
+
+    return candidates[0] || null;
+  }
+
+  function bestInput(kind, avoidInput = null) {
+    const inputs = allUsableInputs();
+
+    if (kind === "amount") {
+      const scoredAmount = inputs
+        .filter((el) => el !== avoidInput)
+        .map((el) => ({ el, score: scoreInputFor(el, kind) + (looksLikeAmountInput(el) ? 40 : 0) }))
+        .filter((x) => x.score > 10 && !looksLikePlayerInput(x.el))
+        .sort((a, b) => b.score - a.score);
+
+      if (scoredAmount[0]) return scoredAmount[0].el;
+      return bestAmountInputNearDollar(inputs, avoidInput || bestInput("player"));
+    }
 
     const scored = inputs.map((el) => ({ el, score: scoreInputFor(el, kind) }))
       .filter((x) => x.score > 0)
@@ -1835,7 +1963,7 @@
     clickTextButton(["controls", "bank", "give money", "vault"]);
 
     const playerInput = bestInput("player");
-    const amountInput = bestInput("amount");
+    const amountInput = bestInput("amount", playerInput);
     let filled = false;
 
     if (playerInput) {
@@ -1843,7 +1971,19 @@
     }
 
     if (amountInput && data.amount) {
-      filled = setNativeValue(amountInput, String(data.amount)) || filled;
+      filled = setNativeValue(amountInput, String(data.amount).replace(/[^0-9]/g, "")) || filled;
+    }
+
+    // Some Torn/PDA builds reveal/replace the amount field after player search changes.
+    if (playerInput && data.amount) {
+      setTimeout(() => {
+        const lateAmount = bestInput("amount", playerInput);
+        if (lateAmount) setNativeValue(lateAmount, String(data.amount).replace(/[^0-9]/g, ""));
+      }, 900);
+      setTimeout(() => {
+        const lateAmount = bestInput("amount", playerInput);
+        if (lateAmount) setNativeValue(lateAmount, String(data.amount).replace(/[^0-9]/g, ""));
+      }, 2200);
     }
 
     if (filled) {
