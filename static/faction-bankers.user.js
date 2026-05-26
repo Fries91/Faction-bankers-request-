@@ -3300,6 +3300,7 @@
           const settingsTab = document.querySelector('.fb-tab[data-tab="settings"]');
           if (settingsTab) settingsTab.click();
         });
+      }
       return false;
     } finally {
       APP.refreshing = false;
