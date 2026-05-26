@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.8.9
+// @version      0.9.0
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.8.8-torn-dollar-field-fix";
+  const FB_BUILD = "0.9.0-faction-balance";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -51,6 +51,10 @@
     leaderLoadError: "",
     bankerFactionId: "",
     bankerStatusError: "",
+    balanceAmount: null,
+    balanceText: "Balance unavailable",
+    balanceSource: "",
+    balanceUpdatedAt: 0,
     pendingCount: 0,
     busy: false,
     open: false,
@@ -358,6 +362,31 @@
 
       #fb-built-bankers {
         grid-column: 1 / -1;
+      }
+
+      .fb-balance-line {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border: 1px solid rgba(255,211,106,.22);
+        background: rgba(255,211,106,.075);
+        color: #eee;
+        border-radius: 9px;
+        padding: 7px 8px;
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .fb-balance-line b {
+        color: #ffd36a;
+      }
+
+      .fb-balance-line span {
+        color: #aaa;
+        font-size: 10px;
+        white-space: nowrap;
       }
 
       #fb-built-amount,
@@ -845,6 +874,31 @@
         grid-column: 1 / -1;
       }
 
+      .fb-balance-line {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border: 1px solid rgba(255,211,106,.22);
+        background: rgba(255,211,106,.075);
+        color: #eee;
+        border-radius: 9px;
+        padding: 7px 8px;
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .fb-balance-line b {
+        color: #ffd36a;
+      }
+
+      .fb-balance-line span {
+        color: #aaa;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
         #fb-built-amount,
         #fb-built-faction,
         #fb-built-banker,
@@ -1190,6 +1244,7 @@
   }
 
   function mountBuiltInBankerBox() {
+    detectFactionBalanceFromPage();
     const oldBox = $("#fb-built-in-box");
 
     // Only show the quick request box on your own faction page.
@@ -1217,6 +1272,7 @@
       b: (APP.bankers || []).map((x) => [String(x.player_id || ""), String(x.name || ""), String(x.bucket || x.status_color || x.color || ""), String(x.status_text || x.status || x.label || "")]),
       err: APP.bankerStatusError || "",
       sf: selectedFaction,
+      bal: String(APP.balanceAmount ?? APP.balanceText ?? ""),
     });
 
     if (!box) {
@@ -1244,6 +1300,7 @@
 
       <div class="fb-built-grid">
         <div class="fb-own-faction">Faction: <b>${esc(APP.me?.faction_name || factionLabelById(selectedFaction) || "Your faction")}</b></div>
+        ${balanceLineHtml()}
         <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
         <select id="fb-built-banker" aria-label="Choose available banker">
           ${bankerOptions($("#fb-built-banker")?.value || "")}
@@ -1479,6 +1536,103 @@
     return found?.faction_name || id;
   }
 
+
+  function parseMoneyAmount(text) {
+    const raw = String(text || "");
+    const m = raw.match(/\$\s*([0-9][0-9,]*)/);
+    if (!m) return null;
+    const n = Number(String(m[1] || "").replace(/,/g, ""));
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  }
+
+  function setFactionBalance(amount, source = "", fallbackText = "Balance unavailable") {
+    if (Number.isFinite(Number(amount)) && Number(amount) >= 0) {
+      APP.balanceAmount = Math.floor(Number(amount));
+      APP.balanceText = money(APP.balanceAmount);
+      APP.balanceSource = source || "detected";
+      APP.balanceUpdatedAt = Date.now();
+      GM_setValue("fb_last_faction_balance_amount_v1", String(APP.balanceAmount));
+      GM_setValue("fb_last_faction_balance_text_v1", APP.balanceText);
+      return true;
+    }
+
+    const cached = Number(GM_getValue("fb_last_faction_balance_amount_v1", ""));
+    const cachedText = GM_getValue("fb_last_faction_balance_text_v1", "");
+    if (Number.isFinite(cached) && cached >= 0 && cachedText) {
+      APP.balanceAmount = Math.floor(cached);
+      APP.balanceText = cachedText;
+      APP.balanceSource = "last seen";
+      return true;
+    }
+
+    APP.balanceAmount = null;
+    APP.balanceText = fallbackText || "Balance unavailable";
+    APP.balanceSource = "";
+    return false;
+  }
+
+  function detectFactionBalanceFromPage() {
+    if (!isOwnFactionPage()) return false;
+
+    const roots = Array.from(document.querySelectorAll("div, span, li, td, p, section"));
+    let best = null;
+
+    for (const el of roots) {
+      if (!el || el.closest("#fb-built-in-box, #fb-overlay")) continue;
+      const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 260 || !text.includes("$")) continue;
+
+      const lower = text.toLowerCase();
+      let score = 0;
+      if (lower.includes("your balance")) score += 100;
+      if (lower.includes("balance")) score += 45;
+      if (lower.includes("bank")) score += 20;
+      if (lower.includes("faction")) score += 8;
+      if (lower.includes("vault")) score += 5;
+      if (score <= 0) continue;
+
+      const amount = parseMoneyAmount(text);
+      if (amount === null) continue;
+      if (!best || score > best.score) best = { amount, score, text };
+    }
+
+    if (best) return setFactionBalance(best.amount, "page");
+    return false;
+  }
+
+  async function loadFactionBalance(force = false) {
+    detectFactionBalanceFromPage();
+
+    if (!GM_getValue(K_API_KEY, "")) {
+      setFactionBalance(null, "", "Save key to check balance");
+      return false;
+    }
+
+    if (!force && APP.balanceUpdatedAt && Date.now() - APP.balanceUpdatedAt < 30000) return true;
+
+    try {
+      const res = await gmRequest("GET", "/api/banker/balance");
+      if (res && res.ok && Number.isFinite(Number(res.balance))) {
+        return setFactionBalance(Number(res.balance), res.source || "api");
+      }
+      if (res && res.message) APP.balanceText = String(res.message);
+    } catch (err) {
+      // Balance is optional. Do not break the whole banking box if Torn/API cannot expose it.
+      if (!APP.balanceAmount && !detectFactionBalanceFromPage()) {
+        setFactionBalance(null, "", "Balance unavailable");
+      }
+    }
+
+    return APP.balanceAmount !== null;
+  }
+
+  function balanceLineHtml() {
+    const has = Number.isFinite(Number(APP.balanceAmount));
+    const label = has ? money(APP.balanceAmount) : esc(APP.balanceText || "Balance unavailable");
+    const src = APP.balanceSource ? ` (${APP.balanceSource})` : "";
+    return `<div class="fb-balance-line"><div>Your faction balance: <b>${label}</b></div><span>${esc(src || "")}</span></div>`;
+  }
+
   function currentTargetFactionId() {
     return (
       APP.me?.faction_id ||
@@ -1630,6 +1784,7 @@
         <label class="fb-label">Faction</label>
         <div class="fb-input" style="height:auto;">${esc(APP.me?.faction_name || "Your faction")}</div>
         <input id="fb-target-faction" type="hidden" value="${esc(APP.me?.faction_id || currentTargetFactionId())}">
+        <div style="margin-top:8px;">${balanceLineHtml()}</div>
 
         <label class="fb-label" style="margin-top:10px;">Choose banker now</label>
         <select id="fb-target-banker" class="fb-input fb-banker-select">
@@ -2716,23 +2871,27 @@
       return;
     }
 
+    await loadFactionBalance(true);
+    const detectedFullBalance = Number(APP.balanceAmount || 0);
+    const sendDetectedAmount = Number.isFinite(detectedFullBalance) && detectedFullBalance > 0;
+
     APP.busy = true;
-    if (status) status.textContent = "Sending full balance request...";
+    if (status) status.textContent = sendDetectedAmount ? `Sending full balance request for ${money(detectedFullBalance)}...` : "Sending full balance request...";
 
     try {
       await gmRequest("POST", "/api/banker/requests", {
-        amount: 1,
-        note: FULL_BALANCE_NOTE,
+        amount: sendDetectedAmount ? detectedFullBalance : 1,
+        note: sendDetectedAmount ? `Full balance requested: ${money(detectedFullBalance)}` : FULL_BALANCE_NOTE,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
-      if (status) status.textContent = `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
+      if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
       await refreshAll(true);
 
       if (APP.open) {
-        renderRequestTab(`<div class="fb-success">Full balance request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>`);
+        renderRequestTab(`<div class="fb-success">${sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}.` : `Full balance request sent to ${esc(factionLabelById(targetFactionId))} bankers.`}</div>`);
       }
     } catch (err) {
       if (status) status.textContent = err.message || "Request failed";
@@ -3068,6 +3227,8 @@
       const me = await gmRequest("GET", "/api/banker/me");
       APP.me = me;
 
+      await loadFactionBalance(false);
+
       if (APP.me?.can_manage_leaders || APP.me?.is_admin || APP.me?.is_banker) {
         await loadLeaderBankers();
       }
@@ -3139,7 +3300,6 @@
           const settingsTab = document.querySelector('.fb-tab[data-tab="settings"]');
           if (settingsTab) settingsTab.click();
         });
-      }
       return false;
     } finally {
       APP.refreshing = false;
