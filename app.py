@@ -1777,6 +1777,16 @@ def banker_action(req_id, action):
                 existing = item
                 break
         if not existing:
+            for item in MEMORY_REQUESTS:
+                if int(item.get("id", 0) or 0) == int(req_id):
+                    return jsonify({
+                        "ok": True,
+                        "item": item,
+                        "removed_from_active": True,
+                        "already_cleared": True,
+                        "mode": "memory",
+                        "warning": db_msg,
+                    })
             return jsonify({"ok": False, "error": "Active request not found", "mode": "memory", "warning": db_msg}), 404
         allowed, reason = can_handle_request(existing)
         if not allowed:
@@ -1806,6 +1816,25 @@ def banker_action(req_id, action):
             existing = cur.fetchone()
 
             if not existing:
+                # Idempotent clear: if the request was already approved/completed/denied,
+                # return success so PDA/userscript can remove stale local cards.
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE id = %s
+                    """,
+                    (req_id,),
+                )
+                old_row = cur.fetchone()
+                if old_row:
+                    return jsonify({
+                        "ok": True,
+                        "item": row_to_item(old_row),
+                        "removed_from_active": True,
+                        "already_cleared": True,
+                        "message": "Request was already cleared",
+                    })
                 return jsonify({"ok": False, "error": "Active request not found"}), 404
 
             allowed, reason = can_handle_request(existing)
