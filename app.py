@@ -1,1791 +1,3723 @@
-import json
-import os
-import time
-from datetime import datetime, timezone
+// ==UserScript==
+// @name         Torn Faction Bankers 🪙 
+// @namespace    Fries91.Torn.FactionBankers.
+// @version      0.9.9
+// @description  Faction vault request app with coin-only launcher and faction dropdown.
+// @author       Fries91
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
+// @updateURL    https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
+// @downloadURL  https://faction-bankers-request.onrender.com/static/faction-bankers.user.js
+// @run-at       document-idle
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @connect      faction-bankers-request.onrender.com
+// @connect      api.torn.com
+// @connect      *
+// ==/UserScript==
 
-import psycopg2
-import psycopg2.extras
-import requests
-from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
-from werkzeug.exceptions import HTTPException
+(function () {
+  "use strict";
+
+  const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
+  const FB_BUILD = "0.9.9-balance-sync-manual";
+
+  // Locked PDA/Torn header position for money / points / merits / gender row.
+  // Increase LEFT to move right. Decrease LEFT to move left.
+  // Increase TOP to move down. Decrease TOP to move up.
+  const COIN_LOCK_LEFT = 172;
+  const COIN_LOCK_TOP = 244;
+
+  const K_API_KEY = "fb_api_key_v1";
+  const K_OPEN = "fb_overlay_open_v1";
+  const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
+  const K_TARGET_FACTION = "fb_target_faction_v1";
+  const K_PAY_PREFILL = "fb_pay_prefill_v1";
+  const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
+  const K_BALANCE_CAPTURE = "fb_balance_capture_pending_v1";
+  const K_MANUAL_BALANCE_AMOUNT = "fb_manual_personal_balance_amount_v1";
+  const K_MANUAL_BALANCE_TEXT = "fb_manual_personal_balance_text_v1";
+
+  // Dynamic role mode: no hard-coded faction list.
+  // The backend uses the logged-in player's own faction and finds bankers by faction role.
+  const DEFAULT_FACTIONS = [];
+
+  const APP = {
+    me: null,
+    factions: DEFAULT_FACTIONS.slice(),
+    requests: [],
+    bankers: [],
+    manualBankers: [],
+    leaderRoleNames: [],
+    defaultRoleNames: [],
+    leaderLoadError: "",
+    bankerFactionId: "",
+    bankerStatusError: "",
+    balanceAmount: null,
+    balanceText: "Balance unavailable",
+    balanceSource: "",
+    balanceUpdatedAt: 0,
+    pendingCount: 0,
+    busy: false,
+    open: false,
+    lastLoad: 0,
+    booted: false,
+    refreshing: false,
+    lastBuiltSig: "",
+    lastMountRun: 0,
+    lastProfileMountRun: 0,
+  };
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+  function esc(v) {
+    return String(v ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function money(v) {
+    const n = Number(v || 0);
+    if (!Number.isFinite(n)) return "$0";
+    return "$" + Math.floor(n).toLocaleString();
+  }
+
+  function isTornPage() {
+    return location.hostname === "www.torn.com" || location.hostname === "torn.com";
+  }
+
+  function isFactionPage() {
+    return location.href.includes("factions.php");
+  }
+
+  function isOwnFactionPage() {
+    if (!isFactionPage()) return false;
+
+    const url = new URL(location.href);
+    const params = url.searchParams;
+
+    // Other faction pages normally have an ID/XID or profile/view style step.
+    if (params.has("ID") || params.has("id") || params.has("XID") || params.has("xid")) return false;
+
+    const step = String(params.get("step") || "").toLowerCase();
+    const type = String(params.get("type") || "").toLowerCase();
+
+    if (step.includes("profile")) return false;
+    if (step.includes("view")) return false;
+    if (type.includes("profile")) return false;
+
+    return true;
+  }
+
+  function isProfilePage() {
+    return location.href.includes("profiles.php") || location.href.includes("/profiles.php");
+  }
+
+  function gmRequest(method, path, body) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method,
+        url: BANKER_API_BASE.replace(/\/$/, "") + path,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Torn-Key": GM_getValue(K_API_KEY, ""),
+        },
+        data: body ? JSON.stringify(body) : undefined,
+        timeout: 45000,
+        onload: (res) => {
+          let data = {};
+          try {
+            data = JSON.parse(res.responseText || "{}");
+          } catch {
+            const raw = String(res.responseText || "");
+            const clean = raw
+              .replace(/<script[\s\S]*?<\/script>/gi, " ")
+              .replace(/<style[\s\S]*?<\/style>/gi, " ")
+              .replace(/<[^>]+>/g, " ")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 160);
+            data = { ok: false, error: (res.status >= 500 ? "Render backend 500. Replace/redeploy app.py or check DATABASE_URL. Details: " : "") + (clean || "Render returned a non-JSON error. Check app.py deploy logs.") };
+          }
+
+          if (res.status >= 200 && res.status < 300) {
+            resolve(data);
+          } else {
+            reject(new Error(data.error || `HTTP ${res.status}`));
+          }
+        },
+        onerror: () => reject(new Error("Network error")),
+        ontimeout: () => reject(new Error("Request timed out")),
+      });
+    });
+  }
+
+  function ensureStyles() {
+    if ($("#fb-style")) return;
+
+    const style = document.createElement("style");
+    style.id = "fb-style";
+    style.textContent = `
+      #fb-bank-coin-clean {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 28px !important;
+        height: 26px !important;
+        margin-left: 6px !important;
+        border: 1px solid rgba(255,255,255,.12) !important;
+        border-radius: 9px !important;
+        background: transparent !important;
+        color: #ffd36a !important;
+        font-size: 17px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        user-select: none !important;
+        position: relative !important;
+        z-index: 20 !important;
+        box-shadow: none !important;
+      }
+
+      #fb-bank-coin-clean.fb-fixed-test {
+        display: none !important;
+      }
+
+            #fb-bank-coin-clean.fb-fixed-header {
+        display: inline-flex !important;
+        position: relative !important;
+        left: auto !important;
+        top: auto !important;
+        z-index: 40 !important;
+        flex: 0 0 auto !important;
+        vertical-align: middle !important;
+      }
+
+      #fb-bank-coin-clean.fb-header-fallback {
+        display: none !important;
+      }
+
+      .fb-coin-mount-row {
+        display: flex !important;
+        align-items: center !important;
+        flex-wrap: nowrap !important;
+        gap: 0 !important;
+        position: relative !important;
+      }
+
+      #fb-bank-coin-clean:hover {
+        opacity: .96 !important;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.85)) saturate(1) brightness(1.02) !important;
+      }
+
+      #fb-bank-coin-clean.fb-alert {
+        opacity: 1 !important;
+        background: radial-gradient(circle, rgba(220,0,0,.58), rgba(130,0,0,.24) 62%, transparent 72%) !important;
+        border-radius: 50% !important;
+        box-shadow: 0 0 8px rgba(255,0,0,.68) !important;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.9)) saturate(1.1) brightness(1.02) !important;
+      }
+
+      #fb-bank-coin-clean.fb-alert::after {
+        content: attr(data-count);
+        position: absolute;
+        top: -5px;
+        right: -6px;
+        min-width: 13px;
+        height: 13px;
+        padding: 0 3px;
+        border-radius: 999px;
+        background: #ff3131;
+        color: #fff;
+        font-size: 8px;
+        font-weight: 900;
+        line-height: 13px;
+        text-align: center;
+        box-shadow: 0 1px 3px rgba(0,0,0,.65);
+      }
+
+      #fb-profile-bank-coin {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        margin: 0 4px !important;
+        border: 1px solid rgba(255,211,106,.55) !important;
+        border-radius: 8px !important;
+        background: rgba(0,0,0,.45) !important;
+        color: #ffd36a !important;
+        font-size: 17px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,.38) !important;
+        vertical-align: middle !important;
+        position: relative !important;
+        z-index: 30 !important;
+      }
+
+      #fb-profile-bank-coin:hover {
+        border-color: rgba(255,211,106,.9) !important;
+        filter: brightness(1.08) !important;
+      }
+
+      #fb-profile-bank-coin.fb-profile-fallback {
+        display: none !important;
+      }
+
+      .fb-bsp-coin-slot {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-left: 4px !important;
+        vertical-align: middle !important;
+      }
+
+      #fb-built-in-box {
+        width: calc(100% - 14px) !important;
+        max-width: 680px !important;
+        box-sizing: border-box !important;
+        margin: 7px auto 9px auto !important;
+        padding: 7px 8px !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(255, 211, 106, .40) !important;
+        background: linear-gradient(180deg, rgba(20,20,20,.97), rgba(7,7,7,.97)) !important;
+        box-shadow: 0 4px 14px rgba(0,0,0,.48) !important;
+        color: #eee !important;
+        position: relative !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        z-index: 15 !important;
+        font-family: Arial, Helvetica, sans-serif !important;
+        clear: both !important;
+      }
+
+      #fb-built-in-box.fb-built-alert {
+        border-color: rgba(255,80,80,.95);
+        box-shadow: 0 0 12px rgba(255,0,0,.45);
+      }
+
+      .fb-built-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+
+      .fb-built-head b {
+        display: block;
+        color: #ffd36a;
+        font-size: 12px;
+        line-height: 1.1;
+        letter-spacing: .2px;
+      }
+
+      .fb-built-head span {
+        display: block;
+        color: #aaa;
+        font-size: 10px;
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 72vw;
+      }
+
+      #fb-built-open {
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(255,255,255,.08);
+        color: #fff;
+        border-radius: 8px;
+        padding: 5px 9px;
+        font-size: 11px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      .fb-built-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        align-items: center;
+      }
+
+      #fb-built-bankers {
+        grid-column: 1 / -1;
+      }
+
+      .fb-balance-line {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border: 1px solid rgba(255,211,106,.22);
+        background: rgba(255,211,106,.075);
+        color: #eee;
+        border-radius: 9px;
+        padding: 7px 8px;
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .fb-balance-line b {
+        color: #ffd36a;
+      }
+
+      .fb-balance-line span {
+        color: #aaa;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
+      #fb-built-amount,
+      #fb-built-faction,
+      #fb-built-banker,
+      #fb-built-note {
+        min-width: 0;
+        border: 1px solid rgba(255,255,255,.16);
+        background: rgba(0,0,0,.45);
+        color: #fff;
+        border-radius: 8px;
+        padding: 7px 8px;
+        font-size: 12px;
+        outline: none;
+      }
+
+      #fb-built-send {
+        border: 1px solid rgba(255,211,106,.45);
+        background: rgba(255,211,106,.16);
+        color: #ffd36a;
+        border-radius: 8px;
+        padding: 7px 9px;
+        font-size: 12px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      #fb-built-refresh-balance {
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(255,255,255,.07);
+        color: #ddd;
+        border-radius: 8px;
+        padding: 6px 8px;
+        font-size: 11px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      #fb-built-full,
+      #fb-full-request {
+        border: 1px solid rgba(110,170,255,.45);
+        background: rgba(45,105,180,.24);
+        color: #d8eaff;
+        border-radius: 8px;
+        padding: 7px 9px;
+        font-size: 12px;
+        font-weight: 900;
+        cursor: pointer;
+      }
 
 
-app = Flask(__name__, static_folder="static")
-CORS(app)
+      #fb-setup-button {
+        position: fixed !important;
+        right: 10px !important;
+        bottom: 86px !important;
+        z-index: 100000 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 4px !important;
+        padding: 7px 10px !important;
+        border: 1px solid rgba(255,211,106,.45) !important;
+        border-radius: 999px !important;
+        background: rgba(20,20,20,.88) !important;
+        color: #ffd36a !important;
+        font-size: 12px !important;
+        font-weight: 900 !important;
+        box-shadow: 0 6px 18px rgba(0,0,0,.55) !important;
+        cursor: pointer !important;
+      }
+
+      #fb-setup-button.fb-hide {
+        display: none !important;
+      }
+
+      #fb-overlay {
+        position: fixed;
+        top: 74px;
+        right: 12px;
+        width: min(470px, calc(100vw - 18px));
+        max-height: calc(100vh - 92px);
+        overflow: hidden;
+        display: none;
+        flex-direction: column;
+        background:
+          radial-gradient(circle at top left, rgba(255,211,106,.18), transparent 34%),
+          linear-gradient(180deg, #161616, #0d0d0d);
+        border: 1px solid rgba(255,211,106,.32);
+        border-radius: 16px;
+        box-shadow: 0 18px 50px rgba(0,0,0,.62);
+        color: #eee;
+        z-index: 100000;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+
+      #fb-overlay.fb-show {
+        display: flex;
+      }
+
+      #fb-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 11px 12px;
+        border-bottom: 1px solid rgba(255,255,255,.1);
+        background: rgba(0,0,0,.22);
+      }
+
+      #fb-title strong {
+        font-size: 15px;
+        color: #ffd36a;
+      }
+
+      #fb-title span {
+        display: block;
+        font-size: 11px;
+        color: #aaa;
+        margin-top: 2px;
+      }
+
+      #fb-close {
+        border: 1px solid rgba(255,255,255,.18);
+        background: rgba(255,255,255,.06);
+        color: #fff;
+        border-radius: 10px;
+        padding: 6px 10px;
+        cursor: pointer;
+        font-weight: 900;
+      }
+
+      #fb-body {
+        overflow: auto;
+        padding: 12px;
+      }
+
+      .fb-box {
+        border: 1px solid rgba(255,255,255,.12);
+        background: rgba(255,255,255,.045);
+        border-radius: 14px;
+        padding: 11px;
+        margin-bottom: 10px;
+      }
+
+      .fb-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .fb-space {
+        justify-content: space-between;
+      }
+
+      .fb-label {
+        display: block;
+        font-size: 11px;
+        color: #aaa;
+        margin-bottom: 4px;
+      }
+
+      .fb-input,
+      .fb-textarea {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid rgba(255,255,255,.16);
+        border-radius: 10px;
+        background: rgba(0,0,0,.42);
+        color: #fff;
+        padding: 9px 10px;
+        outline: none;
+      }
+
+      .fb-textarea {
+        min-height: 66px;
+        resize: vertical;
+      }
+
+      .fb-btn {
+        border: 1px solid rgba(255,255,255,.16);
+        background: rgba(255,255,255,.08);
+        color: #fff;
+        border-radius: 10px;
+        padding: 8px 10px;
+        cursor: pointer;
+        font-weight: 800;
+      }
+
+      .fb-btn.gold {
+        background: rgba(255,211,106,.16);
+        border-color: rgba(255,211,106,.48);
+        color: #ffd36a;
+      }
+
+      .fb-btn.green {
+        background: rgba(22,145,72,.22);
+        border-color: rgba(70,220,125,.45);
+      }
+
+      .fb-btn.red {
+        background: rgba(165,35,35,.25);
+        border-color: rgba(255,85,85,.45);
+      }
+
+      .fb-btn.blue {
+        background: rgba(45,105,180,.24);
+        border-color: rgba(110,170,255,.45);
+      }
+
+      .fb-btn.pay {
+        background: rgba(255,211,106,.18);
+        border-color: rgba(255,211,106,.52);
+        color: #ffd36a;
+        text-decoration: none;
+      }
+
+      .fb-tabs {
+        display: flex;
+        gap: 6px;
+        padding: 8px 12px 0;
+        flex-wrap: wrap;
+      }
+
+      .fb-tab {
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(255,255,255,.055);
+        color: #ddd;
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        font-weight: 900;
+      }
+
+      .fb-tab.active {
+        color: #ffd36a;
+        border-color: rgba(255,211,106,.45);
+        background: rgba(255,211,106,.12);
+      }
+
+      .fb-pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(255,255,255,.065);
+        color: #ddd;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .fb-pill.pending {
+        color: #ffd36a;
+        border-color: rgba(255,211,106,.35);
+      }
+
+      .fb-pill.approved {
+        color: #7dff9d;
+        border-color: rgba(90,220,120,.35);
+      }
+
+      .fb-pill.denied {
+        color: #ff8585;
+        border-color: rgba(255,85,85,.35);
+      }
+
+      .fb-pill.paid {
+        color: #92c8ff;
+        border-color: rgba(120,180,255,.35);
+      }
+
+      .fb-small {
+        font-size: 11px;
+        color: #aaa;
+      }
+
+      .fb-muted {
+        color: #aaa;
+      }
+
+      .fb-error {
+        color: #ff8d8d;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .fb-success {
+        color: #8dffac;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .fb-request-title {
+        font-size: 13px;
+        font-weight: 900;
+        color: #fff;
+      }
+
+      .fb-request-meta {
+        font-size: 11px;
+        color: #aaa;
+        margin-top: 3px;
+      }
+
+      .fb-request-note {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #ddd;
+        line-height: 1.35;
+        white-space: pre-wrap;
+      }
+
+      .fb-pay-notice {
+        position: fixed;
+        left: 8px;
+        right: 8px;
+        bottom: 12px;
+        z-index: 100002;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,211,106,.55);
+        background: rgba(10,10,10,.94);
+        color: #ffd36a;
+        font-size: 12px;
+        font-weight: 900;
+        text-align: center;
+        box-shadow: 0 8px 24px rgba(0,0,0,.55);
+      }
 
 
-@app.errorhandler(Exception)
-def json_error_handler(e):
-    # Make PDA/userscript errors readable instead of returning a raw HTML 500 page.
-    if isinstance(e, HTTPException):
-        return jsonify({"ok": False, "error": e.description or e.name}), e.code or 500
-    print("Unhandled server error:", repr(e))
-    return jsonify({"ok": False, "error": str(e) or e.__class__.__name__}), 500
+      .fb-bankers-list {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 6px;
+        margin-top: 8px;
+      }
+
+      #fb-built-bankers .fb-bankers-list {
+        display: flex;
+        gap: 5px;
+        margin-top: 0;
+        overflow-x: auto;
+        padding-bottom: 1px;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      #fb-built-bankers .fb-banker-line {
+        min-width: 116px;
+        max-width: 156px;
+        padding: 5px 6px;
+        border-radius: 9px;
+        flex: 0 0 auto;
+      }
+
+      #fb-built-bankers .fb-banker-line .fb-pill,
+      #fb-built-bankers .fb-banker-line .fb-small + .fb-small {
+        display: none;
+      }
+
+      #fb-built-bankers .fb-banker-main .fb-small {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 10px;
+      }
+
+      .fb-banker-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 7px 8px;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,.10);
+        background: rgba(0,0,0,.24);
+      }
+
+      .fb-banker-main {
+        min-width: 0;
+      }
+
+      .fb-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+        background: #888;
+        box-shadow: 0 0 6px rgba(255,255,255,.25);
+      }
+
+      .fb-dot.green { background: #36d86f; box-shadow: 0 0 8px rgba(54,216,111,.75); }
+      .fb-dot.orange { background: #ffac38; box-shadow: 0 0 8px rgba(255,172,56,.65); }
+      .fb-dot.yellow { background: #ffd33d; box-shadow: 0 0 8px rgba(255,211,61,.65); }
+      .fb-dot.blue { background: #55a9ff; box-shadow: 0 0 8px rgba(85,169,255,.65); }
+      .fb-dot.red { background: #ff4d4d; box-shadow: 0 0 8px rgba(255,77,77,.65); }
+      .fb-dot.gray { background: #8b8b8b; }
+
+      .fb-banker-select {
+        margin-top: 8px;
+      }
+
+      @media (max-width: 520px) {
+  
+      #fb-setup-button {
+        position: fixed !important;
+        right: 10px !important;
+        bottom: 86px !important;
+        z-index: 100000 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 4px !important;
+        padding: 7px 10px !important;
+        border: 1px solid rgba(255,211,106,.45) !important;
+        border-radius: 999px !important;
+        background: rgba(20,20,20,.88) !important;
+        color: #ffd36a !important;
+        font-size: 12px !important;
+        font-weight: 900 !important;
+        box-shadow: 0 6px 18px rgba(0,0,0,.55) !important;
+        cursor: pointer !important;
+      }
+
+      #fb-setup-button.fb-hide {
+        display: none !important;
+      }
+
+      #fb-overlay {
+          top: auto;
+          right: 6px;
+          left: 6px;
+          bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+          width: auto;
+          max-height: min(56vh, 430px);
+          border-radius: 14px;
+        }
+
+        #fb-head {
+          padding: 8px 10px;
+        }
+
+        #fb-title strong {
+          font-size: 13px;
+        }
+
+        #fb-title span {
+          font-size: 10px;
+        }
+
+        .fb-tabs {
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          padding: 6px 8px 0;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .fb-tab {
+          flex: 0 0 auto;
+          padding: 5px 9px;
+          font-size: 11px;
+        }
+
+        #fb-body {
+          padding: 8px;
+          max-height: calc(min(56vh, 430px) - 86px);
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .fb-box {
+          padding: 8px;
+          margin-bottom: 7px;
+          border-radius: 11px;
+        }
+
+        #fb-profile-bank-coin {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        margin: 0 4px !important;
+        border: 1px solid rgba(255,211,106,.55) !important;
+        border-radius: 8px !important;
+        background: rgba(0,0,0,.45) !important;
+        color: #ffd36a !important;
+        font-size: 17px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,.38) !important;
+        vertical-align: middle !important;
+        position: relative !important;
+        z-index: 30 !important;
+      }
+
+      #fb-profile-bank-coin:hover {
+        border-color: rgba(255,211,106,.9) !important;
+        filter: brightness(1.08) !important;
+      }
+
+      #fb-profile-bank-coin.fb-profile-fallback {
+        display: none !important;
+      }
+
+      .fb-bsp-coin-slot {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-left: 4px !important;
+        vertical-align: middle !important;
+      }
+
+      #fb-built-in-box {
+          width: calc(100% - 8px);
+          margin: 6px auto 8px auto;
+          padding: 7px;
+        }
+
+        .fb-built-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        align-items: center;
+      }
+
+      #fb-built-bankers {
+        grid-column: 1 / -1;
+      }
+
+      .fb-balance-line {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border: 1px solid rgba(255,211,106,.22);
+        background: rgba(255,211,106,.075);
+        color: #eee;
+        border-radius: 9px;
+        padding: 7px 8px;
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .fb-balance-line b {
+        color: #ffd36a;
+      }
+
+      .fb-balance-line span {
+        color: #aaa;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
+        #fb-built-amount,
+        #fb-built-faction,
+        #fb-built-banker,
+        #fb-built-send {
+          width: 100%;
+          box-sizing: border-box;
+        }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function getCleanText(el) {
+    return String(el?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function looksLikeMoneyPointsMeritsRow(el) {
+    const text = getCleanText(el);
+    const rect = el.getBoundingClientRect();
+    const cls = String(el.className || "");
+
+    if (!rect || rect.width < 250 || rect.height < 20 || rect.height > 48) return false;
+
+    // From your debug:
+    // #7: class swiperWrapper___sfn5X, text "Money:$2.7MPoints:17Merits:2"
+    // #6: upper row has Energy/Nerve/Happy/Life/Chain.
+    const hasMoneyWords = text.includes("Money:") && text.includes("Points:") && text.includes("Merits:");
+    const hasMoneySymbols = text.includes("$") && (text.includes("P") || text.includes("Points")) && (text.includes("Merits") || text.includes("★") || text.includes("⭐"));
+
+    const isKnownTornResourceClass =
+      cls.includes("swiperWrapper") ||
+      cls.includes("user-information-mobile") ||
+      cls.includes("userInformation") ||
+      cls.includes("user-info");
+
+    return (hasMoneyWords || hasMoneySymbols) && (isKnownTornResourceClass || rect.top > 120);
+  }
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-TORN_API_BASE = os.getenv("TORN_API_BASE", "https://api.torn.com").rstrip("/")
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+  function visibleRect(el) {
+    if (!el || !el.getBoundingClientRect) return null;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 4 || r.height < 4) return null;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) === 0) return null;
+    return r;
+  }
 
-ADMIN_PLAYER_ID = str(os.getenv("ADMIN_PLAYER_ID", "3679030")).strip()
-BANKER_IDS = {
-    x.strip()
-    for x in os.getenv("BANKER_IDS", "3679030").split(",")
-    if x.strip()
-}
+  function isIconLikeNode(el) {
+    const r = visibleRect(el);
+    if (!r) return false;
+    if (r.width > 74 || r.height > 74 || r.width < 12 || r.height < 12) return false;
 
+    const text = getCleanText(el);
+    // Icon nodes usually have no text, one symbol, or a tiny label. Avoid full buttons/inputs.
+    if (text.length > 18) return false;
+    if (/bank|request|factional/i.test(text)) return false;
 
-def load_faction_bankers():
-    """
-    Reads FACTION_BANKERS from Render.
+    const tag = String(el.tagName || "").toLowerCase();
+    const cls = String(el.className || "").toLowerCase();
+    const role = String(el.getAttribute("role") || "").toLowerCase();
+    const hasVisualIcon = !!el.querySelector("img, svg, i") || tag === "img" || tag === "svg" || cls.includes("icon") || cls.includes("link") || role === "button";
+    const likelyClickable = tag === "a" || tag === "button" || el.onclick || role === "button";
 
-    Format:
-    {"52040":{"name":"Sloth","bankers":["3679030"]},"49384":{"name":"Wrath","bankers":["3509957"]}}
-    """
-    raw = os.getenv("FACTION_BANKERS", "").strip()
+    return hasVisualIcon || likelyClickable || text.length <= 3;
+  }
 
-    if raw:
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                cleaned = {}
-                for faction_id, info in data.items():
-                    fid = str(faction_id).strip()
-                    if not fid:
-                        continue
+  function findCompactHeaderIconCluster() {
+    // Desktop/iPhone full-site fallback: find the real Torn header icon strip and insert beside those icons.
+    // This prevents the coin from floating on the right side when the mobile money/points row is not present.
+    const parents = Array.from(document.querySelectorAll("header, nav, div, ul"));
+    const scored = [];
 
-                    if not isinstance(info, dict):
-                        info = {"name": str(info), "bankers": []}
+    for (const parent of parents) {
+      if (parent.id === "fb-overlay" || parent.closest("#fb-overlay") || parent.closest("#fb-built-in-box")) continue;
+      const pr = visibleRect(parent);
+      if (!pr) continue;
 
-                    name = str(info.get("name") or fid).strip()
-                    bankers = [
-                        str(x).strip()
-                        for x in (info.get("bankers") or [])
-                        if str(x).strip()
-                    ]
+      const cls = String(parent.className || "").toLowerCase();
+      const id = String(parent.id || "").toLowerCase();
+      const nearTop = pr.top >= 0 && pr.top < Math.max(190, window.innerHeight * 0.22);
+      const headerish = /header|top|menu|nav|icon|toolbar/.test(cls + " " + id);
+      if (!nearTop && !headerish) continue;
+      if (pr.width < 110 || pr.height < 18 || pr.height > 95) continue;
 
-                    cleaned[fid] = {
-                        "name": name,
-                        "bankers": bankers,
-                    }
+      const children = Array.from(parent.children || []).filter(isIconLikeNode);
+      const nestedIcons = Array.from(parent.querySelectorAll(":scope > a, :scope > button, :scope > div, :scope > span, :scope > li")).filter(isIconLikeNode);
+      const icons = children.length >= nestedIcons.length ? children : nestedIcons;
+      if (icons.length < 3) continue;
 
-                if cleaned:
-                    return cleaned
-        except Exception:
-            # Keep the app alive even if the env var is temporarily malformed.
-            pass
+      const textLen = getCleanText(parent).length;
+      if (textLen > 180) continue;
 
-    # PDA-safe fallback if FACTION_BANKERS is missing or malformed.
-    # This keeps the status list working instead of returning "Selected faction is not configured"
-    # while Render env vars are being adjusted. Fries91/Admin is included by default.
-    fallback_bankers = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
-    return {
-        "49384": {"name": "Wrath", "bankers": fallback_bankers},
-        "52040": {"name": "Sloth", "bankers": fallback_bankers},
-        "8315": {"name": "Greed", "bankers": fallback_bankers},
-        "20554": {"name": "Pride", "bankers": fallback_bankers},
+      const last = icons[icons.length - 1];
+      const lr = visibleRect(last);
+      if (!lr) continue;
+
+      const score =
+        icons.length * 30 +
+        (nearTop ? 80 : 0) +
+        (headerish ? 60 : 0) +
+        (pr.right > window.innerWidth * 0.5 ? 35 : 0) -
+        Math.abs(pr.height - 38) -
+        Math.max(0, textLen - 45);
+
+      scored.push({ parent, target: last, score });
     }
 
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
 
-FACTION_BANKERS = load_faction_bankers()
-BANKER_STATUS_CACHE = {}
-BANKER_STATUS_TTL = int(os.getenv("BANKER_STATUS_TTL", "45"))
+  function findTornResourceRow() {
+    // First use the exact mobile resource row found by debug.
+    const exact = Array.from(document.querySelectorAll("div")).find(looksLikeMoneyPointsMeritsRow);
+    if (exact) return exact;
 
-# Dynamic role mode: lets any faction use the app without hard-coded faction lists.
-# By default, members with a faction role/position named Banker/Treasurer/Leader/Co-leader are treated as bankers.
-# You can change this in Render with BANKER_ROLE_NAMES=Banker,Treasurer,Leader,Co-leader
-BANKER_ROLE_NAMES = {
-    x.strip().lower()
-    for x in os.getenv("BANKER_ROLE_NAMES", "Banker,Treasurer,Leader,Co-leader,Co Leader").replace(";", ",").split(",")
-    if x.strip()
-}
-FACTION_ROLE_BANKER_CACHE = {}
-FACTION_ROLE_BANKER_TTL = int(os.getenv("FACTION_ROLE_BANKER_TTL", "90"))
+    // Then search all rows and score the money/points/merits row.
+    const candidates = Array.from(document.querySelectorAll("div, ul, nav, section")).filter((el) => {
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width < 250 || rect.height < 20 || rect.height > 55) return false;
 
-# Safety fallback: if Render Postgres/DATABASE_URL is missing or broken,
-# requests still work in memory instead of crashing with HTML 500.
-# Memory requests reset when Render restarts, so Postgres is still recommended.
-MEMORY_REQUESTS = []
-MEMORY_NEXT_ID = 1
-MEMORY_MANUAL_BANKERS = {}  # faction_id -> list of manual banker dicts
-MEMORY_BANKER_ROLE_NAMES = {}  # faction_id -> list of role names leaders entered
+      const text = getCleanText(el);
+      return text.includes("$") && (text.includes("Points") || /\bP\b/.test(text)) && (text.includes("Merits") || text.includes("★") || text.includes("⭐"));
+    });
 
-def is_hidden_banker_name_or_id(name_or_id):
-    """Hide bankers the owner removed from the user-facing app.
-    Default hides PulseArts/Pulse unless OVERRIDE env is provided.
-    Add more via HIDDEN_BANKER_IDS=123,456 or HIDDEN_BANKER_NAMES=Name1,Name2.
-    """
-    value = str(name_or_id or "").strip().lower()
-    if not value:
-        return False
-    hidden_ids = {x.strip().lower() for x in os.getenv("HIDDEN_BANKER_IDS", "").split(",") if x.strip()}
-    hidden_names = {x.strip().lower() for x in os.getenv("HIDDEN_BANKER_NAMES", "pulsearts,pulse").split(",") if x.strip()}
-    return value in hidden_ids or value in hidden_names or value.startswith("pulsearts")
+    if (candidates.length) {
+      candidates.sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        const at = getCleanText(a);
+        const bt = getCleanText(b);
 
-def clean_pushover_key(value):
-    return str(value or "").strip()[:128]
+        const aScore =
+          (at.includes("Money:") ? 50 : 0) +
+          (at.includes("Points:") ? 40 : 0) +
+          (at.includes("Merits:") ? 40 : 0) +
+          (String(a.className || "").includes("swiperWrapper") ? 30 : 0) -
+          Math.abs(ar.height - 30);
 
-def normalize_manual_banker(item):
-    if not isinstance(item, dict):
-        return None
-    bid = str(item.get("banker_id") or item.get("id") or item.get("player_id") or "").strip()
-    if not bid:
-        return None
-    name = str(item.get("banker_name") or item.get("name") or bid).strip()
-    return {
-        "id": bid,
-        "player_id": bid,
-        "name": name,
-        "banker_id": bid,
-        "banker_name": name,
-        "pushover_key": clean_pushover_key(item.get("pushover_key") or item.get("pushover") or ""),
-        "source": "leaders",
+        const bScore =
+          (bt.includes("Money:") ? 50 : 0) +
+          (bt.includes("Points:") ? 40 : 0) +
+          (bt.includes("Merits:") ? 40 : 0) +
+          (String(b.className || "").includes("swiperWrapper") ? 30 : 0) -
+          Math.abs(br.height - 30);
+
+        return bScore - aScore;
+      });
+
+      return candidates[0];
     }
 
-def env_manual_bankers_for_faction(faction_id):
-    """Optional Render env fallback. Format:
-    MANUAL_BANKERS={"12345":[{"id":"3679030","name":"Fries91","pushover_key":"..."}]}
-    """
-    fid = str(faction_id or "").strip()
-    raw = os.getenv("MANUAL_BANKERS", "").strip()
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-        rows = data.get(fid) or data.get("default") or []
-        out = []
-        for row in rows:
-            norm = normalize_manual_banker(row)
-            if norm and not is_hidden_banker_name_or_id(norm.get("id")) and not is_hidden_banker_name_or_id(norm.get("name")):
-                out.append(norm)
-        return out
-    except Exception as e:
-        print("MANUAL_BANKERS env parse failed:", e)
-        return []
+    return null;
+  }
 
-def manual_bankers_for_faction(faction_id):
-    fid = str(faction_id or "").strip()
-    if not fid:
-        return []
+  function findGenderInsertTarget(row) {
+    if (!row) return null;
 
-    # Memory fallback first when DB is unavailable.
-    mem = [x for x in MEMORY_MANUAL_BANKERS.get(fid, []) if not is_hidden_banker_name_or_id(x.get("id")) and not is_hidden_banker_name_or_id(x.get("name"))]
+    const all = Array.from(row.querySelectorAll("a, div, span, li, i, img, button"));
 
-    db_items = []
-    if DATABASE_URL:
-        try:
-            init_db()
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT banker_id, banker_name, pushover_key
-                        FROM faction_manual_bankers
-                        WHERE faction_id = %s AND is_active = TRUE
-                        ORDER BY banker_name ASC
-                        """,
-                        (fid,),
-                    )
-                    for row in cur.fetchall():
-                        norm = normalize_manual_banker(row)
-                        if norm and not is_hidden_banker_name_or_id(norm.get("id")) and not is_hidden_banker_name_or_id(norm.get("name")):
-                            db_items.append(norm)
-        except Exception as e:
-            print("Manual banker DB lookup failed; using memory/env:", e)
+    // Best: exact gender icon.
+    let target = all.find((el) => {
+      const text = getCleanText(el);
+      const cls = String(el.className || "").toLowerCase();
+      const title = String(el.getAttribute("title") || "").toLowerCase();
+      const alt = String(el.getAttribute("alt") || "").toLowerCase();
 
-    # Env fallback allows pre-seeding without UI.
-    env_items = env_manual_bankers_for_faction(fid)
+      return text === "♂" || text === "♀" || cls.includes("gender") || title.includes("gender") || alt.includes("gender");
+    });
 
-    seen = set()
-    out = []
-    for item in db_items + mem + env_items:
-        bid = str(item.get("id") or "").strip()
-        if bid and bid not in seen:
-            seen.add(bid)
-            out.append(item)
-    return out
+    if (target) return target;
 
-def manual_banker_ids_for_faction(faction_id):
-    return [str(x.get("id")) for x in manual_bankers_for_faction(faction_id) if x.get("id")]
+    // Fallback: find the merit/star icon, then coin goes after it, which is beside the gender area on PDA.
+    target = all.find((el) => {
+      const text = getCleanText(el);
+      const cls = String(el.className || "").toLowerCase();
+      const title = String(el.getAttribute("title") || "").toLowerCase();
+      const alt = String(el.getAttribute("alt") || "").toLowerCase();
 
-def manual_banker_name_for_id(faction_id, banker_id):
-    bid = str(banker_id or "").strip()
-    for item in manual_bankers_for_faction(faction_id):
-        if str(item.get("id")) == bid:
-            return str(item.get("name") or bid).strip()
-    return ""
+      return text.includes("★") || text.includes("⭐") || cls.includes("merit") || title.includes("merit") || alt.includes("merit");
+    });
 
-def manual_pushover_keys_for_request(item):
-    fid = str(item.get("faction_id") or "").strip()
-    selected = str(item.get("selected_banker_id") or "").strip()
-    rows = manual_bankers_for_faction(fid)
-    keys = []
-    for row in rows:
-        if selected and str(row.get("id")) != selected:
-            continue
-        k = clean_pushover_key(row.get("pushover_key"))
-        if k:
-            keys.append(k)
-    # If no selected banker key, ping every keyed manual banker.
-    if selected and not keys:
-        keys = [clean_pushover_key(x.get("pushover_key")) for x in rows if clean_pushover_key(x.get("pushover_key"))]
-    return list(dict.fromkeys(keys))
+    if (target) return target;
 
-def can_manage_leaders(user):
-    if not user:
-        return False
-    if user.get("is_admin"):
-        return True
-    # Allow current bankers/treasurers/leaders to open the Leaders tab and maintain their faction banker list.
-    # Factions can still restrict this by only giving the API key to leaders they trust.
-    return bool(user.get("is_banker"))
+    return null;
+  }
 
+  function openHeaderCoinBoard() {
+    openOverlay();
 
-def clean_role_name(value):
-    return str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    setTimeout(() => {
+      let tabName = "request";
+      if (!GM_getValue(K_API_KEY, "")) tabName = "settings";
+      else if (APP.me?.is_banker || APP.me?.is_admin) tabName = "banker";
 
-def banker_role_names_for_faction(faction_id):
-    """Return role names that should count as bankers for this faction.
+      const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+      if (tab) tab.click();
+    }, 150);
+  }
 
-    Leaders can add these in the Leaders tab. If none are saved, the Render
-    BANKER_ROLE_NAMES env var is used as the default.
-    """
-    fid = str(faction_id or "").strip()
-    roles = []
+  function makeHeaderCoin() {
+    let coin = $("#fb-bank-coin-clean");
 
-    # Memory fallback first.
-    for role in MEMORY_BANKER_ROLE_NAMES.get(fid, []):
-        role = str(role or "").strip()
-        if role and role not in roles:
-            roles.append(role)
+    if (!coin) {
+      coin = document.createElement("button");
+      coin.id = "fb-bank-coin-clean";
+      coin.type = "button";
+      coin.title = "Factional Banking";
+      coin.textContent = "🪙";
+      coin.setAttribute("data-count", "0");
+      coin.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openHeaderCoinBoard();
+      });
+    }
 
-    # Database saved faction roles.
-    if DATABASE_URL:
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT role_name
-                        FROM faction_banker_roles
-                        WHERE faction_id = %s
-                          AND is_active = TRUE
-                        ORDER BY role_name ASC
-                        """,
-                        (fid,),
-                    )
-                    for row in cur.fetchall():
-                        role = str(row.get("role_name") or "").strip()
-                        if role and role not in roles:
-                            roles.append(role)
-        except Exception as e:
-            print("Faction banker role DB lookup failed; using memory/env:", e)
+    return coin;
+  }
 
-    if not roles:
-        roles = sorted(BANKER_ROLE_NAMES)
+  function mountCoin() {
+    if (!isTornPage()) return;
 
-    return roles
+    // Header-only coin. No profile coin, no floating fallback, no random page placement.
+    const coin = makeHeaderCoin();
+    coin.classList.remove("fb-fixed-test", "fb-header-fallback");
+    coin.classList.add("fb-fixed-header", "fb-banker-visible");
 
+    const row = findTornResourceRow();
+    const target = row ? findGenderInsertTarget(row) : null;
 
-def is_banker_role(value, faction_id=None):
-    role = clean_role_name(value)
-    if not role:
-        return False
-    allowed = banker_role_names_for_faction(faction_id) if faction_id else BANKER_ROLE_NAMES
-    return role in {clean_role_name(x) for x in allowed}
+    if (target && target.parentElement) {
+      const parent = target.parentElement;
+      if (coin.parentElement !== parent || coin.previousElementSibling !== target) {
+        target.insertAdjacentElement("afterend", coin);
+      }
+      setCoinAlert(APP.pendingCount || 0);
+      return;
+    }
 
-def member_position(member):
-    if not isinstance(member, dict):
-        return ""
-    # Torn responses have varied over time/scripts; accept common role/position keys.
-    for key in ("position", "role", "rank", "title", "faction_position", "faction_role"):
-        val = member.get(key)
-        if val:
-            return str(val)
-    return ""
+    if (row) {
+      if (coin.parentElement !== row) row.appendChild(coin);
+      setCoinAlert(APP.pendingCount || 0);
+      return;
+    }
 
-def parse_faction_members_payload(data):
-    members = data.get("members") if isinstance(data, dict) else None
-    if isinstance(members, dict):
-        out = []
-        for mid, info in members.items():
-            info = info if isinstance(info, dict) else {}
-            item = dict(info)
-            item["player_id"] = str(item.get("player_id") or item.get("id") or mid).strip()
-            item["name"] = str(item.get("name") or item.get("player_name") or item.get("player_id") or mid).strip()
-            out.append(item)
-        return out
-    if isinstance(members, list):
-        out = []
-        for info in members:
-            if not isinstance(info, dict):
-                continue
-            item = dict(info)
-            item["player_id"] = str(item.get("player_id") or item.get("id") or item.get("xid") or "").strip()
-            item["name"] = str(item.get("name") or item.get("player_name") or item.get("player_id") or "").strip()
-            if item["player_id"]:
-                out.append(item)
-        return out
-    return []
+    const cluster = findCompactHeaderIconCluster();
+    if (cluster && cluster.target && cluster.target.parentElement) {
+      if (coin.parentElement !== cluster.target.parentElement || coin.previousElementSibling !== cluster.target) {
+        cluster.target.insertAdjacentElement("afterend", coin);
+      }
+      setCoinAlert(APP.pendingCount || 0);
+      return;
+    }
 
-def torn_get_role_bankers(key, faction_id):
-    """Return bankers detected from the user's faction member roles.
+    // If Torn's header/icon row is not found, remove the coin instead of floating it on the page.
+    if (coin.parentElement) coin.remove();
+  }
 
-    This is what makes the app work for any faction: no fixed Wrath/Sloth/Greed/Pride list needed.
-    It looks for members whose faction position/role matches BANKER_ROLE_NAMES.
-    """
-    fid = str(faction_id or "").strip()
-    cache_key = f"rolebankers:{fid}:{key[-6:] if key else ''}"
-    cached = FACTION_ROLE_BANKER_CACHE.get(cache_key)
-    if cached and time.time() - cached.get("ts", 0) < FACTION_ROLE_BANKER_TTL:
-        return cached.get("items", [])
+  function findFactionBuiltInMount() {
+    if (!isOwnFactionPage()) return null;
 
-    items = []
-    if key:
-        urls = []
-        if fid:
-            urls.append(f"{TORN_API_BASE}/faction/{fid}?selections=basic&key={key}")
-        urls.append(f"{TORN_API_BASE}/faction/?selections=basic&key={key}")
+    // Strict PDA placement: only mount after the real faction icon/control row.
+    // Do NOT fallback to <main> or body, because that puts the box in Home/header area.
+    const all = Array.from(document.querySelectorAll("div, section, article, ul, nav"));
 
-        for url in urls:
-            try:
-                r = requests.get(url, timeout=REQUEST_TIMEOUT)
-                data = r.json()
-                if not isinstance(data, dict) or data.get("error"):
-                    continue
-                for member in parse_faction_members_payload(data):
-                    pos = member_position(member)
-                    if is_banker_role(pos, fid):
-                        pid = str(member.get("player_id") or "").strip()
-                        name = str(member.get("name") or pid).strip()
-                        if pid and not is_hidden_banker_name_or_id(pid) and not is_hidden_banker_name_or_id(name):
-                            items.append({"id": pid, "name": name, "role": pos})
-                if items:
-                    break
-            except Exception as e:
-                print("Role banker lookup failed:", e)
+    const factionHeaders = Array.from(document.querySelectorAll("div, h1, h2, h3, span, strong"))
+      .filter((el) => {
+        const txt = getCleanText(el).toLowerCase();
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width < 40 || rect.height < 14) return false;
+        if (rect.top < 250) return false;
+        return txt === "faction";
+      })
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
 
-    # Always include Fries91/admin safety fallback unless hidden.
-    if ADMIN_PLAYER_ID and not any(str(x.get("id")) == ADMIN_PLAYER_ID for x in items):
-        items.insert(0, {"id": ADMIN_PLAYER_ID, "name": "Fries91", "role": "Admin"})
+    const headerTop = factionHeaders.length ? factionHeaders[0].getBoundingClientRect().top : 0;
 
-    # Keep unique by ID while preserving order.
-    seen = set()
-    unique = []
-    for item in items:
-        pid = str(item.get("id") or "").strip()
-        if pid and pid not in seen:
-            seen.add(pid)
-            unique.append(item)
+    const iconRows = all.filter((el) => {
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width < 280 || rect.height < 35 || rect.height > 95) return false;
+      if (headerTop && (rect.top < headerTop + 20 || rect.top > headerTop + 230)) return false;
+      if (!headerTop && rect.top < 300) return false;
 
-    FACTION_ROLE_BANKER_CACHE[cache_key] = {"ts": time.time(), "items": unique}
-    return unique
+      const kids = Array.from(el.children || []);
+      const iconishKids = kids.filter((k) => {
+        const r = k.getBoundingClientRect();
+        if (!r) return false;
+        return r.width >= 28 && r.width <= 120 && r.height >= 28 && r.height <= 95;
+      }).length;
 
-def dynamic_banker_ids_for_faction(key, faction_id):
-    manual = manual_banker_ids_for_faction(faction_id)
-    role = [str(x.get("id")) for x in torn_get_role_bankers(key, faction_id) if x.get("id")]
-    return list(dict.fromkeys(manual + role))
+      const txt = getCleanText(el).toLowerCase();
+      const hay = [txt, el.className, el.id].map((v) => String(v || "").toLowerCase()).join(" ");
 
-def dynamic_banker_name_for_id(key, faction_id, banker_id):
-    bid = str(banker_id or "").strip()
-    manual_name = manual_banker_name_for_id(faction_id, bid)
-    if manual_name:
-        return manual_name
-    for item in torn_get_role_bankers(key, faction_id):
-        if str(item.get("id")) == bid:
-            return str(item.get("name") or bid).strip()
-    return banker_name_from_config(faction_id, bid)
+      // The Torn faction controls row has many equal-size icon buttons, often near a gear/gun/share/trophy row.
+      return iconishKids >= 5 || hay.includes("controls") || hay.includes("faction-menu") || hay.includes("factiontabs");
+    }).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
 
+    const row = iconRows[0];
+    if (row && row.parentElement) {
+      return {
+        parent: row.parentElement,
+        after: row,
+        mode: "strict-after-faction-icons",
+      };
+    }
 
-def all_configured_faction_ids():
-    return [fid for fid in FACTION_BANKERS.keys() if fid != "default"]
+    return null;
+  }
 
-
-def banker_factions_for_player(player_id):
-    pid = str(player_id).strip()
-
-    if pid == ADMIN_PLAYER_ID:
-        return all_configured_faction_ids()
-
-    allowed = []
-    for faction_id, info in FACTION_BANKERS.items():
-        if faction_id == "default":
-            continue
-
-        bankers = {str(x).strip() for x in info.get("bankers", []) if str(x).strip()}
-        if pid in bankers:
-            allowed.append(str(faction_id))
-
-    return allowed
-
-
-def faction_name_for_id(faction_id):
-    fid = str(faction_id).strip()
-    info = FACTION_BANKERS.get(fid) or {}
-    return str(info.get("name") or fid).strip()
-
-
-def public_factions():
+  function profileIconHay(el) {
     return [
-        {
-            "faction_id": str(fid),
-            "faction_name": faction_name_for_id(fid),
+      el?.textContent,
+      el?.getAttribute?.("title"),
+      el?.getAttribute?.("alt"),
+      el?.getAttribute?.("aria-label"),
+      el?.getAttribute?.("href"),
+      el?.getAttribute?.("src"),
+      el?.id,
+      el?.className,
+    ].map((v) => String(v || "").toLowerCase()).join(" ");
+  }
+
+  function looksLikeBspIcon(el) {
+    if (!el || el.id === "fb-profile-bank-coin" || el.closest?.("#fb-profile-bank-coin")) return false;
+    const hay = profileIconHay(el);
+    return (
+      hay.includes("absp") ||
+      hay.includes("bsp") ||
+      hay.includes("battle stat") ||
+      hay.includes("battle-stats") ||
+      hay.includes("battlestat") ||
+      hay.includes("stat predictor") ||
+      hay.includes("stat-predictor") ||
+      hay.includes("battle stats") ||
+      hay.includes("bs-predict") ||
+      hay.includes("tornstats")
+    );
+  }
+
+  function findAbspProfileIconTarget() {
+    if (!isProfilePage()) return null;
+
+    const nodes = Array.from(document.querySelectorAll("a, button, div, span, img, i, svg"));
+
+    // Best: real ABSP/BSP icon by title/class/href/src/text.
+    const exact = nodes.find(looksLikeBspIcon);
+    if (exact) return { target: exact, exact: true };
+
+    // Good fallback: on profile pages, many helper scripts create a compact icon cluster near the profile header.
+    // Pick a compact visible icon inside the profile header area and place our coin beside it.
+    const headerSelectors = [
+      ".profile-wrapper",
+      ".profile-container",
+      ".profile-info",
+      ".profile-header",
+      ".basic-information",
+      ".profile-name",
+      ".content-title",
+      "main",
+    ];
+
+    for (const sel of headerSelectors) {
+      const root = document.querySelector(sel);
+      if (!root) continue;
+
+      const icons = Array.from(root.querySelectorAll("a, button, img, span, div")).filter((el) => {
+        if (el.id === "fb-profile-bank-coin") return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width < 16 || rect.width > 70 || rect.height < 16 || rect.height > 70) return false;
+        if (rect.top < 60 || rect.top > 420) return false;
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || Number(cs.opacity || 1) === 0) return false;
+        return true;
+      });
+
+      if (icons.length) {
+        icons.sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return (ar.top - br.top) || (br.left - ar.left);
+        });
+        return { target: icons[0], exact: false };
+      }
+    }
+
+    // Do not use a fixed floating fallback on profile pages; the user wants it beside BSP/ABSP only.
+    return null;
+  }
+
+  function mountProfileBankCoin() {
+    // Disabled by request: the coin must only live in Torn's header now.
+    const coin = document.querySelector("#fb-profile-bank-coin");
+    if (coin) coin.remove();
+  }
+
+  function mountBuiltInBankerBox() {
+    detectFactionBalanceFromPage();
+    const oldBox = $("#fb-built-in-box");
+
+    // Only show the quick request box on your own faction page.
+    // Keep it off profiles/other faction pages so it does not clutter the rest of Torn.
+    if (!isOwnFactionPage()) {
+      if (oldBox) oldBox.remove();
+      return;
+    }
+
+    const mountInfo = findFactionBuiltInMount();
+    const mount = mountInfo?.parent || mountInfo;
+    if (!mount || !document.body.contains(mount)) {
+      // PDA can briefly hide/rebuild the faction icon row while scrolling or refreshing.
+      // If our box is already mounted, keep it instead of removing it and making it disappear.
+      if (oldBox && document.body.contains(oldBox)) return;
+      return;
+    }
+
+    let box = oldBox;
+    const selectedFaction = APP.me?.faction_id || GM_getValue(K_TARGET_FACTION, "");
+    const activeEl = document.activeElement;
+    const userIsTyping = !!(box && activeEl && box.contains(activeEl) && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(activeEl.tagName));
+    const renderSig = JSON.stringify({
+      f: (APP.factions || []).map((x) => [String(x.faction_id || ""), String(x.faction_name || "")]),
+      b: (APP.bankers || []).map((x) => [String(x.player_id || ""), String(x.name || ""), String(x.bucket || x.status_color || x.color || ""), String(x.status_text || x.status || x.label || "")]),
+      err: APP.bankerStatusError || "",
+      sf: selectedFaction,
+      bal: String(APP.balanceAmount ?? APP.balanceText ?? ""),
+    });
+
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "fb-built-in-box";
+      box.setAttribute("data-fb-built", "1");
+    } else if (box.dataset.sig === renderSig || userIsTyping) {
+      // PDA-safe: do not rebuild while the user is tapping/typing.
+      // Rebuilding the DOM during Torn/PDA mutations was causing freezes and blocked clicks.
+      if (mountInfo?.after && document.body.contains(mountInfo.after) && box.previousElementSibling !== mountInfo.after) {
+        mountInfo.after.insertAdjacentElement("afterend", box);
+      }
+      return;
+    }
+
+    box.dataset.sig = renderSig;
+    box.innerHTML = `
+      <div class="fb-built-head">
+        <div>
+          <b>🪙 Factional Banking</b>
+          <span id="fb-built-status">Choose faction, banker, amount — send.</span>
+        </div>
+        <button id="fb-built-open" type="button">Board</button>
+      </div>
+
+      <div class="fb-built-grid">
+        <div class="fb-own-faction">Faction: <b>${esc(APP.me?.faction_name || factionLabelById(selectedFaction) || "Your faction")}</b></div>
+        ${balanceLineHtml()}
+        <div class="fb-row" style="gap:6px; margin:0;">
+          <button id="fb-built-open-balance" type="button">Sync Balance</button>
+          <button id="fb-built-refresh-balance" type="button">Refresh</button>
+          <button id="fb-built-manual-balance" type="button">Enter Manually</button>
+        </div>
+        <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
+        <select id="fb-built-banker" aria-label="Choose available banker">
+          ${bankerOptions($("#fb-built-banker")?.value || "")}
+        </select>
+        <div id="fb-built-bankers">${bankerStatusPanel()}</div>
+        <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
+        <button id="fb-built-send" type="button">Send Request</button>
+        <button id="fb-built-full" type="button">Request Full Balance</button>
+      </div>
+    `;
+
+    // Put the request box under the faction icon controls and above the faction panels.
+    if (mountInfo?.before && document.body.contains(mountInfo.before)) {
+      if (box.parentElement !== mount || box.nextElementSibling !== mountInfo.before) {
+        mount.insertBefore(box, mountInfo.before);
+      }
+    } else if (mountInfo?.after && document.body.contains(mountInfo.after)) {
+      if (box.parentElement !== mount || box.previousElementSibling !== mountInfo.after) {
+        mountInfo.after.insertAdjacentElement("afterend", box);
+      }
+    } else if (box.parentElement !== mount) {
+      if (mountInfo?.prepend && mount.prepend) mount.prepend(box);
+      else mount.appendChild(box);
+    }
+
+    $("#fb-built-open")?.addEventListener("click", openOverlay);
+    $("#fb-built-open-balance")?.addEventListener("click", openBalancePageForCapture);
+    $("#fb-built-refresh-balance")?.addEventListener("click", async () => {
+      if (!detectFactionBalanceFromPage()) {
+        setFactionBalance(null, "", "Tap Sync Balance or Enter Manually");
+      }
+      await loadFactionBalance(true);
+      mountBuiltInBankerBox();
+    });
+    $("#fb-built-manual-balance")?.addEventListener("click", promptManualBalance);
+    $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
+    $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
+
+    setCoinAlert(APP.pendingCount || 0);
+  }
+
+
+  function ensureSetupButton() {
+    if ($("#fb-setup-button")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "fb-setup-button";
+    btn.type = "button";
+    btn.textContent = "🪙 Setup";
+    btn.title = "Open Faction Bankers settings";
+    btn.addEventListener("click", () => {
+      openOverlay();
+      setTimeout(() => {
+        const settingsTab = document.querySelector('.fb-tab[data-tab="settings"]');
+        if (settingsTab) settingsTab.click();
+      }, 150);
+    });
+
+    document.body.appendChild(btn);
+
+    if (GM_getValue(K_API_KEY, "")) {
+      btn.classList.add("fb-hide");
+    }
+  }
+
+  function ensureOverlay() {
+    if ($("#fb-overlay")) return;
+
+    const overlay = document.createElement("div");
+    overlay.id = "fb-overlay";
+    overlay.innerHTML = `
+      <div id="fb-head">
+        <div id="fb-title">
+          <strong>🪙 Faction Bankers</strong>
+          <span id="fb-subtitle">Faction vault request board</span>
+        </div>
+        <button id="fb-close" type="button">✕</button>
+      </div>
+
+      <div class="fb-tabs">
+        <button class="fb-tab active" data-tab="request" type="button">Request</button>
+        <button class="fb-tab" data-tab="my" type="button">My Requests</button>
+        <button class="fb-tab" data-tab="banker" type="button">Banker</button>
+        <button class="fb-tab" data-tab="leaders" type="button">Leaders</button>
+        <button class="fb-tab" data-tab="settings" type="button">Settings</button>
+      </div>
+
+      <div id="fb-body"></div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    $("#fb-close").addEventListener("click", closeOverlay);
+
+    $$(".fb-tab", overlay).forEach((btn) => {
+      btn.addEventListener("click", () => {
+        $$(".fb-tab", overlay).forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        renderBody(btn.dataset.tab);
+      });
+    });
+  }
+
+  function openOverlay() {
+    APP.open = true;
+    GM_setValue(K_OPEN, true);
+    ensureOverlay();
+    $("#fb-overlay").classList.add("fb-show");
+    refreshAll(true);
+  }
+
+  function closeOverlay() {
+    APP.open = false;
+    GM_setValue(K_OPEN, false);
+    const ov = $("#fb-overlay");
+    if (ov) ov.classList.remove("fb-show");
+  }
+
+  function toggleOverlay() {
+    const ov = $("#fb-overlay");
+    if (ov && ov.classList.contains("fb-show")) closeOverlay();
+    else openOverlay();
+  }
+
+  function openBankerBoard() {
+    openOverlay();
+
+    setTimeout(() => {
+      const tabName = GM_getValue(K_API_KEY, "") ? "banker" : "settings";
+      const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+      if (tab) tab.click();
+    }, 150);
+  }
+
+  function openBankerSettings() {
+    openOverlay();
+
+    setTimeout(() => {
+      const tab = document.querySelector('.fb-tab[data-tab="settings"]');
+      if (tab) tab.click();
+    }, 150);
+  }
+
+  function activeTab() {
+    const btn = $(".fb-tab.active");
+    return btn?.dataset?.tab || "request";
+  }
+
+  function setCoinAlert(count) {
+    let coin = $("#fb-bank-coin-clean");
+    if (!coin && isTornPage()) {
+      mountCoin();
+      coin = $("#fb-bank-coin-clean");
+    }
+    const setupBtn = $("#fb-setup-button");
+    const n = Number(count || 0);
+    const hasKey = !!GM_getValue(K_API_KEY, "");
+    const canBank = !!(APP.me?.is_banker || APP.me?.is_admin);
+    APP.pendingCount = n;
+
+    if (coin) {
+      coin.setAttribute("data-count", String(n > 99 ? "99+" : n));
+
+      // Header coin stays visible; only turns red for bankers/admin with pending requests.
+      coin.classList.add("fb-banker-visible");
+
+      if (canBank && n > 0) {
+        coin.classList.add("fb-alert");
+        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to approve and send`;
+      } else {
+        coin.classList.remove("fb-alert");
+        coin.title = hasKey ? "Factional Banking" : "Factional Banking setup/login";
+      }
+    }
+
+    if (setupBtn) {
+      if (hasKey) setupBtn.classList.add("fb-hide");
+      else setupBtn.classList.remove("fb-hide");
+    }
+
+    const builtBox = $("#fb-built-in-box");
+    if (builtBox) {
+      if (canBank && n > 0) {
+        builtBox.classList.add("fb-built-alert");
+        const status = $("#fb-built-status");
+        if (status) status.textContent = `${n} pending banker request${n === 1 ? "" : "s"}`;
+      } else {
+        builtBox.classList.remove("fb-built-alert");
+      }
+    }
+  }
+
+  function setBody(html) {
+    const body = $("#fb-body");
+    if (body) body.innerHTML = html;
+  }
+
+  function statusPill(status) {
+    const s = String(status || "pending").toLowerCase();
+    const label = {
+      pending: "Pending",
+      approved: "Approved",
+      denied: "Denied",
+      paid: "Complete",
+      cancelled: "Cancelled",
+    }[s] || s;
+
+    return `<span class="fb-pill ${esc(s)}">${esc(label)}</span>`;
+  }
+
+
+  function factionOptions(selected = GM_getValue(K_TARGET_FACTION, "")) {
+    const own = APP.me?.faction_id ? [{ faction_id: APP.me.faction_id, faction_name: APP.me.faction_name || APP.me.faction_id }] : [];
+    const items = own.length ? own : (Array.isArray(APP.factions) && APP.factions.length ? APP.factions : DEFAULT_FACTIONS);
+
+    return items.map((f) => {
+      const id = String(f.faction_id || "");
+      const name = String(f.faction_name || id || "Your faction");
+      return `<option value="${esc(id)}" selected>${esc(name)}</option>`;
+    }).join("");
+  }
+
+  function rememberFactionFromSelect(sel) {
+    const val = $(sel)?.value || "";
+    if (val) GM_setValue(K_TARGET_FACTION, val);
+    return val;
+  }
+
+  function selectedFactionFromPage() {
+    return (
+      APP.me?.faction_id ||
+      $("#fb-target-faction")?.value ||
+      $("#fb-built-faction")?.value ||
+      GM_getValue(K_TARGET_FACTION, "") ||
+      ""
+    );
+  }
+
+  function factionLabelById(factionId) {
+    const id = String(factionId || "");
+    const found = (APP.factions || []).find((f) => String(f.faction_id) === id);
+    return found?.faction_name || id;
+  }
+
+
+
+  function openBalancePageForCapture() {
+    GM_setValue(K_BALANCE_CAPTURE, "1");
+    setFactionBalance(null, "", "Opening balance page...");
+
+    const target = "https://www.torn.com/factions.php?step=your#/tab=controls";
+    if (location.href.startsWith("https://www.torn.com/factions.php") || location.href.startsWith("https://torn.com/factions.php")) {
+      // Try to open the controls/bank area without leaving first. If Torn/PDA does not switch tabs,
+      // the URL below will force the faction page back into the right area.
+      try { clickTextButton(["controls", "bank", "give money", "deposit", "vault"]); } catch {}
+      setTimeout(() => { window.location.href = target; }, 350);
+    } else {
+      window.location.href = target;
+    }
+  }
+
+  function balanceCaptureWanted() {
+    return String(GM_getValue(K_BALANCE_CAPTURE, "")) === "1";
+  }
+
+  function stopBalanceCapture(ok) {
+    if (ok) GM_setValue(K_BALANCE_CAPTURE, "");
+  }
+
+  function tryOpenTornBalanceControls() {
+    // The exact tab names vary between Torn desktop/PDA/iPhone. Click a few safe labels only.
+    try { clickTextButton(["controls", "bank", "give money", "deposit", "vault", "balance"]); } catch {}
+  }
+
+  function startBalanceCaptureLoop() {
+    if (!isOwnFactionPage() || !balanceCaptureWanted()) return;
+
+    let tries = 0;
+    const status = () => document.querySelector("#fb-built-status");
+    const timer = setInterval(() => {
+      tries += 1;
+      tryOpenTornBalanceControls();
+
+      if (detectFactionBalanceFromPage()) {
+        stopBalanceCapture(true);
+        mountBuiltInBankerBox();
+        const st = status();
+        if (st) st.textContent = `Balance found: ${money(APP.balanceAmount || 0)}`;
+        clearInterval(timer);
+        return;
+      }
+
+      if (tries === 1 || tries === 4 || tries === 8) {
+        const st = status();
+        if (st) st.textContent = "Looking for Torn's balance line...";
+      }
+
+      if (tries >= 28) {
+        setFactionBalance(null, "", "Balance not visible on this page yet");
+        mountBuiltInBankerBox();
+        const st = status();
+        if (st) st.textContent = "Could not see your balance. Tap Enter Manually, or open Faction → Controls → Give Money and tap Refresh.";
+        clearInterval(timer);
+      }
+    }, 650);
+  }
+
+  function parseMoneyAmount(text) {
+    const raw = String(text || "");
+    const m = raw.match(/\$\s*([0-9][0-9,]*)/);
+    if (!m) return null;
+    const n = Number(String(m[1] || "").replace(/,/g, ""));
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  }
+
+  function parseBalanceInput(raw) {
+    const cleaned = String(raw || "").replace(/[^0-9]/g, "");
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  }
+
+  function setManualBalance(amount) {
+    const n = parseBalanceInput(amount);
+    if (n === null) return false;
+    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(n));
+    GM_setValue(K_MANUAL_BALANCE_TEXT, money(n));
+    APP.balanceAmount = n;
+    APP.balanceText = money(n);
+    APP.balanceSource = "manual";
+    APP.balanceUpdatedAt = Date.now();
+    GM_setValue("fb_last_personal_balance_amount_v2", String(n));
+    GM_setValue("fb_last_personal_balance_text_v2", money(n));
+    return true;
+  }
+
+  function promptManualBalance() {
+    const current = Number.isFinite(Number(APP.balanceAmount)) ? String(APP.balanceAmount) : "";
+    const raw = prompt("Enter your faction bank balance. Example: 25000000", current);
+    if (raw === null) return;
+    if (!setManualBalance(raw)) {
+      alert("Enter numbers only, example: 25000000");
+      return;
+    }
+    mountBuiltInBankerBox();
+    if (APP.open) renderBody(activeTab());
+  }
+
+  function loadManualBalanceCache() {
+    const manual = Number(GM_getValue(K_MANUAL_BALANCE_AMOUNT, ""));
+    const manualText = GM_getValue(K_MANUAL_BALANCE_TEXT, "");
+    if (Number.isFinite(manual) && manual >= 0 && manualText) {
+      APP.balanceAmount = Math.floor(manual);
+      APP.balanceText = manualText;
+      APP.balanceSource = "manual";
+      return true;
+    }
+    return false;
+  }
+
+  function setFactionBalance(amount, source = "", fallbackText = "Balance unavailable") {
+    if (Number.isFinite(Number(amount)) && Number(amount) >= 0) {
+      APP.balanceAmount = Math.floor(Number(amount));
+      APP.balanceText = money(APP.balanceAmount);
+      APP.balanceSource = source || "detected";
+      APP.balanceUpdatedAt = Date.now();
+      GM_setValue("fb_last_personal_balance_amount_v2", String(APP.balanceAmount));
+      GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
+      return true;
+    }
+
+    if (loadManualBalanceCache()) return true;
+
+    const cached = Number(GM_getValue("fb_last_personal_balance_amount_v2", ""));
+    const cachedText = GM_getValue("fb_last_personal_balance_text_v2", "");
+    if (Number.isFinite(cached) && cached >= 0 && cachedText) {
+      APP.balanceAmount = Math.floor(cached);
+      APP.balanceText = cachedText;
+      APP.balanceSource = "last verified";
+      return true;
+    }
+
+    APP.balanceAmount = null;
+    APP.balanceText = fallbackText || "Balance unavailable";
+    APP.balanceSource = "";
+    return false;
+  }
+
+  function detectFactionBalanceFromPage() {
+    if (!isOwnFactionPage()) return false;
+
+    const allText = String(document.body?.innerText || document.body?.textContent || "").replace(/\s+/g, " ");
+    const exactPatterns = [
+      /[A-Za-z0-9_\-]+(?:\'s|’s)\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
+      /your\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
+      /your\s+(?:faction\s+)?balance\s*(?:is|:)\s*\$\s*([0-9][0-9,]*)/i,
+    ];
+    for (const re of exactPatterns) {
+      const m = allText.match(re);
+      if (m) {
+        const n = Number(String(m[1] || "").replace(/,/g, ""));
+        if (Number.isFinite(n) && n >= 0) return setFactionBalance(n, "Torn balance page");
+      }
+    }
+
+    // Be strict: only read the MEMBER'S own faction-bank balance, not faction vault money,
+    // points, jackpot, or our own request amount field.
+    const roots = Array.from(document.querySelectorAll("div, span, li, td, p, section, label"));
+    let best = null;
+
+    const badWords = [
+      "request", "requested", "amount", "vault", "funds", "faction money",
+      "money:", "points:", "merits:", "respect", "cost", "price", "donation",
+      "armoury", "stock", "banker", "available banker"
+    ];
+
+    for (const el of roots) {
+      if (!el || el.closest("#fb-built-in-box, #fb-overlay")) continue;
+      const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 180 || !text.includes("$")) continue;
+
+      const lower = text.toLowerCase();
+      if (badWords.some((w) => lower.includes(w))) continue;
+
+      // Torn normally labels this as: "Fries91's current balance is $0"
+      // or "Your balance is $..." near the Give Money form.
+      // We do NOT accept generic dollar amounts anymore because that caused wrong balances.
+      let score = 0;
+      if (/\bcurrent\s+balance\s+is\s*\$/i.test(text)) score += 160;
+      if (/\b[a-z0-9_\-]+(?:\'s|’s)\s+current\s+balance\s+is\s*\$/i.test(text)) score += 180;
+      if (/\byour\s+(faction\s+)?balance\b/i.test(text)) score += 140;
+      if (/\bmy\s+(faction\s+)?balance\b/i.test(text)) score += 110;
+      if (/\bbalance\s*[:\-]?\s*\$/i.test(text)) score += 80;
+      if (/\$[\d,]+\s*\b(balance)\b/i.test(text)) score += 50;
+      if (lower.includes("member balance")) score += 90;
+      if (lower.includes("bank balance")) score += 35;
+      if (score < 80) continue;
+
+      const amount = parseMoneyAmount(text);
+      if (amount === null) continue;
+      if (!best || score > best.score) best = { amount, score, text };
+    }
+
+    if (best) return setFactionBalance(best.amount, "page verified");
+    return false;
+  }
+
+  async function loadFactionBalance(force = false) {
+    // Page text is the source of truth for personal faction-bank balance.
+    // The API may expose vault/funds/member data, which is not always the user's exact bank balance.
+    if (detectFactionBalanceFromPage()) return true;
+    if (loadManualBalanceCache()) return true;
+
+    if (!GM_getValue(K_API_KEY, "")) {
+      setFactionBalance(null, "", "Save key to check balance");
+      return false;
+    }
+
+    if (!force && APP.balanceUpdatedAt && Date.now() - APP.balanceUpdatedAt < 30000) return true;
+
+    try {
+      const res = await gmRequest("GET", "/api/banker/balance");
+      if (res && res.ok && Number.isFinite(Number(res.balance))) {
+        // API balance is only used when the page exact balance is not visible.
+        return setFactionBalance(Number(res.balance), res.source || "api optional");
+      }
+      if (res && res.message) APP.balanceText = String(res.message);
+    } catch (err) {
+      // Balance is optional. Do not break the whole banking box if Torn/API cannot expose it.
+      if (!APP.balanceAmount && !detectFactionBalanceFromPage()) {
+        setFactionBalance(null, "", "Balance unavailable");
+      }
+    }
+
+    return APP.balanceAmount !== null;
+  }
+
+  function balanceLineHtml() {
+    const has = Number.isFinite(Number(APP.balanceAmount));
+    const label = has ? money(APP.balanceAmount) : esc(APP.balanceText || "Balance unavailable");
+    const src = APP.balanceSource ? ` (${APP.balanceSource})` : "";
+    return `<div class="fb-balance-line"><div>Your balance: <b>${label}</b></div><span>${esc(src || "")}</span></div>`;
+  }
+
+  function currentTargetFactionId() {
+    return (
+      APP.me?.faction_id ||
+      $("#fb-target-faction")?.value ||
+      $("#fb-built-faction")?.value ||
+      GM_getValue(K_TARGET_FACTION, "") ||
+      ""
+    );
+  }
+
+  async function loadBankerStatus(factionId = currentTargetFactionId()) {
+    const fid = String(factionId || "").trim();
+    if (!fid || !GM_getValue(K_API_KEY, "")) {
+      APP.bankers = [];
+      APP.bankerFactionId = "";
+      APP.bankerStatusError = "Save API key, then refresh banker status.";
+      return false;
+    }
+
+    try {
+      const res = await gmRequest("GET", `/api/banker/status?faction_id=${encodeURIComponent(fid)}`);
+      APP.bankers = (Array.isArray(res.items) ? res.items : []).filter((b) => !isHiddenBanker(b));
+      APP.bankerFactionId = fid;
+      APP.bankerStatusError = APP.bankers.length ? "" : "No bankers returned by Render for this faction.";
+      return true;
+    } catch (err) {
+      // Keep the last good list so the request box does not flicker/disappear on PDA.
+      APP.bankerFactionId = fid;
+      APP.bankerStatusError = String(err?.message || err || "Banker status failed");
+      if (!APP.bankers.length) {
+        APP.bankers = [{
+          player_id: "3679030",
+          name: "Fries91",
+          status: "unknown",
+          color: "gray",
+          label: "Status unavailable",
+          details: APP.bankerStatusError,
+          is_available: false,
+        }];
+      }
+      return false;
+    }
+  }
+
+  function isFries91Banker(b) {
+    const id = String(b?.player_id || "").trim();
+    const name = String(b?.name || "").trim().toLowerCase();
+    return id === "3679030" || name === "fries91";
+  }
+
+  function friesPhoneText(b) {
+    if (isFries91Banker(b)) return " • pings directly to phone";
+    if (b?.has_pushover) return " • phone ping";
+    return "";
+  }
+
+  function isHiddenBanker(b) {
+    const id = String(b?.player_id || "").trim().toLowerCase();
+    const name = String(b?.name || "").trim().toLowerCase();
+    return id === "pulsearts" || name === "pulsearts" || name.startsWith("pulsearts") || name === "pulse";
+  }
+
+  function visibleBankers() {
+    return (Array.isArray(APP.bankers) ? APP.bankers : []).filter((b) => !isHiddenBanker(b));
+  }
+
+  function bankerOptions(selected = "") {
+    const bankers = visibleBankers();
+    const onlineCount = bankers.filter((b) => b.is_available || String(b.color || "").toLowerCase() === "green").length;
+    const travelingCount = bankers.filter((b) => ["yellow", "blue"].includes(String(b.color || "").toLowerCase())).length;
+    const offlineCount = Math.max(0, bankers.length - onlineCount - travelingCount);
+
+    let anyLabel = "Any available banker";
+    if (bankers.length) {
+      const bits = [];
+      if (onlineCount) bits.push(`${onlineCount} online`);
+      if (travelingCount) bits.push(`${travelingCount} traveling`);
+      if (offlineCount) bits.push(`${offlineCount} offline`);
+      anyLabel = `Any available banker — ${bits.join(", ") || bankers.length + " listed"}`;
+    } else if (APP.bankerStatusError) {
+      anyLabel = "Any available banker — status unavailable";
+    } else {
+      anyLabel = "Any available banker — loading status";
+    }
+
+    const options = [`<option value="">${esc(anyLabel)}</option>`];
+
+    for (const b of bankers) {
+      const id = String(b.player_id || "");
+      const name = String(b.name || id);
+      const label = String(b.label || b.status_text || b.status || "Unknown");
+      const details = String(b.details || "");
+      const c = String(b.color || b.status_color || "").toLowerCase();
+      const available = b.is_available || c === "green" ? "🟢" : (c === "yellow" || c === "blue" ? "🟡" : "🔴");
+      const phoneText = friesPhoneText(b);
+      const extra = details ? ` (${esc(details).slice(0, 42)})` : "";
+      options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${phoneText}${extra}</option>`);
+    }
+
+    return options.join("");
+  }
+
+  function bankerStatusPanel() {
+    // Banker availability stays inside the dropdown only.
+    // This keeps the faction page compact and avoids showing banker chips/rows under the dropdown.
+    return "";
+  }
+
+  async function handleFactionChangeAndReload(selectId, rerender = true) {
+    const val = rememberFactionFromSelect(selectId);
+    await loadBankerStatus(val);
+    if (rerender && APP.open) renderBody(activeTab());
+    mountBuiltInBankerBox();
+  }
+
+  function renderBody(tab = activeTab()) {
+    if (!GM_getValue(K_API_KEY, "")) {
+      renderSettings("Add your Torn API key first.");
+      return;
+    }
+
+    if (!APP.me) {
+      setBody(`<div class="fb-box"><div class="fb-muted">Loading account...</div></div>`);
+      return;
+    }
+
+    if (tab === "request") renderRequestTab();
+    if (tab === "my") renderMyTab();
+    if (tab === "banker") renderBankerTab();
+    if (tab === "leaders") renderLeadersTab();
+    if (tab === "settings") renderSettings();
+  }
+
+  function renderRequestTab(msg = "") {
+    setBody(`
+      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
+
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">Request money from faction bank</div>
+            <div class="fb-small">Logged in as ${esc(APP.me?.name || "Unknown")} ${APP.me?.faction_name ? `• ${esc(APP.me.faction_name)}` : ""}</div>
+          </div>
+          <span class="fb-pill">Member</span>
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <label class="fb-label">Faction</label>
+        <div class="fb-input" style="height:auto;">${esc(APP.me?.faction_name || "Your faction")}</div>
+        <input id="fb-target-faction" type="hidden" value="${esc(APP.me?.faction_id || currentTargetFactionId())}">
+        <div style="margin-top:8px;">${balanceLineHtml()}</div>
+        <div class="fb-row" style="gap:6px; margin-top:8px;">
+          <button id="fb-open-balance-page" class="fb-btn" type="button">Sync Balance</button>
+          <button id="fb-refresh-balance" class="fb-btn" type="button">Refresh</button>
+          <button id="fb-manual-balance" class="fb-btn blue" type="button">Enter Manually</button>
+        </div>
+
+        <label class="fb-label" style="margin-top:10px;">Choose banker now</label>
+        <select id="fb-target-banker" class="fb-input fb-banker-select">
+          ${bankerOptions($("#fb-target-banker")?.value || "")}
+        </select>
+        ${bankerStatusPanel()}
+
+        <label class="fb-label" style="margin-top:10px;">Amount requested</label>
+        <input id="fb-amount" class="fb-input" inputmode="numeric" placeholder="Example: 25000000">
+
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-full-request" class="fb-btn blue" type="button">Request Full Balance</button>
+        </div>
+
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-submit-request" class="fb-btn gold" type="button">Send Amount Request</button>
+          <button id="fb-refresh" class="fb-btn" type="button">Refresh</button>
+        </div>
+
+        <div class="fb-small" style="margin-top:8px;">
+          Bankers are found from your faction roles automatically. Set the banker role name in Torn/Render as Banker, Treasurer, Leader, or Co-leader.
+        </div>
+      </div>
+    `);
+
+    $("#fb-submit-request")?.addEventListener("click", submitRequest);
+    $("#fb-full-request")?.addEventListener("click", submitFullBalanceRequest);
+    $("#fb-open-balance-page")?.addEventListener("click", openBalancePageForCapture);
+    $("#fb-refresh-balance")?.addEventListener("click", async () => { await loadFactionBalance(true); renderRequestTab(); });
+    $("#fb-manual-balance")?.addEventListener("click", promptManualBalance);
+    $("#fb-refresh")?.addEventListener("click", () => refreshAll(true));
+  }
+
+  function renderMyTab() {
+    const mine = APP.requests.filter((r) => String(r.requester_id) === String(APP.me?.player_id));
+
+    const cards = mine.length
+      ? mine.map(requestCard).join("")
+      : `<div class="fb-box"><div class="fb-muted">No requests yet.</div></div>`;
+
+    setBody(`
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">My Requests</div>
+            <div class="fb-small">Track your faction bank requests here.</div>
+          </div>
+          <button id="fb-refresh-my" class="fb-btn" type="button">Refresh</button>
+        </div>
+      </div>
+      ${cards}
+    `);
+
+    $("#fb-refresh-my")?.addEventListener("click", () => refreshAll(true));
+  }
+
+  function renderBankerTab() {
+    if (!APP.me?.is_banker) {
+      setBody(`
+        <div class="fb-box">
+          <div class="fb-request-title">Banker Access</div>
+          <div class="fb-error" style="margin-top:6px;">
+            You are not listed as a banker for this app.
+          </div>
+          <div class="fb-small" style="margin-top:8px;">
+            Banker access is controlled by the backend BANKER_IDS setting.
+          </div>
+        </div>
+      `);
+      return;
+    }
+
+    const pending = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+    const others = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() !== "pending");
+
+    const cards = [
+      pending.length
+        ? `<div class="fb-box"><strong style="color:#ffd36a;">Pending Requests</strong></div>${pending.map(requestCard).join("")}`
+        : `<div class="fb-box"><div class="fb-muted">No pending requests.</div></div>`,
+      others.length
+        ? `<div class="fb-box"><strong>Recent History</strong></div>${others.slice(0, 20).map(requestCard).join("")}`
+        : "",
+    ].join("");
+
+    setBody(`
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">Banker Board</div>
+            <div class="fb-small">${pending.length} pending request${pending.length === 1 ? "" : "s"}</div>
+          </div>
+          <button id="fb-refresh-banker" class="fb-btn" type="button">Refresh</button>
+        </div>
+        ${bankerStatusPanel()}
+      </div>
+      ${cards}
+    `);
+
+    $("#fb-refresh-banker")?.addEventListener("click", () => refreshAll(true));
+
+    $$("[data-fb-action]").forEach((btn) => {
+      btn.addEventListener("click", () => bankerAction(btn.dataset.id, btn.dataset.fbAction));
+    });
+
+    $$("[data-fb-pay]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (btn.dataset.fbPay === "approve-open") approveAndOpenBank(btn.dataset.id);
+        else openSavedRequestInBank(btn.dataset.id);
+      });
+    });
+  }
+
+
+  function normalizedPayAmount(r) {
+    if (!r || String(r.note || "") === FULL_BALANCE_NOTE) return "";
+    const amount = Number(r.amount || 0);
+    return Number.isFinite(amount) && amount > 0 ? String(Math.floor(amount)) : "";
+  }
+
+  function showPayNotice(text) {
+    let notice = document.querySelector("#fb-pay-prefill-notice");
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.id = "fb-pay-prefill-notice";
+      notice.className = "fb-pay-notice";
+      document.body.appendChild(notice);
+    }
+    notice.textContent = text;
+    clearTimeout(showPayNotice._timer);
+    showPayNotice._timer = setTimeout(() => notice.remove(), 7000);
+  }
+
+  function savePayPrefill(r) {
+    if (!r) return false;
+    const payload = {
+      requestId: String(r.id || ""),
+      playerId: String(r.requester_id || ""),
+      playerName: String(r.requester_name || ""),
+      amount: normalizedPayAmount(r),
+      factionName: String(r.faction_name || ""),
+      savedAt: Date.now(),
+    };
+    GM_setValue(K_PAY_PREFILL, JSON.stringify(payload));
+    try {
+      localStorage.setItem(K_PAY_PREFILL, JSON.stringify(payload));
+    } catch {
+      // PDA can block localStorage in some modes; GM storage is enough.
+    }
+    return true;
+  }
+
+  function getPayPrefill() {
+    let raw = GM_getValue(K_PAY_PREFILL, "");
+    if (!raw) {
+      try { raw = localStorage.getItem(K_PAY_PREFILL) || ""; } catch { raw = ""; }
+    }
+    if (!raw) return null;
+    try {
+      const data = JSON.parse(raw);
+      if (!data || !data.playerId) return null;
+      if (Date.now() - Number(data.savedAt || 0) > 20 * 60 * 1000) {
+        clearPayPrefill();
+        return null;
+      }
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearPayPrefill() {
+    GM_setValue(K_PAY_PREFILL, "");
+    try { localStorage.removeItem(K_PAY_PREFILL); } catch {}
+  }
+
+
+  function incomingRequestIdFromUrl() {
+    try {
+      const url = new URL(location.href);
+      return String(url.searchParams.get("fb_bank_req") || "").replace(/\D/g, "");
+    } catch {
+      return "";
+    }
+  }
+
+  async function handleIncomingBankRequestUrl() {
+    const reqId = incomingRequestIdFromUrl();
+    if (!reqId || !GM_getValue(K_API_KEY, "")) return false;
+
+    try {
+      const res = await gmRequest("GET", `/api/banker/requests/${encodeURIComponent(reqId)}`);
+      const item = res && res.item;
+      if (!item) return false;
+      savePayPrefill(item);
+      showPayNotice("Bank request loaded from phone ping. Player and amount will auto-fill. Manually press Give Money.");
+      setTimeout(tryPrefillFactionBankForm, 600);
+      setTimeout(tryPrefillFactionBankForm, 1600);
+      setTimeout(tryPrefillFactionBankForm, 3200);
+      setTimeout(tryPrefillFactionBankForm, 5500);
+      return true;
+    } catch (err) {
+      showPayNotice(`Could not load bank request #${reqId}: ${String(err.message || err).slice(0, 90)}`);
+      return false;
+    }
+  }
+
+  function openBankingPageForRequest(r) {
+    if (!r) return;
+    savePayPrefill(r);
+    showPayNotice("Opening Torn faction bank. Player and amount will auto-fill when the bank form loads. You still manually press Give Money.");
+    window.location.href = "https://www.torn.com/factions.php?step=your#/tab=controls";
+  }
+
+  function setNativeValue(input, value) {
+    if (!input) return false;
+
+    const val = String(value ?? "");
+
+    try { input.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
+    try { input.focus(); } catch {}
+    try { input.click(); } catch {}
+
+    const isEditable = !!input.isContentEditable || String(input.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+
+    if (isEditable) {
+      try { input.textContent = val; } catch {}
+      try { input.innerText = val; } catch {}
+      try { input.setAttribute("data-value", val); } catch {}
+    } else {
+      // React/Torn-safe value setter. Some Torn fields ignore plain input.value = x.
+      const proto = Object.getPrototypeOf(input);
+      const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+      const ownDescriptor = Object.getOwnPropertyDescriptor(input, "value");
+
+      if (descriptor && descriptor.set && (!ownDescriptor || ownDescriptor.set !== descriptor.set)) {
+        descriptor.set.call(input, val);
+      } else {
+        input.value = val;
+      }
+
+      try { input.setAttribute("value", val); } catch {}
+    }
+
+    const events = [
+      new Event("input", { bubbles: true }),
+      new Event("change", { bubbles: true }),
+      new KeyboardEvent("keydown", { bubbles: true, key: val.slice(-1) || "0" }),
+      new KeyboardEvent("keyup", { bubbles: true, key: val.slice(-1) || "0" }),
+      new Event("blur", { bubbles: true }),
+    ];
+
+    // InputEvent is not always available in PDA, so keep it optional.
+    try {
+      events.unshift(new InputEvent("input", { bubbles: true, inputType: "insertText", data: val }));
+    } catch {}
+
+    events.forEach((ev) => {
+      try { input.dispatchEvent(ev); } catch {}
+    });
+
+    try { input.focus(); } catch {}
+    return true;
+  }
+
+  function isFactionBankerOwnInput(el) {
+    return !!(
+      el &&
+      (el.closest?.("#fb-built-in-box") ||
+       el.closest?.("#fb-overlay") ||
+       el.closest?.("#fb-profile-bank-coin") ||
+       el.id?.startsWith?.("fb-") ||
+       String(el.className || "").includes("fb-"))
+    );
+  }
+
+  function visibleInput(el) {
+    if (!el || el.disabled) return false;
+    const isEditable = !!el.isContentEditable || String(el.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+    if (el.readOnly && !isEditable) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 30 && rect.height > 12;
+  }
+
+  function scoreInputFor(input, kind) {
+    const s = [
+      input.id,
+      input.name,
+      input.placeholder,
+      input.getAttribute("aria-label"),
+      input.className,
+      input.closest("div")?.textContent,
+    ].map((v) => String(v || "").toLowerCase()).join(" ");
+
+    if (kind === "player") {
+      return (s.includes("player") ? 40 : 0) +
+        (s.includes("user") ? 25 : 0) +
+        (s.includes("member") ? 25 : 0) +
+        (s.includes("recipient") ? 35 : 0) +
+        (s.includes("name") ? 15 : 0) +
+        (s.includes("id") ? 10 : 0) -
+        (s.includes("amount") || s.includes("money") || s.includes("cash") ? 50 : 0);
+    }
+
+    return (s.includes("amount") ? 45 : 0) +
+      (s.includes("money") ? 30 : 0) +
+      (s.includes("cash") ? 30 : 0) +
+      (s.includes("give") ? 18 : 0) +
+      (input.inputMode === "numeric" ? 15 : 0) +
+      (input.type === "number" || input.type === "tel" ? 20 : 0) -
+      (s.includes("player") || s.includes("user") || s.includes("member") ? 45 : 0);
+  }
+
+  function inputSignature(el) {
+    const bits = [
+      el?.id,
+      el?.name,
+      el?.placeholder,
+      el?.getAttribute?.("aria-label"),
+      el?.className,
+      el?.closest?.("label")?.textContent,
+      el?.parentElement?.textContent,
+      el?.parentElement?.previousElementSibling?.textContent,
+      el?.parentElement?.parentElement?.textContent,
+    ];
+    return bits.map((v) => String(v || "").toLowerCase()).join(" ");
+  }
+
+  function allUsableInputs() {
+    return Array.from(document.querySelectorAll("input, textarea, [contenteditable=\"true\"]"))
+      .filter((el) => !isFactionBankerOwnInput(el))
+      .filter(visibleInput)
+      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
+  }
+
+  function looksLikePlayerInput(el) {
+    const s = inputSignature(el);
+    return s.includes("search player") ||
+      s.includes("player") ||
+      s.includes("recipient") ||
+      s.includes("user") ||
+      s.includes("member") ||
+      s.includes("name") ||
+      s.includes("xid");
+  }
+
+  function looksLikeAmountInput(el) {
+    const s = inputSignature(el);
+    const type = String(el.type || "").toLowerCase();
+    const mode = String(el.inputMode || "").toLowerCase();
+
+    if (looksLikePlayerInput(el) && !s.includes("amount")) return false;
+
+    return s.includes("amount") ||
+      s.includes("money") ||
+      s.includes("cash") ||
+      s.includes("give money") ||
+      s.includes("change balance") ||
+      s.includes("$") ||
+      mode === "numeric" ||
+      type === "number" ||
+      type === "tel";
+  }
+
+  function bestAmountInputNearDollar(inputs, playerInput) {
+    const dollarNodes = Array.from(document.querySelectorAll("div, span, label, p"))
+      .filter((el) => getCleanText(el).trim() === "$" || getCleanText(el).trim().startsWith("$"))
+      .map((el) => el.getBoundingClientRect());
+
+    const playerRect = playerInput?.getBoundingClientRect?.();
+
+    const candidates = inputs.filter((input) => input !== playerInput && !looksLikePlayerInput(input));
+
+    if (dollarNodes.length && candidates.length) {
+      const scored = candidates.map((input) => {
+        const r = input.getBoundingClientRect();
+        let best = 999999;
+        for (const d of dollarNodes) {
+          const dist = Math.abs(r.top - d.top) + Math.abs(r.left - d.right);
+          best = Math.min(best, dist);
         }
-        for fid in all_configured_faction_ids()
-    ]
-
-
-def bankers_for_faction(faction_id):
-    fid = str(faction_id or "").strip()
-    info = FACTION_BANKERS.get(fid) or {}
-    bankers = []
-
-    for raw in info.get("bankers", []) or []:
-        if isinstance(raw, dict):
-            bid = str(raw.get("id") or raw.get("player_id") or raw.get("xid") or "").strip()
-            bname = str(raw.get("name") or raw.get("player_name") or "").strip()
-        else:
-            bid = str(raw).strip()
-            bname = ""
-        if bid and not is_hidden_banker_name_or_id(bid) and not is_hidden_banker_name_or_id(bname) and bid not in bankers:
-            bankers.append(bid)
-
-    # If a faction exists but has no banker list, still show the legacy/admin bankers.
-    if not bankers:
-        bankers = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
-
-    # Always include Fries91/admin as a banker safety fallback.
-    if ADMIN_PLAYER_ID and ADMIN_PLAYER_ID not in bankers:
-        bankers.insert(0, ADMIN_PLAYER_ID)
-
-    return bankers
-
-
-def banker_name_from_config(faction_id, banker_id):
-    fid = str(faction_id or "").strip()
-    bid = str(banker_id or "").strip()
-    info = FACTION_BANKERS.get(fid) or {}
-    for raw in info.get("bankers", []) or []:
-        if isinstance(raw, dict):
-            rid = str(raw.get("id") or raw.get("player_id") or raw.get("xid") or "").strip()
-            if rid == bid:
-                return str(raw.get("name") or raw.get("player_name") or bid).strip()
-    if bid == ADMIN_PLAYER_ID:
-        return "Fries91"
-    return bid
-
-
-def classify_banker_status(data):
-    """
-    Turn Torn's user status payload into banker availability.
-
-    Important: last_action.status can say Online even when a player is
-    hospital/jail/traveling/abroad. So blocked states are checked FIRST,
-    and activity is only used after we know they are actually in Torn.
-    """
-    status_obj = data.get("status") if isinstance(data, dict) else {}
-    last_action = data.get("last_action") if isinstance(data, dict) else {}
-    travel = data.get("travel") if isinstance(data, dict) else {}
-
-    state = "Unknown"
-    details = ""
-    torn_color = ""
-
-    if isinstance(status_obj, dict):
-        state = str(status_obj.get("state") or "Unknown").strip()
-        details = str(status_obj.get("details") or state).strip()
-        torn_color = str(status_obj.get("color") or "").strip().lower()
-    elif status_obj:
-        details = str(status_obj).strip()
-        state = details
-
-    last_status = ""
-    last_relative = ""
-    if isinstance(last_action, dict):
-        last_status = str(last_action.get("status") or "").strip()
-        last_relative = str(last_action.get("relative") or "").strip()
-
-    travel_parts = []
-    travel_state = ""
-    travel_dest = ""
-    travel_time = ""
-    if isinstance(travel, dict) and travel:
-        travel_state = str(travel.get("status") or travel.get("state") or travel.get("phase") or "").strip()
-        travel_dest = str(travel.get("destination") or travel.get("dest") or travel.get("country") or "").strip()
-        travel_time = str(travel.get("timestamp") or travel.get("time_left") or travel.get("timeleft") or travel.get("eta") or "").strip()
-        for part in (travel_state, travel_dest, travel_time):
-            if part:
-                travel_parts.append(part)
-
-    # Check Torn state/travel first. Do NOT include last_action here because
-    # last_action often says Online while the user is unavailable.
-    blocked_text = " ".join([state, details, torn_color, " ".join(travel_parts)]).lower()
-    activity_text = " ".join([last_status, last_relative]).lower()
-
-    def has_any(text, words):
-        return any(w in text for w in words)
-
-    if has_any(blocked_text, ["hospital", "hosp"]):
-        app_status = "hospital"
-        app_color = "red"
-        app_label = "Hospital"
-    elif has_any(blocked_text, ["jail", "jailed"]):
-        app_status = "jail"
-        app_color = "red"
-        app_label = "Jail"
-    elif has_any(blocked_text, ["abroad", "overseas"]):
-        app_status = "abroad"
-        app_color = "blue"
-        app_label = "Abroad"
-    elif has_any(blocked_text, ["travel", "traveling", "travelling", "flying", "flight", "returning", "departed", "arriving"]):
-        app_status = "traveling"
-        app_color = "yellow"
-        app_label = "Traveling"
-    elif travel_dest and travel_dest.lower() not in {"torn", "home", "", "none", "null"}:
-        # Some Torn responses only expose a destination/time without a plain
-        # "traveling" word. Treat that as unavailable.
-        app_status = "traveling"
-        app_color = "yellow"
-        app_label = "Traveling"
-    elif "idle" in activity_text or "idle" in blocked_text or torn_color == "orange":
-        app_status = "idle"
-        app_color = "orange"
-        app_label = "Idle"
-    elif "online" in activity_text or "online" in blocked_text or torn_color == "green":
-        app_status = "online"
-        app_color = "green"
-        app_label = "Online"
-    elif "offline" in activity_text or "offline" in blocked_text or torn_color == "red":
-        app_status = "offline"
-        app_color = "red"
-        app_label = "Offline"
-    else:
-        app_status = "unknown"
-        app_color = "gray"
-        app_label = "Unknown"
-
-    if app_status in {"traveling", "abroad"}:
-        if travel_dest and travel_time:
-            subtitle = f"{app_label}: {travel_dest} • {travel_time}"
-        elif travel_dest:
-            subtitle = f"{app_label}: {travel_dest}"
-        else:
-            subtitle = details or app_label
-    else:
-        subtitle = details or last_relative or state or app_label
-
-    return app_status, app_color, app_label, subtitle
-
-def torn_get_banker_status(key, banker_id, faction_id=""):
-    bid = str(banker_id or "").strip()
-    cache_key = f"{bid}:{key[-6:] if key else ''}"
-    cached = BANKER_STATUS_CACHE.get(cache_key)
-    if cached and time.time() - cached.get("ts", 0) < BANKER_STATUS_TTL:
-        return cached.get("item")
-
-    item = {
-        "player_id": bid,
-        "name": banker_name_from_config(faction_id, bid),
-        "status": "unknown",
-        "color": "gray",
-        "label": "Unknown",
-        "details": "Status unavailable",
-        "is_available": False,
+        return { input, score: best };
+      }).sort((a, b) => a.score - b.score);
+      if (scored[0] && scored[0].score < 250) return scored[0].input;
     }
 
-    if not bid:
-        return item
-
-    if not key:
-        BANKER_STATUS_CACHE[cache_key] = {"ts": time.time(), "item": item}
-        return item
-
-    url = f"{TORN_API_BASE}/user/{bid}?selections=profile&key={key}"
-    try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT)
-        data = r.json()
-        if isinstance(data, dict) and not data.get("error"):
-            name = str(data.get("name") or banker_name_from_config(faction_id, bid) or bid).strip()
-            status, color, label, details = classify_banker_status(data)
-            item = {
-                "player_id": bid,
-                "name": name,
-                "status": status,
-                "color": color,
-                "label": label,
-                "details": details or label,
-                "is_available": status in {"online", "idle"},
-            }
-        elif isinstance(data, dict) and data.get("error"):
-            err = data.get("error") or {}
-            item["details"] = str(err.get("error") or "Torn API denied status check")[:160]
-    except Exception as e:
-        item["details"] = f"Status check failed: {e}"[:160]
-
-    BANKER_STATUS_CACHE[cache_key] = {"ts": time.time(), "item": item}
-    return item
-
-
-def now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def get_db():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is missing")
-
-    return psycopg2.connect(
-        DATABASE_URL,
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
-
-
-def db_error_response(prefix="Database is not ready"):
-    if not DATABASE_URL:
-        return jsonify({
-            "ok": False,
-            "error": "DATABASE_URL is missing in Render. Attach a Postgres database or add DATABASE_URL in Environment."
-        }), 503
-    return jsonify({"ok": False, "error": prefix}), 500
-
-
-def init_db():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS banker_requests (
-                    id SERIAL PRIMARY KEY,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    amount BIGINT NOT NULL DEFAULT 0,
-                    note TEXT NOT NULL DEFAULT '',
-                    requester_id TEXT NOT NULL,
-                    requester_name TEXT NOT NULL,
-                    faction_id TEXT NOT NULL,
-                    faction_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    created_ts DOUBLE PRECISION NOT NULL,
-                    handled_by_id TEXT NOT NULL DEFAULT '',
-                    handled_by_name TEXT NOT NULL DEFAULT '',
-                    handled_at TEXT NOT NULL DEFAULT '',
-                    bank_note TEXT NOT NULL DEFAULT '',
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE
-                )
-                """
-            )
-
-            cur.execute("ALTER TABLE banker_requests ADD COLUMN IF NOT EXISTS selected_banker_id TEXT NOT NULL DEFAULT ''")
-            cur.execute("ALTER TABLE banker_requests ADD COLUMN IF NOT EXISTS selected_banker_name TEXT NOT NULL DEFAULT ''")
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS faction_manual_bankers (
-                    faction_id TEXT NOT NULL,
-                    faction_name TEXT NOT NULL DEFAULT '',
-                    banker_id TEXT NOT NULL,
-                    banker_name TEXT NOT NULL DEFAULT '',
-                    pushover_key TEXT NOT NULL DEFAULT '',
-                    added_by_id TEXT NOT NULL DEFAULT '',
-                    added_by_name TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL DEFAULT '',
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    PRIMARY KEY (faction_id, banker_id)
-                )
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS faction_banker_roles (
-                    faction_id TEXT NOT NULL,
-                    faction_name TEXT NOT NULL DEFAULT '',
-                    role_name TEXT NOT NULL,
-                    added_by_id TEXT NOT NULL DEFAULT '',
-                    added_by_name TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL DEFAULT '',
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    PRIMARY KEY (faction_id, role_name)
-                )
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_banker_requests_faction_active
-                ON banker_requests (faction_id, is_active, created_ts DESC)
-                """
-            )
-
-        conn.commit()
-
-
-def get_key():
-    key = request.headers.get("X-Torn-Key", "").strip()
-    if not key:
-        key = request.args.get("key", "").strip()
-    return key
-
-
-def torn_get_user(key):
-    if not key:
-        return None, "Missing Torn API key"
-
-    url = f"{TORN_API_BASE}/user/?selections=profile&key={key}"
-
-    try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT)
-        data = r.json()
-    except Exception as e:
-        return None, f"Torn API request failed: {e}"
-
-    if not isinstance(data, dict):
-        return None, "Bad Torn API response"
-
-    if data.get("error"):
-        err = data.get("error") or {}
-        return None, err.get("error", "Torn API error")
-
-    player_id = str(data.get("player_id") or data.get("id") or "").strip()
-    name = str(data.get("name") or "Unknown").strip()
-
-    faction = data.get("faction") or {}
-    faction_id = ""
-    faction_name = ""
-
-    if isinstance(faction, dict):
-        faction_id = str(faction.get("faction_id") or faction.get("id") or "").strip()
-        faction_name = str(faction.get("faction_name") or faction.get("name") or "").strip()
-
-    if not player_id:
-        return None, "Could not read player ID from Torn"
-
-    if not faction_id:
-        return None, "You must be in a faction to use Faction Bankers"
-
-    configured_banker_factions = banker_factions_for_player(player_id)
-    role_banker_ids = set(dynamic_banker_ids_for_faction(key, faction_id))
-    manual_banker_ids = set(manual_banker_ids_for_faction(faction_id))
-    legacy_banker = player_id in BANKER_IDS or player_id == ADMIN_PLAYER_ID
-    dynamic_role_banker = player_id in role_banker_ids
-    manual_banker = player_id in manual_banker_ids
-
-    # In dynamic/manual mode, a banker handles their own faction only. Admin can see all configured groups plus own faction.
-    banker_factions = sorted(set(configured_banker_factions + ([faction_id] if (legacy_banker or dynamic_role_banker or manual_banker) else [])))
-
-    user = {
-        "player_id": player_id,
-        "name": name,
-        "faction_id": faction_id,
-        "faction_name": faction_name,
-        "is_admin": player_id == ADMIN_PLAYER_ID,
-        "is_banker": bool(banker_factions) or legacy_banker or dynamic_role_banker or manual_banker,
-        "banker_factions": banker_factions,
-    }
-
-    return user, None
-
-
-def require_user():
-    key = get_key()
-    user, err = torn_get_user(key)
-
-    if err:
-        return None, jsonify({"ok": False, "error": err}), 401
-
-    return user, None, None
-
-
-def public_base_url():
-    return os.getenv("PUBLIC_BASE_URL", "https://faction-bankers-request.onrender.com").rstrip("/")
-
-
-def pushover_configured():
-    return bool(os.getenv("PUSHOVER_USER_KEY", "").strip() and os.getenv("PUSHOVER_API_TOKEN", "").strip())
-
-
-def send_pushover_to_key(user_key, title, message, url=None):
-    api_token = os.getenv("PUSHOVER_API_TOKEN", "").strip()
-    user_key = clean_pushover_key(user_key)
-    if not user_key or not api_token:
-        print("Pushover not configured")
-        return False
-    payload = {
-        "token": api_token,
-        "user": user_key,
-        "title": str(title)[:250],
-        "message": str(message)[:1024],
-        "priority": 1,
-    }
-    if url:
-        payload["url"] = str(url)[:512]
-        payload["url_title"] = "Open Bank Request"
-    try:
-        response = requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
-        print("Pushover:", response.status_code, response.text[:300])
-        return response.ok
-    except Exception as e:
-        print("Pushover error:", e)
-        return False
-
-def send_pushover_alert(title, message, url=None):
-    """Send direct phone ping through the default/global Pushover key.
-
-    Render env vars needed:
-    PUSHOVER_USER_KEY=your personal Pushover user key
-    PUSHOVER_API_TOKEN=your Pushover application token
-    """
-    return send_pushover_to_key(os.getenv("PUSHOVER_USER_KEY", "").strip(), title, message, url)
-
-
-def send_bank_request_ping(item):
-    if not item:
-        return False
-
-    is_full_balance = str(item.get("note") or "") == "__FULL_BALANCE_REQUEST__"
-    amount_text = "Full Balance" if is_full_balance else f"${int(item.get('amount') or 0):,}"
-    request_url = f"https://www.torn.com/factions.php?step=your&fb_bank_req={item.get('id')}#/tab=controls"
-
-    message = (
-        f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
-        f"Amount: {amount_text}\n"
-        f"Faction: {item.get('faction_name')}\n"
-        f"Preferred Banker: {item.get('selected_banker_name') or 'Any available banker'}\n"
-        f"Request ID: #{item.get('id')}"
-    )
-
-    title = "🪙 New Torn Bank Request"
-    sent = False
-    seen_keys = set()
-
-    # Ping manual banker keys from the Leaders tab first.
-    for k in manual_pushover_keys_for_request(item):
-        if k and k not in seen_keys:
-            seen_keys.add(k)
-            sent = send_pushover_to_key(k, title, message, request_url) or sent
-
-    # Optional: ping extra banker keys from Render env, comma-separated.
-    # PUSHOVER_BANKER_KEYS=key1,key2,key3
-    for raw in os.getenv("PUSHOVER_BANKER_KEYS", "").split(","):
-        k = clean_pushover_key(raw)
-        if k and k not in seen_keys:
-            seen_keys.add(k)
-            sent = send_pushover_to_key(k, title, message, request_url) or sent
-
-    # Also keep the owner's/global Fries91 ping active as fallback.
-    default_key = clean_pushover_key(os.getenv("PUSHOVER_USER_KEY", ""))
-    if default_key and default_key not in seen_keys:
-        sent = send_pushover_to_key(default_key, title, message, request_url) or sent
-
-    return sent
-
-
-def row_to_item(row):
-    return {
-        "id": row["id"],
-        "status": row["status"],
-        "amount": row["amount"],
-        "note": row["note"] or "",
-        "requester_id": row["requester_id"],
-        "requester_name": row["requester_name"],
-        "faction_id": row["faction_id"],
-        "faction_name": row["faction_name"],
-        "created_at": row["created_at"],
-        "created_ts": row["created_ts"],
-        "handled_by_id": row["handled_by_id"] or "",
-        "handled_by_name": row["handled_by_name"] or "",
-        "handled_at": row["handled_at"] or "",
-        "bank_note": row["bank_note"] or "",
-        "selected_banker_id": row.get("selected_banker_id", "") or "",
-        "selected_banker_name": row.get("selected_banker_name", "") or "",
-    }
-
-
-
-def db_ready():
-    if not DATABASE_URL:
-        return False, "DATABASE_URL missing; using memory fallback"
-    try:
-        init_db()
-        return True, "postgres"
-    except Exception as e:
-        print("DB unavailable; using memory fallback:", e)
-        return False, str(e)
-
-
-def memory_visible_items(user):
-    if user.get("is_admin"):
-        faction_ids = set(all_configured_faction_ids() or [user.get("faction_id")])
-        return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
-    if user.get("is_banker"):
-        faction_ids = set(user.get("banker_factions") or [user.get("faction_id")])
-        return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
-    return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and r.get("requester_id") == user.get("player_id")]
-
-
-def memory_get_visible_request(req_id, user):
-    for item in memory_visible_items(user):
-        if int(item.get("id", 0)) == int(req_id):
-            return item
-    return None
-
-
-def memory_insert_request(user, amount, note, target_faction_id, target_faction_name, selected_banker_id="", selected_banker_name=""):
-    global MEMORY_NEXT_ID
-    item = {
-        "id": MEMORY_NEXT_ID,
-        "status": "pending",
-        "amount": int(amount or 0),
-        "note": note or "",
-        "requester_id": user["player_id"],
-        "requester_name": user["name"],
-        "faction_id": target_faction_id,
-        "faction_name": target_faction_name,
-        "selected_banker_id": selected_banker_id or "",
-        "selected_banker_name": selected_banker_name or "",
-        "created_at": now_iso(),
-        "created_ts": time.time(),
-        "handled_by_id": "",
-        "handled_by_name": "",
-        "handled_at": "",
-        "bank_note": "",
-        "is_active": True,
-    }
-    MEMORY_NEXT_ID += 1
-    MEMORY_REQUESTS.insert(0, item)
-    return item
-
-
-def memory_update_request(req_id, user, new_status, bank_note=""):
-    allowed_factions = set(all_configured_faction_ids() if user.get("is_admin") else user.get("banker_factions", []))
-    for item in MEMORY_REQUESTS:
-        if int(item.get("id", 0)) == int(req_id) and item.get("is_active", True) and item.get("faction_id") in allowed_factions:
-            item["status"] = new_status
-            item["handled_by_id"] = user["player_id"]
-            item["handled_by_name"] = user["name"]
-            item["handled_at"] = now_iso()
-            if bank_note:
-                item["bank_note"] = bank_note
-            item["is_active"] = new_status not in {"complete", "denied"}
-            return item
-    return None
-
-
-@app.get("/")
-def home():
-    return jsonify(
-        {
-            "ok": True,
-            "app": "Faction Bankers",
-            "version": "0.9.5-status-fix",
-            "mode": "postgres",
-            "note": "Active requests are stored until banker completes or denies them.",
-            "endpoints": [
-                "/api/health",
-                "/api/banker/me",
-                "/api/banker/requests",
-            ],
-        }
-    )
-
-
-@app.get("/api/health")
-def health():
-    ready, db_msg = db_ready()
-    active_count = 0
-    mode = "memory"
-    if ready:
-        mode = "postgres"
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) AS count FROM banker_requests WHERE is_active = TRUE")
-                    row = cur.fetchone()
-                    active_count = int(row["count"] or 0)
-        except Exception as e:
-            ready = False
-            db_msg = str(e)
-            active_count = len([r for r in MEMORY_REQUESTS if r.get("is_active", True)])
-            mode = "memory"
-    else:
-        active_count = len([r for r in MEMORY_REQUESTS if r.get("is_active", True)])
-
-    return jsonify({
-        "ok": True,
-        "app": "Faction Bankers",
-        "mode": mode,
-        "db_ready": ready,
-        "db_message": db_msg,
-        "active_requests": active_count,
-        "banker_ids": sorted(BANKER_IDS),
-        "faction_bankers": public_factions(),
-        "admin_player_id": ADMIN_PLAYER_ID,
-        "pushover_configured": pushover_configured(),
-                "extra_pushover_keys_configured": bool(os.getenv("PUSHOVER_BANKER_KEYS", "").strip()),
-        "public_base_url": public_base_url(),
-        "banker_role_names": banker_role_names_for_faction(user["faction_id"]),
-        "manual_bankers_memory_count": sum(len(v) for v in MEMORY_MANUAL_BANKERS.values()),
-        "manual_role_names_memory_count": sum(len(v) for v in MEMORY_BANKER_ROLE_NAMES.values()),
-        "time": now_iso(),
-    })
-
-
-@app.get("/api/test-pushover")
-def test_pushover():
-    ok = send_pushover_alert(
-        "🪙 Test Bank Ping",
-        "Your Faction Bankers Pushover phone alert is working.",
-        "https://www.torn.com/factions.php?step=your#/tab=controls",
-    )
-    return jsonify({"ok": ok, "pushover_configured": pushover_configured()})
-
-
-@app.get("/static/<path:filename>")
-def static_files(filename):
-    return send_from_directory("static", filename)
-
-
-
-
-def scan_json_for_balance(obj, player_id=""):
-    """Strict scan for the logged-in user's own faction-bank balance.
-
-    This intentionally does NOT use generic faction money/funds/vault values,
-    because those are not the user's personal faction balance and caused false totals.
-    """
-    pid = str(player_id or "").strip()
-    if not pid:
-        return None, ""
-
-    candidates = []
-
-    def walk(x, path=""):
-        if isinstance(x, dict):
-            row_id = str(x.get("player_id") or x.get("id") or x.get("user_id") or "").strip()
-            is_player_row = bool(row_id and row_id == pid)
-
-            for k, v in x.items():
-                key = str(k or "").lower()
-                pth = f"{path}.{key}" if path else key
-
-                # Only accept balance fields from the row that belongs to the logged-in player.
-                if is_player_row and "balance" in key:
-                    if isinstance(v, (int, float)):
-                        candidates.append((100, int(v), pth))
-                    elif isinstance(v, str):
-                        cleaned = v.replace("$", "").replace(",", "").strip()
-                        if cleaned.isdigit():
-                            candidates.append((100, int(cleaned), pth))
-
-                walk(v, pth)
-        elif isinstance(x, list):
-            for idx, item in enumerate(x[:1000]):
-                walk(item, f"{path}[{idx}]")
-
-    walk(obj)
-    if not candidates:
-        return None, ""
-    candidates.sort(key=lambda t: t[0], reverse=True)
-    return candidates[0][1], candidates[0][2]
-
-def torn_get_faction_balance(key, user):
-    if not key:
-        return None, "Missing Torn API key", ""
-
-    faction_id = str((user or {}).get("faction_id") or "").strip()
-    player_id = str((user or {}).get("player_id") or "").strip()
-
-    urls = []
-    if faction_id:
-        urls.append(f"{TORN_API_BASE}/faction/{faction_id}?selections=members&key={key}")
-    urls.append(f"{TORN_API_BASE}/faction/?selections=members&key={key}")
-
-    last_error = "Your personal faction balance is unavailable with this key/page"
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=REQUEST_TIMEOUT)
-            data = r.json()
-        except Exception as e:
-            last_error = f"Torn balance lookup failed: {e}"
-            continue
-
-        if not isinstance(data, dict):
-            continue
-        if data.get("error"):
-            err = data.get("error") or {}
-            last_error = err.get("error", "Torn API error") if isinstance(err, dict) else str(err)
-            continue
-
-        bal, source = scan_json_for_balance(data, player_id)
-        if bal is not None:
-            return bal, None, source or "api"
-
-    return None, last_error, ""
-
-@app.get("/api/banker/factions")
-def banker_factions():
-    # Dynamic mode: only show the logged-in user's own faction.
-    # This removes Wrath/Sloth/Greed/Pride choices and lets any faction use the app.
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-    items = [{"faction_id": user["faction_id"], "faction_name": user["faction_name"]}]
-    return jsonify({"ok": True, "items": items, "count": len(items), "mode": "dynamic_role"})
-
-
-@app.get("/api/banker/balance")
-def banker_balance():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    key = get_key()
-    balance, err, source = torn_get_faction_balance(key, user)
-
-    if balance is None:
-        return jsonify({
-            "ok": False,
-            "balance": None,
-            "message": err or "Balance unavailable with this key",
-            "source": source,
+    // Torn banking page often has player search first, then amount field below it.
+    if (playerRect) {
+      const below = candidates
+        .filter((input) => {
+          const r = input.getBoundingClientRect();
+          return r.top > playerRect.top - 6;
         })
-
-    return jsonify({
-        "ok": True,
-        "balance": int(balance),
-        "source": source or "api",
-        "player_id": user.get("player_id"),
-        "faction_id": user.get("faction_id"),
-    })
-
-
-@app.get("/api/banker/status")
-def banker_status():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    key = get_key()
-    requested_faction_id = str(request.args.get("faction_id") or "").strip()
-
-    if not requested_faction_id:
-        requested_faction_id = user.get("faction_id") or ""
-
-    # Prefer bankers entered by faction leaders. If none are entered, fall back to dynamic role detection/config/admin.
-    manual_bankers = manual_bankers_for_faction(requested_faction_id)
-    if manual_bankers:
-        banker_ids = [str(x.get("id")) for x in manual_bankers if x.get("id")]
-        faction_name = user.get("faction_name") or faction_name_for_id(requested_faction_id) or requested_faction_id or "Faction"
-    else:
-        role_bankers = torn_get_role_bankers(key, requested_faction_id)
-        if role_bankers:
-            banker_ids = [str(x.get("id")) for x in role_bankers if x.get("id")]
-            faction_name = user.get("faction_name") or faction_name_for_id(requested_faction_id) or requested_faction_id or "Faction"
-        elif requested_faction_id in FACTION_BANKERS:
-            banker_ids = bankers_for_faction(requested_faction_id)
-            faction_name = faction_name_for_id(requested_faction_id)
-        else:
-            banker_ids = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
-            faction_name = user.get("faction_name") or requested_faction_id or "Faction"
-
-    manual_by_id = {str(x.get("id")): x for x in manual_bankers_for_faction(requested_faction_id)}
-    items = []
-    for bid in banker_ids:
-        st = torn_get_banker_status(key, bid, requested_faction_id)
-        if str(bid) in manual_by_id:
-            st["source"] = "leaders"
-            st["has_pushover"] = bool(manual_by_id[str(bid)].get("pushover_key")) or str(bid) == ADMIN_PLAYER_ID
-        items.append(st)
-    items = [x for x in items if not is_hidden_banker_name_or_id(x.get("player_id")) and not is_hidden_banker_name_or_id(x.get("name"))]
-
-    # Available bankers first, then traveling/idle/offline.
-    rank = {"online": 0, "idle": 1, "traveling": 2, "abroad": 3, "hospital": 4, "jail": 5, "offline": 6, "unknown": 7}
-    items.sort(key=lambda x: (rank.get(str(x.get("status")), 9), str(x.get("name") or "").lower()))
-
-    return jsonify({
-        "ok": True,
-        "faction_id": requested_faction_id,
-        "faction_name": faction_name,
-        "items": items,
-        "count": len(items),
-        "time": now_iso(),
-    })
-
-
-@app.get("/api/banker/me")
-def banker_me():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    return jsonify(
-        {
-            "ok": True,
-            "player_id": user["player_id"],
-            "name": user["name"],
-            "faction_id": user["faction_id"],
-            "faction_name": user["faction_name"],
-            "is_admin": user["is_admin"],
-            "is_banker": user["is_banker"],
-            "banker_factions": user.get("banker_factions", []),
-            "available_factions": [{"faction_id": user["faction_id"], "faction_name": user["faction_name"]}],
-            "banker_role_names": banker_role_names_for_faction(user["faction_id"]),
-            "can_manage_leaders": can_manage_leaders(user),
-        }
-    )
-
-
-@app.get("/api/banker/requests")
-def list_requests():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    db_ok, db_msg = db_ready()
-    if not db_ok:
-        items = [dict(x) for x in memory_visible_items(user)]
-        return jsonify({"ok": True, "items": items, "count": len(items), "mode": "memory", "warning": db_msg})
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            if user["is_admin"]:
-                faction_ids = sorted(set(all_configured_faction_ids() + [user["faction_id"]]))
-            elif user["is_banker"]:
-                faction_ids = user.get("banker_factions", []) or [user["faction_id"]]
-            else:
-                faction_ids = []
-
-            if faction_ids:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM banker_requests
-                    WHERE is_active = TRUE
-                      AND (
-                        faction_id = ANY(%s)
-                        OR requester_id = %s
-                      )
-                    ORDER BY created_ts DESC
-                    """,
-                    (faction_ids, user["player_id"]),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM banker_requests
-                    WHERE requester_id = %s
-                      AND is_active = TRUE
-                    ORDER BY created_ts DESC
-                    """,
-                    (user["player_id"],),
-                )
-
-            rows = cur.fetchall()
-
-    items = [row_to_item(row) for row in rows]
-
-    return jsonify(
-        {
-            "ok": True,
-            "items": items,
-            "count": len(items),
-        }
-    )
-
-
-
-@app.get("/api/banker/leaders")
-def get_leader_bankers():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-    if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
-    fid = user.get("faction_id")
-    return jsonify({
-        "ok": True,
-        "faction_id": fid,
-        "faction_name": user.get("faction_name"),
-        "items": [
-            {
-                "banker_id": x.get("id"),
-                "banker_name": x.get("name"),
-                "has_pushover": bool(x.get("pushover_key")),
-                "source": x.get("source", "leaders"),
-            }
-            for x in manual_bankers_for_faction(fid)
-        ],
-        "role_names": banker_role_names_for_faction(fid),
-        "default_role_names": sorted(BANKER_ROLE_NAMES),
-        "can_manage": True,
-    })
-
-@app.post("/api/banker/leaders/roles/add")
-def add_leader_banker_role():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-    if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
-
-    data = request.get_json(silent=True) or {}
-    role_name = str(data.get("role_name") or "").strip()
-    if not role_name:
-        return jsonify({"ok": False, "error": "Enter the banker role name"}), 400
-    if len(role_name) > 80:
-        role_name = role_name[:80]
-
-    fid = user.get("faction_id")
-    fname = user.get("faction_name")
-
-    db_ok, db_msg = db_ready()
-    if db_ok:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO faction_banker_roles (
-                        faction_id, faction_name, role_name, added_by_id, added_by_name, created_at, is_active
-                    )
-                    VALUES (%s,%s,%s,%s,%s,%s,TRUE)
-                    ON CONFLICT (faction_id, role_name) DO UPDATE SET
-                        faction_name = EXCLUDED.faction_name,
-                        added_by_id = EXCLUDED.added_by_id,
-                        added_by_name = EXCLUDED.added_by_name,
-                        created_at = EXCLUDED.created_at,
-                        is_active = TRUE
-                    """,
-                    (fid, fname, role_name, user.get("player_id"), user.get("name"), now_iso()),
-                )
-            conn.commit()
-    else:
-        rows = MEMORY_BANKER_ROLE_NAMES.setdefault(fid, [])
-        if role_name not in rows:
-            rows.append(role_name)
-
-    FACTION_ROLE_BANKER_CACHE.clear()
-    BANKER_STATUS_CACHE.clear()
-    return jsonify({"ok": True, "role_name": role_name, "role_names": banker_role_names_for_faction(fid), "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
-
-
-@app.post("/api/banker/leaders/roles/remove")
-def remove_leader_banker_role():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-    if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
-
-    data = request.get_json(silent=True) or {}
-    role_name = str(data.get("role_name") or "").strip()
-    if not role_name:
-        return jsonify({"ok": False, "error": "Missing role name"}), 400
-
-    fid = user.get("faction_id")
-    db_ok, db_msg = db_ready()
-    if db_ok:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE faction_banker_roles SET is_active = FALSE WHERE faction_id = %s AND role_name = %s",
-                    (fid, role_name),
-                )
-            conn.commit()
-    else:
-        rows = MEMORY_BANKER_ROLE_NAMES.setdefault(fid, [])
-        rows[:] = [x for x in rows if str(x) != role_name]
-
-    FACTION_ROLE_BANKER_CACHE.clear()
-    BANKER_STATUS_CACHE.clear()
-    return jsonify({"ok": True, "removed": role_name, "role_names": banker_role_names_for_faction(fid), "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
-
-
-@app.post("/api/banker/leaders/add")
-def add_leader_banker():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-    if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
-
-    data = request.get_json(silent=True) or {}
-    banker_id = str(data.get("banker_id") or "").replace("[", "").replace("]", "").strip()
-    banker_name = str(data.get("banker_name") or banker_id).strip()
-    pushover_key = clean_pushover_key(data.get("pushover_key") or "")
-    if not banker_id:
-        return jsonify({"ok": False, "error": "Enter the banker Torn ID"}), 400
-    if len(banker_name) > 60:
-        banker_name = banker_name[:60]
-
-    fid = user.get("faction_id")
-    fname = user.get("faction_name")
-    item = {"id": banker_id, "name": banker_name, "pushover_key": pushover_key, "source": "leaders"}
-
-    db_ok, db_msg = db_ready()
-    if db_ok:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO faction_manual_bankers (
-                        faction_id, faction_name, banker_id, banker_name, pushover_key, added_by_id, added_by_name, created_at, is_active
-                    )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
-                    ON CONFLICT (faction_id, banker_id) DO UPDATE SET
-                        faction_name = EXCLUDED.faction_name,
-                        banker_name = EXCLUDED.banker_name,
-                        pushover_key = EXCLUDED.pushover_key,
-                        added_by_id = EXCLUDED.added_by_id,
-                        added_by_name = EXCLUDED.added_by_name,
-                        created_at = EXCLUDED.created_at,
-                        is_active = TRUE
-                    """,
-                    (fid, fname, banker_id, banker_name, pushover_key, user.get("player_id"), user.get("name"), now_iso()),
-                )
-            conn.commit()
-    else:
-        rows = MEMORY_MANUAL_BANKERS.setdefault(fid, [])
-        rows[:] = [x for x in rows if str(x.get("id")) != banker_id]
-        rows.append(item)
-
-    # Clear banker cache so the dropdown/status refresh immediately.
-    FACTION_ROLE_BANKER_CACHE.clear()
-    BANKER_STATUS_CACHE.clear()
-
-    test_ping = False
-    if pushover_key:
-        test_ping = send_pushover_to_key(
-            pushover_key,
-            "🪙 Added as Faction Banker",
-            f"{user.get('name')} added you as a banker for {fname}. You can now receive bank request pings.",
-            "https://www.torn.com/factions.php?step=your#/tab=controls",
-        )
-
-    return jsonify({"ok": True, "item": item, "test_ping_sent": test_ping, "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
-
-@app.post("/api/banker/leaders/remove")
-def remove_leader_banker():
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-    if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
-    data = request.get_json(silent=True) or {}
-    banker_id = str(data.get("banker_id") or "").strip()
-    if not banker_id:
-        return jsonify({"ok": False, "error": "Missing banker ID"}), 400
-    fid = user.get("faction_id")
-
-    db_ok, db_msg = db_ready()
-    if db_ok:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE faction_manual_bankers SET is_active = FALSE WHERE faction_id = %s AND banker_id = %s",
-                    (fid, banker_id),
-                )
-            conn.commit()
-    else:
-        rows = MEMORY_MANUAL_BANKERS.setdefault(fid, [])
-        rows[:] = [x for x in rows if str(x.get("id")) != banker_id]
-
-    FACTION_ROLE_BANKER_CACHE.clear()
-    BANKER_STATUS_CACHE.clear()
-    return jsonify({"ok": True, "removed": banker_id, "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
-
-@app.get("/api/banker/requests/<int:req_id>")
-def get_request(req_id):
-    db_ok, db_msg = db_ready()
-
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    if not user.get("is_banker"):
-        return jsonify({"ok": False, "error": "Banker access required"}), 403
-
-    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
-    if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
-
-    if not db_ok:
-        item = memory_get_visible_request(req_id, user)
-        if not item:
-            return jsonify({"ok": False, "error": "Request not found"}), 404
-        return jsonify({"ok": True, "item": item, "mode": "memory", "warning": db_msg})
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM banker_requests
-                WHERE id = %s
-                  AND faction_id = ANY(%s)
-                  AND is_active = TRUE
-                """,
-                (req_id, allowed_factions),
-            )
-            row = cur.fetchone()
-
-    if not row:
-        return jsonify({"ok": False, "error": "Request not found"}), 404
-
-    return jsonify({"ok": True, "item": row_to_item(row)})
-
-@app.post("/api/banker/requests")
-def create_request():
-    db_ok, db_msg = db_ready()
-
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    data = request.get_json(silent=True) or {}
-
-    amount = data.get("amount", 0)
-    note = str(data.get("note") or "").strip()
-    selected_faction_id = str(data.get("target_faction_id") or "").strip()
-    selected_banker_id = str(data.get("target_banker_id") or "").strip()
-
-    try:
-        amount = int(str(amount).replace(",", "").replace("$", "").strip())
-    except Exception:
-        amount = 0
-
-    if amount <= 0:
-        return jsonify({"ok": False, "error": "Enter a valid amount"}), 400
-
-    if len(note) > 500:
-        note = note[:500]
-
-    # Dynamic mode: requests always go to the user's own faction.
-    # This removes all hard-coded faction groups and lets any faction use the same app.
-    target_faction_id = user["faction_id"]
-    target_faction_name = user["faction_name"]
-
-    selected_banker_name = ""
-    if selected_banker_id:
-        allowed_bankers = set(dynamic_banker_ids_for_faction(get_key(), target_faction_id) or bankers_for_faction(target_faction_id))
-        if selected_banker_id not in allowed_bankers:
-            return jsonify({"ok": False, "error": "Selected banker is not assigned to your faction banker role"}), 400
-        try:
-            selected_banker_status = torn_get_banker_status(get_key(), selected_banker_id, target_faction_id)
-            selected_banker_name = str(selected_banker_status.get("name") or dynamic_banker_name_for_id(get_key(), target_faction_id, selected_banker_id) or selected_banker_id).strip()
-        except Exception:
-            selected_banker_name = dynamic_banker_name_for_id(get_key(), target_faction_id, selected_banker_id) or selected_banker_id
-
-    created_at = now_iso()
-    created_ts = time.time()
-
-    if not db_ok:
-        item = memory_insert_request(user, amount, note, target_faction_id, target_faction_name, selected_banker_id, selected_banker_name)
-        ping_sent = send_bank_request_ping(item)
-        return jsonify({"ok": True, "item": item, "pushover_sent": ping_sent, "mode": "memory", "warning": db_msg})
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO banker_requests (
-                    status,
-                    amount,
-                    note,
-                    requester_id,
-                    requester_name,
-                    faction_id,
-                    faction_name,
-                    selected_banker_id,
-                    selected_banker_name,
-                    created_at,
-                    created_ts,
-                    is_active
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-                RETURNING *
-                """,
-                (
-                    "pending",
-                    amount,
-                    note,
-                    user["player_id"],
-                    user["name"],
-                    target_faction_id,
-                    target_faction_name,
-                    selected_banker_id,
-                    selected_banker_name,
-                    created_at,
-                    created_ts,
-                ),
-            )
-
-            row = cur.fetchone()
-
-        conn.commit()
-
-    item = row_to_item(row)
-    ping_sent = send_bank_request_ping(item)
-
-    return jsonify(
-        {
-            "ok": True,
-            "item": item,
-            "pushover_sent": ping_sent,
-        }
-    )
-
-
-@app.post("/api/banker/requests/<int:req_id>/<action>")
-def banker_action(req_id, action):
-    db_ok, db_msg = db_ready()
-
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
-
-    if not user["is_banker"]:
-        return jsonify({"ok": False, "error": "Banker access required"}), 403
-
-    action = str(action or "").lower().strip()
-
-    status_map = {
-        "approve": "approved",
-        "approved": "approved",
-        "paid": "complete",
-        "complete": "complete",
-        "mark_paid": "complete",
-        "mark_complete": "complete",
-        "deny": "denied",
-        "denied": "denied",
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      if (below.length) return below[0];
     }
 
-    if action not in status_map:
-        return jsonify({"ok": False, "error": "Invalid action"}), 400
+    return candidates[0] || null;
+  }
 
-    new_status = status_map[action]
+  function bestInput(kind, avoidInput = null) {
+    const inputs = allUsableInputs();
 
-    data = request.get_json(silent=True) or {}
-    bank_note = str(data.get("note") or "").strip()
+    if (kind === "amount") {
+      const scoredAmount = inputs
+        .filter((el) => el !== avoidInput)
+        .map((el) => ({ el, score: scoreInputFor(el, kind) + (looksLikeAmountInput(el) ? 40 : 0) }))
+        .filter((x) => x.score > 10 && !looksLikePlayerInput(x.el))
+        .sort((a, b) => b.score - a.score);
 
-    if len(bank_note) > 500:
-        bank_note = bank_note[:500]
+      if (scoredAmount[0]) return scoredAmount[0].el;
+      return bestAmountInputNearDollar(inputs, avoidInput || bestInput("player"));
+    }
 
-    # Complete/denied requests are removed from active list.
-    is_active = new_status not in {"complete", "denied"}
+    const scored = inputs.map((el) => ({ el, score: scoreInputFor(el, kind) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
 
-    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
+    return scored[0]?.el || null;
+  }
 
-    if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
+  function findTornFactionAmountInput(playerInput) {
+    const rawAmount = getPayPrefill()?.amount ? String(getPayPrefill().amount).replace(/[^0-9]/g, "") : "";
+    const inputs = allUsableInputs().filter((el) => el !== playerInput && !looksLikePlayerInput(el));
+    if (!inputs.length) return null;
 
-    if not db_ok:
-        item = memory_update_request(req_id, user, new_status, bank_note)
-        if not item:
-            return jsonify({"ok": False, "error": "Active request not found for your banker faction"}), 404
-        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "warning": db_msg})
+    // Prefer the real Torn vault amount field: it is usually directly beside/below a lone "$" prefix.
+    const dollarEls = Array.from(document.querySelectorAll("div, span, label, b, strong"))
+      .filter((el) => !el.closest?.("#fb-built-in-box") && !el.closest?.("#fb-overlay"))
+      .filter((el) => getCleanText(el).trim() === "$" || getCleanText(el).trim() === "$")
+      .map((el) => el.getBoundingClientRect());
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM banker_requests
-                WHERE id = %s
-                  AND faction_id = ANY(%s)
-                  AND is_active = TRUE
-                """,
-                (req_id, allowed_factions),
-            )
-
-            existing = cur.fetchone()
-
-            if not existing:
-                return jsonify({"ok": False, "error": "Active request not found for your banker faction"}), 404
-
-            cur.execute(
-                """
-                UPDATE banker_requests
-                SET status = %s,
-                    handled_by_id = %s,
-                    handled_by_name = %s,
-                    handled_at = %s,
-                    bank_note = CASE
-                        WHEN %s <> '' THEN %s
-                        ELSE bank_note
-                    END,
-                    is_active = %s
-                WHERE id = %s
-                RETURNING *
-                """,
-                (
-                    new_status,
-                    user["player_id"],
-                    user["name"],
-                    now_iso(),
-                    bank_note,
-                    bank_note,
-                    is_active,
-                    req_id,
-                ),
-            )
-
-            row = cur.fetchone()
-
-        conn.commit()
-
-    return jsonify(
-        {
-            "ok": True,
-            "item": row_to_item(row),
-            "removed_from_active": not is_active,
+    if (dollarEls.length) {
+      const scored = inputs.map((input) => {
+        const r = input.getBoundingClientRect();
+        let best = 999999;
+        for (const d of dollarEls) {
+          // amount box normally starts just to the right of the $ prefix and on the same row
+          const dist = Math.abs(r.top - d.top) * 3 + Math.abs(r.left - d.right);
+          best = Math.min(best, dist);
         }
-    )
+        return { input, score: best };
+      }).sort((a, b) => a.score - b.score);
+      if (scored[0] && scored[0].score < 900) return scored[0].input;
+    }
+
+    if (playerInput) {
+      const pr = playerInput.getBoundingClientRect();
+      const below = inputs
+        .map((input) => ({ input, r: input.getBoundingClientRect() }))
+        .filter(({ r }) => r.top > pr.bottom - 8 && r.top < pr.bottom + 180)
+        .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
+      if (below.length) return below[0].input;
+    }
+
+    return bestInput("amount", playerInput);
+  }
+
+  function fillTornAmountStrong(playerInput, amount) {
+    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+
+    const amountInput = findTornFactionAmountInput(playerInput);
+    if (!amountInput) return false;
+
+    const ok = setNativeValue(amountInput, cleanAmount);
+    try {
+      amountInput.focus();
+      amountInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "1" }));
+      amountInput.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "1" }));
+      amountInput.blur();
+    } catch {}
+    return ok;
+  }
+
+  function tapElementHard(el) {
+    if (!el) return false;
+    try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
+    const r = el.getBoundingClientRect?.();
+    const x = r ? Math.max(2, Math.min(window.innerWidth - 2, r.left + Math.min(r.width - 2, Math.max(2, r.width / 2)))) : 10;
+    const y = r ? Math.max(2, Math.min(window.innerHeight - 2, r.top + Math.min(r.height - 2, Math.max(2, r.height / 2)))) : 10;
+    const target = document.elementFromPoint?.(x, y) || el;
+    const chain = Array.from(new Set([target, target?.parentElement, el, el.closest?.("li, a, button, div")].filter(Boolean)));
+    let ok = false;
+
+    for (const node of chain) {
+      try {
+        node.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch", clientX: x, clientY: y }));
+      } catch {}
+      try { node.dispatchEvent(new TouchEvent("touchstart", { bubbles: true, cancelable: true })); } catch {}
+      try { node.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
+      try { node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
+      try { node.click(); ok = true; } catch {}
+      try { node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
+      try { node.dispatchEvent(new TouchEvent("touchend", { bubbles: true, cancelable: true })); } catch {}
+      try { node.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, pointerType: "touch", clientX: x, clientY: y })); } catch {}
+    }
+    return ok;
+  }
+
+  function closeKeyboardAndAutocomplete(playerInput) {
+    try {
+      const el = playerInput || document.activeElement;
+      if (el) {
+        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        el.blur();
+      }
+    } catch {}
+  }
+
+  function clickPlayerAutocompleteChoice(data) {
+    const name = String(data?.playerName || "").toLowerCase();
+    const id = String(data?.playerId || "");
+    if (!name && !id) return false;
+
+    const ownSelectors = "#fb-built-in-box, #fb-overlay";
+    const all = Array.from(document.querySelectorAll("li, div, span, a, button"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => {
+        const r = el.getBoundingClientRect?.();
+        if (!r || r.width < 25 || r.height < 10 || r.top < 0 || r.top > window.innerHeight) return false;
+        const txt = getCleanText(el).toLowerCase();
+        if (!txt || txt.length > 180) return false;
+        if (id && !txt.includes(id)) return false;
+        if (name && !txt.includes(name)) return false;
+        if (txt.includes("friends") || txt.includes("company") || txt === "all" || txt === "faction") return false;
+        return true;
+      })
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const txt = getCleanText(el).toLowerCase();
+        let score = 0;
+        if (id && txt.includes(id)) score += 150;
+        if (name && txt.includes(name)) score += 100;
+        if (/\[[0-9]+\]/.test(txt)) score += 45;
+        if (el.tagName === "LI") score += 55;
+        if (el.tagName === "A" || el.tagName === "BUTTON") score += 35;
+        if (r.height >= 22 && r.height <= 58) score += 45;
+        if (r.width >= 120 && r.width <= 620) score += 20;
+        score -= Math.max(0, (r.width * r.height - 35000) / 900); // avoid giant wrappers
+        return { el, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const choice = all[0]?.el;
+    let ok = false;
+    if (choice) ok = tapElementHard(choice);
+
+    // PDA fallback: Enter often accepts the highlighted Torn autocomplete result.
+    const active = document.activeElement;
+    try {
+      if (active) {
+        active.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        active.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+      }
+    } catch {}
+
+    setTimeout(() => closeKeyboardAndAutocomplete(active), 120);
+    return ok;
+  }
+
+  function findInputBesideDollarPrefix() {
+    const ownSelectors = "#fb-built-in-box, #fb-overlay";
+    const dollarEls = Array.from(document.querySelectorAll("div, span, label, b, strong, i"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => /^\s*\$\s*$/.test(String(el.textContent || "")) || /^\s*\$\s*$/.test(String(el.getAttribute?.("aria-label") || "")));
+
+    for (const dollar of dollarEls) {
+      const scopes = [
+        dollar.parentElement,
+        dollar.parentElement?.parentElement,
+        dollar.closest?.("div"),
+        dollar.closest?.("li"),
+      ].filter(Boolean);
+
+      for (const scope of scopes) {
+        const inputs = Array.from(scope.querySelectorAll?.("input, textarea, [contenteditable=\"true\"]") || [])
+          .filter((el) => !el.closest?.(ownSelectors))
+          .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
+          .filter((el) => !looksLikePlayerInput(el))
+          .filter((el) => {
+            const r = el.getBoundingClientRect?.();
+            return r && r.width > 45 && r.height > 14;
+          });
+        if (inputs.length) return inputs[0];
+      }
+
+      // PDA Torn sometimes renders the $ block and the input as neighboring siblings.
+      let n = dollar.nextElementSibling;
+      for (let i = 0; i < 5 && n; i += 1, n = n.nextElementSibling) {
+        const input = n.matches?.("input, textarea, [contenteditable=\"true\"]") ? n : n.querySelector?.("input, textarea, [contenteditable=\"true\"]");
+        if (input && !input.closest?.(ownSelectors) && !looksLikePlayerInput(input)) return input;
+      }
+    }
+
+    // Visual fallback: choose the first blank input below the selected player field and inside the Give Money block.
+    const player = bestInput("player");
+    if (player) {
+      const pr = player.getBoundingClientRect();
+      const candidates = allUsableInputs()
+        .filter((el) => el !== player && !looksLikePlayerInput(el))
+        .map((el) => ({ el, r: el.getBoundingClientRect() }))
+        .filter(({ r }) => r.top > pr.bottom - 4 && r.top < pr.bottom + 160 && r.width > 100)
+        .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
+      if (candidates[0]) return candidates[0].el;
+    }
+
+    return null;
+  }
+
+  function setTornAmountDirect(amount) {
+    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+    const el = findInputBesideDollarPrefix();
+    if (!el) return false;
+    const ok = setNativeValue(el, cleanAmount);
+    try {
+      el.focus();
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: cleanAmount.slice(-1) || "0" }));
+      el.blur();
+    } catch {}
+    return ok && String(el.value || "").replace(/[^0-9]/g, "") === cleanAmount;
+  }
+
+  function forceFillTornDollarAmount(amount) {
+    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+
+    const ownSelectors = "#fb-built-in-box, #fb-overlay";
+    const player = bestInput("player");
+    const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable=\"true\"]"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
+      .filter((el) => el !== player && !looksLikePlayerInput(el))
+      .filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 40 && r.height > 14;
+      });
+
+    const dollarRects = Array.from(document.querySelectorAll("div, span, label, b, strong"))
+      .filter((el) => !el.closest?.(ownSelectors))
+      .filter((el) => getCleanText(el).trim() === "$" || /^\$\s*$/.test(getCleanText(el).trim()))
+      .map((el) => el.getBoundingClientRect());
+
+    let candidates = inputs.map((input) => {
+      const r = input.getBoundingClientRect();
+      let score = 999999;
+      for (const d of dollarRects) {
+        const sameRow = Math.abs((r.top + r.height / 2) - (d.top + d.height / 2));
+        const rightOfDollar = Math.max(0, r.left - d.right);
+        score = Math.min(score, sameRow * 8 + rightOfDollar + Math.abs(r.top - d.top));
+      }
+      if (player) {
+        const pr = player.getBoundingClientRect();
+        if (r.top > pr.bottom - 6 && r.top < pr.bottom + 180) score -= 250;
+        if (r.left > pr.left - 80 && r.left < pr.left + 160) score -= 80;
+      }
+      return { input, score };
+    }).sort((a, b) => a.score - b.score);
+
+    for (const c of candidates.slice(0, 4)) {
+      const el = c.input;
+      if (el.disabled) continue;
+      if (setNativeValue(el, cleanAmount)) {
+        try {
+          el.focus();
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          el.blur();
+        } catch {}
+        if (String(el.value || "").replace(/[^0-9]/g, "") === cleanAmount) return true;
+      }
+    }
+
+    return false;
+  }
+
+  function clickTextButton(words) {
+    const wanted = words.map((w) => String(w).toLowerCase());
+    const nodes = Array.from(document.querySelectorAll("button, a, div, span, li"));
+    const found = nodes.find((el) => {
+      const text = getCleanText(el).toLowerCase();
+      if (!text || text.length > 60) return false;
+      return wanted.some((w) => text === w || text.includes(w));
+    });
+    if (found) {
+      try { found.click(); } catch {}
+      return true;
+    }
+    return false;
+  }
+
+  function tryPrefillFactionBankForm() {
+    if (!isFactionPage()) return;
+    const data = getPayPrefill();
+    if (!data) return;
+
+    // Try to expose the controls/banking form if Torn has it hidden behind tabs.
+    clickTextButton(["controls", "bank", "give money", "vault"]);
+
+    const playerInput = bestInput("player");
+    let filled = false;
+
+    if (playerInput) {
+      filled = setNativeValue(playerInput, `${data.playerName} [${data.playerId}]`) || filled;
+      setTimeout(() => clickPlayerAutocompleteChoice(data), 250);
+      setTimeout(() => clickPlayerAutocompleteChoice(data), 650);
+      setTimeout(() => clickPlayerAutocompleteChoice(data), 1200);
+    }
+
+    if (data.amount) {
+      filled = setTornAmountDirect(data.amount) || fillTornAmountStrong(playerInput, data.amount) || forceFillTornDollarAmount(data.amount) || filled;
+    }
+
+    // Some Torn/PDA builds enable/replace the amount field only after the player autocomplete is selected.
+    // Keep trying and force the money into Torn's real $ input, never this script's amount box.
+    if (playerInput && data.amount) {
+      [250, 550, 900, 1400, 2200, 3400, 5200, 7600, 10500, 13500, 16500].forEach((delay) => {
+        setTimeout(() => {
+          clickPlayerAutocompleteChoice(data);
+          closeKeyboardAndAutocomplete(playerInput);
+          setTimeout(() => {
+            setTornAmountDirect(data.amount);
+            fillTornAmountStrong(playerInput, data.amount);
+            forceFillTornDollarAmount(data.amount);
+          }, 220);
+        }, delay);
+      });
+    }
+
+    if (filled) {
+      showPayNotice(`Bank prefill ready for ${data.playerName} [${data.playerId}]${data.amount ? ` — $${Number(data.amount).toLocaleString()}` : " — Full Balance request"}. Manually press Give Money.`);
+    }
+  }
+
+  function openSavedRequestInBank(id) {
+    const r = APP.requests.find((x) => String(x.id) === String(id));
+    if (!r) return;
+    openBankingPageForRequest(r);
+  }
+
+  async function approveAndOpenBank(id) {
+    if (APP.busy || !id) return;
+    const r = APP.requests.find((x) => String(x.id) === String(id));
+    if (!r) return;
+
+    APP.busy = true;
+    try {
+      await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/approve`, { note: "" });
+      openBankingPageForRequest(r);
+    } catch (err) {
+      setBody(`
+        <div class="fb-box">
+          <div class="fb-error">${esc(err.message || err)}</div>
+        </div>
+      `);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  function requestCard(r) {
+    const id = esc(r.id);
+    const status = String(r.status || "pending").toLowerCase();
+    const isBanker = !!APP.me?.is_banker;
+
+    const created = r.created_at ? esc(r.created_at) : "";
+    const requester = esc(r.requester_name || `User ${r.requester_id || ""}`);
+    const targetFaction = esc(r.faction_name || factionLabelById(r.faction_id) || "Faction");
+    const handledBy = r.handled_by_name ? `<div class="fb-small">Handled by: ${esc(r.handled_by_name)}</div>` : "";
+    const preferredBanker = r.selected_banker_name || r.selected_banker_id
+      ? `<div class="fb-small">Preferred banker: ${esc(r.selected_banker_name || r.selected_banker_id)}</div>`
+      : `<div class="fb-small">Preferred banker: Any available banker</div>`;
+
+    let actions = "";
+
+    if (isBanker && status === "pending") {
+      actions = `
+        <div class="fb-row" style="margin-top:10px;">
+          <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
+          <button class="fb-btn gold" data-id="${id}" data-fb-pay="approve-open" type="button">Approve + Open Bank</button>
+          <button class="fb-btn green" data-id="${id}" data-fb-action="approve" type="button">Approve Only</button>
+          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
+          <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
+        </div>
+      `;
+    }
+
+    if (isBanker && status === "approved") {
+      actions = `
+        <div class="fb-row" style="margin-top:10px;">
+          <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
+          <button class="fb-btn gold" data-id="${id}" data-fb-pay="open" type="button">Open Bank Page</button>
+          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
+          <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">${requester} requested ${String(r.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(r.amount)}</div>
+            <div class="fb-request-meta">For ${targetFaction} • Request #${id}${created ? ` • ${created}` : ""}</div>
+          </div>
+          ${statusPill(status)}
+        </div>
+
+        ${String(r.note || "") === FULL_BALANCE_NOTE ? `<div class="fb-request-note">Full balance requested.</div>` : ""}
+
+        ${preferredBanker}
+        ${handledBy}
+        ${r.bank_note ? `<div class="fb-small">Bank note: ${esc(r.bank_note)}</div>` : ""}
+
+        ${actions}
+      </div>
+    `;
+  }
+
+  async function loadLeaderBankers() {
+    APP.leaderLoadError = "";
+    try {
+      const res = await gmRequest("GET", "/api/banker/leaders");
+      APP.manualBankers = Array.isArray(res.items) ? res.items : [];
+      APP.leaderRoleNames = Array.isArray(res.role_names) ? res.role_names : [];
+      APP.defaultRoleNames = Array.isArray(res.default_role_names) ? res.default_role_names : [];
+      return true;
+    } catch (err) {
+      APP.leaderLoadError = String(err?.message || err || "Could not load leader banker list");
+      APP.manualBankers = [];
+      return false;
+    }
+  }
+
+  async function addLeaderBanker() {
+    if (APP.busy) return;
+    const bankerId = String($("#fb-leader-banker-id")?.value || "").replace(/[^0-9]/g, "").trim();
+    const bankerName = String($("#fb-leader-banker-name")?.value || "").trim();
+    const pushoverKey = String($("#fb-leader-pushover")?.value || "").trim();
+
+    if (!bankerId) {
+      renderLeadersTab(`<div class="fb-error">Enter the banker Torn ID.</div>`);
+      return;
+    }
+
+    APP.busy = true;
+    try {
+      const res = await gmRequest("POST", "/api/banker/leaders/add", {
+        banker_id: bankerId,
+        banker_name: bankerName || bankerId,
+        pushover_key: pushoverKey,
+      });
+      await loadLeaderBankers();
+      await loadBankerStatus(currentTargetFactionId());
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker saved.${res.test_ping_sent ? " Test phone ping sent." : ""}</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function removeLeaderBanker(bankerId) {
+    if (APP.busy || !bankerId) return;
+    APP.busy = true;
+    try {
+      await gmRequest("POST", "/api/banker/leaders/remove", { banker_id: bankerId });
+      await loadLeaderBankers();
+      await loadBankerStatus(currentTargetFactionId());
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker removed.</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function addLeaderRoleName() {
+    if (APP.busy) return;
+    const roleName = String($("#fb-leader-role-name")?.value || "").trim();
+
+    if (!roleName) {
+      renderLeadersTab(`<div class="fb-error">Enter the faction role name that should count as a banker.</div>`);
+      return;
+    }
+
+    APP.busy = true;
+    try {
+      await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName });
+      await loadLeaderBankers();
+      await loadBankerStatus(currentTargetFactionId());
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that role should show as a banker.</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function removeLeaderRoleName(roleName) {
+    if (APP.busy || !roleName) return;
+    APP.busy = true;
+    try {
+      await gmRequest("POST", "/api/banker/leaders/roles/remove", { role_name: roleName });
+      await loadLeaderBankers();
+      await loadBankerStatus(currentTargetFactionId());
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker role removed.</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  function renderLeadersTab(msg = "") {
+    const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_banker;
+
+    if (!canManage) {
+      setBody(`
+        <div class="fb-box">
+          <div class="fb-request-title">Leaders</div>
+          <div class="fb-error" style="margin-top:6px;">Leader/banker access is required to manage bankers.</div>
+        </div>
+      `);
+      return;
+    }
+
+    const rows = (APP.manualBankers || []).map((b) => `
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">${esc(b.banker_name || b.name || b.banker_id)}</div>
+            <div class="fb-small">ID: ${esc(b.banker_id || b.id)} ${b.has_pushover ? "• phone ping enabled" : "• no phone ping key saved"}</div>
+          </div>
+          <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove</button>
+        </div>
+      </div>
+    `).join("") || `<div class="fb-box"><div class="fb-muted">No manually added bankers yet. Add specific banker IDs below if role detection misses someone.</div></div>`;
+
+    const roleRows = (APP.leaderRoleNames || []).map((role) => `
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">${esc(role)}</div>
+            <div class="fb-small">Members with this faction role are treated as bankers.</div>
+          </div>
+          <button class="fb-btn red" data-leader-role-remove="${esc(role)}" type="button">Remove</button>
+        </div>
+      </div>
+    `).join("") || `<div class="fb-box"><div class="fb-muted">No custom banker roles saved yet. Defaults are: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Leader, Co-leader")}</div></div>`;
+
+    setBody(`
+      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
+      ${APP.leaderLoadError ? `<div class="fb-box"><div class="fb-error">${esc(APP.leaderLoadError)}</div></div>` : ""}
+
+      <div class="fb-box">
+        <div class="fb-request-title">Leaders</div>
+        <div class="fb-small" style="margin-top:5px;">
+          Add the faction role names that should count as bankers. Example: Banker, Treasurer, Finance, Vault Keeper, or your own custom role.
+          Anyone in your faction with a saved role will show in the request dropdown with online/travel/offline status.
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">Banker role names</div>
+        <label class="fb-label" style="margin-top:10px;">Faction role name</label>
+        <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Treasurer">
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
+        </div>
+      </div>
+      ${roleRows}
+
+      <div class="fb-box">
+        <div class="fb-request-title">Specific banker override</div>
+        <div class="fb-small" style="margin-top:5px;">
+          Use this only if a banker does not show by role. Optional Pushover key lets that banker get phone pings directly.
+        </div>
+        <label class="fb-label" style="margin-top:10px;">Banker Torn ID</label>
+        <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030">
+
+        <label class="fb-label" style="margin-top:10px;">Banker name</label>
+        <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91">
+
+        <label class="fb-label" style="margin-top:10px;">Pushover User Key optional</label>
+        <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their Pushover User Key for phone pings">
+
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-leader-add" class="fb-btn gold" type="button">Add Banker</button>
+          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">Specific banker overrides</div>
+      </div>
+      ${rows}
+    `);
+
+    $("#fb-leader-role-add")?.addEventListener("click", addLeaderRoleName);
+    $("#fb-leader-add")?.addEventListener("click", addLeaderBanker);
+    $("#fb-leader-refresh")?.addEventListener("click", async () => {
+      await loadLeaderBankers();
+      renderLeadersTab();
+    });
+    $$('[data-leader-role-remove]').forEach((btn) => {
+      btn.addEventListener("click", () => removeLeaderRoleName(btn.dataset.leaderRoleRemove));
+    });
+    $$('[data-leader-remove]').forEach((btn) => {
+      btn.addEventListener("click", () => removeLeaderBanker(btn.dataset.leaderRemove));
+    });
+  }
+
+  function renderSettings(msg = "") {
+    const key = GM_getValue(K_API_KEY, "");
+
+    setBody(`
+      ${msg ? `<div class="fb-box"><div class="fb-error">${esc(msg)}</div></div>` : ""}
+
+      <div class="fb-box">
+        <div class="fb-request-title">Settings</div>
+        <div class="fb-small" style="margin-top:4px;">
+          Save your Torn API key so the banker app can verify your faction/account. After saving, tap Test Login.
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <label class="fb-label">Torn API key</label>
+        <input id="fb-api-key" class="fb-input" value="${esc(key)}" placeholder="Paste Torn API key">
+
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-save-key" class="fb-btn gold" type="button">Save Key</button>
+          <button id="fb-test-login" class="fb-btn" type="button">Test Login</button>
+          <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable In-App Ping</button>
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">Phone Pushover Ping</div>
+        <div class="fb-small" style="margin-top:6px;">
+          Your phone ping is sent by Render when a request is created. Add these Render env vars: PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN. Test with /api/test-pushover.
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-small">
+          Backend URL:
+          <br>
+          <span style="color:#ffd36a;">${esc(BANKER_API_BASE)}</span>
+        </div>
+      </div>
+    `);
+
+    $("#fb-save-key")?.addEventListener("click", () => {
+      const keyInput = $("#fb-api-key")?.value?.trim() || "";
+      GM_setValue(K_API_KEY, keyInput);
+      renderSettings("Saved. Tap Test Login.");
+    });
+
+    $("#fb-test-login")?.addEventListener("click", () => refreshAll(true));
+    $("#fb-enable-notify")?.addEventListener("click", requestNotifyPermission);
+  }
+
+  async function submitFullBalanceRequest() {
+    if (APP.busy) return;
+
+    const status = $("#fb-built-status");
+    const targetFactionId = selectedFactionFromPage();
+    const targetBankerId = $("#fb-target-banker")?.value || $("#fb-built-banker")?.value || "";
+
+    if (!GM_getValue(K_API_KEY, "")) {
+      if (status) status.textContent = "Save your API key in settings first";
+      openOverlay();
+      return;
+    }
+
+    if (!targetFactionId) {
+      if (status) status.textContent = "Choose faction first";
+      if (APP.open) renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
+      return;
+    }
+
+    await loadFactionBalance(true);
+    const detectedFullBalance = Number(APP.balanceAmount || 0);
+    const sendDetectedAmount = Number.isFinite(detectedFullBalance) && detectedFullBalance > 0;
+
+    APP.busy = true;
+    if (status) status.textContent = sendDetectedAmount ? `Sending full balance request for ${money(detectedFullBalance)}...` : "Sending full balance request...";
+
+    try {
+      const res = await gmRequest("POST", "/api/banker/requests", {
+        amount: sendDetectedAmount ? detectedFullBalance : 1,
+        note: sendDetectedAmount ? `Full balance requested: ${money(detectedFullBalance)}` : FULL_BALANCE_NOTE,
+        target_faction_id: targetFactionId,
+        target_banker_id: targetBankerId,
+      });
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
+
+      GM_setValue(K_TARGET_FACTION, targetFactionId);
+      if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
+      await refreshAll(true);
+
+      if (APP.open) {
+        renderRequestTab(`<div class="fb-success">${sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}.` : `Full balance request sent to ${esc(factionLabelById(targetFactionId))} bankers.`}</div>`);
+      }
+    } catch (err) {
+      if (status) status.textContent = err.message || "Request failed";
+      if (APP.open) {
+        renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+      }
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function submitBuiltInRequest() {
+    if (APP.busy) return;
+
+    const amountRaw = ($("#fb-built-amount")?.value || "").replace(/[^\d]/g, "");
+    const amount = Number(amountRaw);
+    const note = "";
+    const targetFactionId = $("#fb-built-faction")?.value || "";
+    const targetBankerId = $("#fb-built-banker")?.value || "";
+    const status = $("#fb-built-status");
+
+    if (!GM_getValue(K_API_KEY, "")) {
+      if (status) status.textContent = "Save your API key in settings first";
+      openOverlay();
+      return;
+    }
+
+    if (!targetFactionId) {
+      if (status) status.textContent = "Choose faction first";
+      return;
+    }
+
+    if (!amount || amount < 1) {
+      if (status) status.textContent = "Enter a valid amount";
+      return;
+    }
+
+    APP.busy = true;
+    if (status) status.textContent = "Sending request...";
+
+    try {
+      const res = await gmRequest("POST", "/api/banker/requests", {
+        amount,
+        note,
+        target_faction_id: targetFactionId,
+        target_banker_id: targetBankerId,
+      });
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
+      GM_setValue(K_TARGET_FACTION, targetFactionId);
+      $("#fb-built-amount").value = "";
+      if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
+      await refreshAll(true);
+    } catch (err) {
+      if (status) status.textContent = err.message || "Request failed";
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function submitRequest() {
+    if (APP.busy) return;
+
+    const amountRaw = ($("#fb-amount")?.value || "").replace(/[^\d]/g, "");
+    const amount = Number(amountRaw);
+    const note = "";
+    const targetFactionId = $("#fb-target-faction")?.value || "";
+    const targetBankerId = $("#fb-target-banker")?.value || "";
+
+    if (!targetFactionId) {
+      renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
+      return;
+    }
+
+    if (!amount || amount < 1) {
+      renderRequestTab(`<div class="fb-error">Enter a valid amount.</div>`);
+      return;
+    }
+
+    APP.busy = true;
+    renderRequestTab(`<div class="fb-muted">Sending request...</div>`);
+
+    try {
+      const res = await gmRequest("POST", "/api/banker/requests", {
+        amount,
+        note,
+        target_faction_id: targetFactionId,
+        target_banker_id: targetBankerId,
+      });
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
+      GM_setValue(K_TARGET_FACTION, targetFactionId);
+      await refreshAll(true);
+      const pingMsg = res && res.pushover_sent === false
+        ? `<div class="fb-error" style="margin-top:6px;">Request saved, but Pushover did not confirm. Check Render env PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN, or add banker Pushover keys in Leaders.</div>`
+        : `<div class="fb-success" style="margin-top:6px;">Phone ping sent/queued.</div>`;
+      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>${pingMsg}`);
+    } catch (err) {
+      renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function bankerAction(id, action) {
+    if (APP.busy || !id || !action) return;
+
+    const note = action === "deny"
+      ? prompt("Reason for denying request?") || ""
+      : "";
+
+    APP.busy = true;
+
+    try {
+      await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, {
+        note,
+      });
+      await refreshAll(true);
+      renderBankerTab();
+    } catch (err) {
+      setBody(`
+        <div class="fb-box">
+          <div class="fb-error">${esc(err.message || err)}</div>
+        </div>
+      `);
+    } finally {
+      APP.busy = false;
+    }
+  }
 
 
-@app.post("/api/banker/clear-completed")
-def clear_completed():
-    db_ok, db_msg = db_ready()
 
-    user, resp, code = require_user()
-    if resp:
-        return resp, code
+  function upsertRequestItem(item) {
+    if (!item || !item.id) return;
 
-    if not user["is_banker"]:
-        return jsonify({"ok": False, "error": "Banker access required"}), 403
+    const id = String(item.id);
+    const list = Array.isArray(APP.requests) ? APP.requests.slice() : [];
+    const idx = list.findIndex((r) => String(r.id) === id);
 
-    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
+    if (idx >= 0) list[idx] = item;
+    else list.unshift(item);
 
-    if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
+    APP.requests = list;
+  }
 
-    if not db_ok:
-        before = len(MEMORY_REQUESTS)
-        MEMORY_REQUESTS[:] = [r for r in MEMORY_REQUESTS if not (r.get("faction_id") in set(allowed_factions) and not r.get("is_active", True))]
-        return jsonify({"ok": True, "removed": before - len(MEMORY_REQUESTS), "mode": "memory", "warning": db_msg})
+  function localRequestKey() {
+    return `fb_local_requests_v1_${APP.me?.player_id || "guest"}`;
+  }
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM banker_requests
-                WHERE faction_id = ANY(%s)
-                  AND is_active = FALSE
-                """,
-                (allowed_factions,),
-            )
+  function getLocalRequests() {
+    try {
+      const raw = GM_getValue(localRequestKey(), "[]");
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
 
-            removed = cur.rowcount
+  function saveLocalRequest(item) {
+    if (!item || !item.id) return;
+    const now = Date.now();
+    const mine = getLocalRequests()
+      .filter((r) => r && String(r.id) !== String(item.id))
+      .filter((r) => !r._local_saved_at || now - Number(r._local_saved_at) < 1000 * 60 * 60 * 24 * 2);
+    mine.unshift({ ...item, _local_saved_at: now, _local_backup: true });
+    GM_setValue(localRequestKey(), JSON.stringify(mine.slice(0, 20)));
+  }
 
-        conn.commit()
+  function mergeLocalRequests(items) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    const ids = new Set(list.map((r) => String(r.id)));
+    for (const r of getLocalRequests()) {
+      if (!r || !r.id) continue;
+      if (!ids.has(String(r.id))) list.unshift(r);
+    }
+    return list;
+  }
 
-    return jsonify({"ok": True, "removed": removed})
+  function getSeenPendingIds() {
+    try {
+      const raw = GM_getValue(K_SEEN_PENDING, "[]");
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
 
+  function saveSeenPendingIds(ids) {
+    GM_setValue(K_SEEN_PENDING, JSON.stringify(Array.from(new Set(ids.map(String))).slice(-100)));
+  }
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    try:
-        init_db()
-    except Exception as e:
-        print("DB init skipped at startup:", e)
-    app.run(host="0.0.0.0", port=port)
+  function requestNotifyPermission() {
+    if (!("Notification" in window)) {
+      GM_setValue("fb_in_app_ping_enabled_v1", true);
+      alert("PDA/browser notifications are not supported here. In-app banker ping is enabled instead: the 🪙 coin and banker box will turn red when requests are pending.");
+      return;
+    }
+
+    Notification.requestPermission().then((permission) => {
+      if (permission === "granted") {
+        GM_setValue("fb_in_app_ping_enabled_v1", true);
+        alert("Banker notifications enabled.");
+      } else {
+        GM_setValue("fb_in_app_ping_enabled_v1", true);
+        alert("Browser notifications were not allowed. In-app banker ping is enabled instead: the 🪙 coin and banker box will turn red when requests are pending.");
+      }
+    });
+  }
+
+  function notifyBankerForNewPending(pendingItems) {
+    if (!APP.me?.is_banker && !APP.me?.is_admin) return;
+
+    const seen = getSeenPendingIds();
+    const seenSet = new Set(seen);
+    const fresh = pendingItems.filter((r) => !seenSet.has(String(r.id)));
+
+    if (!fresh.length) return;
+
+    // PDA-friendly in-app ping: vibrate where supported, while the red coin/request box is the visual ping.
+    try {
+      if (navigator.vibrate) navigator.vibrate([180, 80, 180]);
+    } catch {
+      // Ignore vibration errors.
+    }
+
+    if ("Notification" in window && Notification.permission === "granted") {
+      for (const req of fresh.slice(0, 3)) {
+        const title = "🪙 New Faction Bank Request";
+        const body = `${req.requester_name || "Member"} requested ${String(req.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(req.amount)} for ${req.faction_name || "Faction"}`;
+
+        try {
+          const n = new Notification(title, {
+            body,
+            tag: `faction-bank-request-${req.id}`,
+            silent: false,
+          });
+
+          n.onclick = () => {
+            window.focus();
+            openBankerBoard();
+          };
+        } catch {
+          // Ignore notification errors.
+        }
+      }
+    }
+
+    saveSeenPendingIds([...seen, ...fresh.map((r) => String(r.id))]);
+  }
+
+  async function refreshFactionBoxData(force = false) {
+    const key = GM_getValue(K_API_KEY, "");
+    if (!key) {
+      APP.bankerStatusError = "Save API key in Settings first.";
+      mountBuiltInBankerBox();
+      return false;
+    }
+
+    if (APP.quickRefreshing) return true;
+    if (!force && Date.now() - (APP.lastQuickLoad || 0) < 45000) return true;
+
+    APP.quickRefreshing = true;
+    APP.lastQuickLoad = Date.now();
+
+    try {
+      APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
+
+      try {
+        const factions = await gmRequest("GET", "/api/banker/factions");
+        if (Array.isArray(factions.items) && factions.items.length) APP.factions = factions.items;
+      } catch (ignore) {
+        APP.factions = DEFAULT_FACTIONS.slice();
+      }
+
+      try {
+        const me = await gmRequest("GET", "/api/banker/me");
+        APP.me = me;
+        if (APP.me?.can_manage_leaders || APP.me?.is_admin || APP.me?.is_banker) {
+          await loadLeaderBankers();
+        }
+      } catch (meErr) {
+        APP.bankerStatusError = String(meErr.message || meErr).slice(0, 90);
+      }
+
+      await loadBankerStatus(currentTargetFactionId());
+      mountBuiltInBankerBox();
+      return true;
+    } catch (err) {
+      APP.bankerStatusError = String(err.message || err).slice(0, 120);
+      if (!APP.bankers || !APP.bankers.length) {
+        APP.bankers = [{
+          player_id: "3679030",
+          name: "Fries91",
+          status: "unknown",
+          color: "gray",
+          label: "Status check failed",
+          details: APP.bankerStatusError,
+          is_available: false,
+        }];
+      }
+      mountBuiltInBankerBox();
+      return false;
+    } finally {
+      APP.quickRefreshing = false;
+    }
+  }
+
+  async function refreshHeaderCoinBadge(force = false) {
+    const key = GM_getValue(K_API_KEY, "");
+    if (!key || APP.headerRefreshing) return false;
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 90000) return true;
+
+    APP.headerRefreshing = true;
+    APP.lastHeaderBadgeLoad = Date.now();
+
+    try {
+      const me = APP.me || await gmRequest("GET", "/api/banker/me");
+      APP.me = me;
+
+      if (!(me?.is_banker || me?.is_admin)) {
+        setCoinAlert(0);
+        return true;
+      }
+
+      const list = await gmRequest("GET", "/api/banker/requests");
+      const items = Array.isArray(list.items) ? list.items : [];
+      APP.requests = mergeLocalRequests(items);
+
+      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      setCoinAlert(pendingItems.length);
+      notifyBankerForNewPending(pendingItems);
+      return true;
+    } catch (err) {
+      const coin = $("#fb-bank-coin-clean");
+      if (coin) coin.title = `Factional Banking — refresh missed Render once: ${String(err.message || err).slice(0, 80)}`;
+      return false;
+    } finally {
+      APP.headerRefreshing = false;
+    }
+  }
+
+  async function refreshAll(force = false) {
+    const key = GM_getValue(K_API_KEY, "");
+    if (!key) {
+      setCoinAlert(0);
+      if (APP.open) renderSettings("Add your Torn API key first.");
+      return false;
+    }
+
+    if (!force && Date.now() - APP.lastLoad < 12000) return true;
+    if (APP.refreshing) return true;
+
+    APP.refreshing = true;
+    APP.lastLoad = Date.now();
+
+    try {
+      // Keep dropdown usable even if the new factions endpoint is not deployed yet.
+      APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
+
+      try {
+        const factions = await gmRequest("GET", "/api/banker/factions");
+        if (Array.isArray(factions.items) && factions.items.length) {
+          APP.factions = factions.items;
+        }
+      } catch (factionErr) {
+        APP.factions = DEFAULT_FACTIONS.slice();
+      }
+
+      const me = await gmRequest("GET", "/api/banker/me");
+      APP.me = me;
+
+      await loadFactionBalance(false);
+
+      if (APP.me?.can_manage_leaders || APP.me?.is_admin || APP.me?.is_banker) {
+        await loadLeaderBankers();
+      }
+
+      const list = await gmRequest("GET", "/api/banker/requests");
+      APP.requests = mergeLocalRequests(Array.isArray(list.items) ? list.items : []);
+
+      await loadBankerStatus(currentTargetFactionId());
+
+      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      const pending = pendingItems.length;
+
+      setCoinAlert(pending);
+      notifyBankerForNewPending(pendingItems);
+
+      if (APP.open) renderBody(activeTab());
+      return true;
+    } catch (err) {
+      APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
+      mountCoin();
+
+      const subtitle = $("#fb-subtitle");
+      if (subtitle) {
+        subtitle.textContent = `Last refresh failed: ${String(err.message || err).slice(0, 80)}`;
+      }
+
+      // Do not wipe the current screen after a successful request.
+      // Render can briefly miss one API call while waking/redeploying; keeping the last good board is better on PDA.
+      if (APP.me) {
+        if (APP.open) {
+          const body = $("#fb-body");
+          if (body && !body.querySelector("#fb-soft-network-error")) {
+            body.insertAdjacentHTML("afterbegin", `
+              <div id="fb-soft-network-error" class="fb-box">
+                <div class="fb-error">Refresh missed Render once. Your request may still be saved.</div>
+                <div class="fb-row" style="margin-top:8px;">
+                  <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
+                </div>
+              </div>
+            `);
+            $("#fb-retry-network")?.addEventListener("click", () => {
+              const box = $("#fb-soft-network-error");
+              if (box) box.remove();
+              refreshAll(true);
+            });
+          }
+        }
+        return false;
+      }
+
+      setCoinAlert(0);
+
+      if (APP.open) {
+        setBody(`
+          <div class="fb-box">
+            <div class="fb-error">${esc(err.message || err)}</div>
+            <div class="fb-small" style="margin-top:8px;">
+              The app is open, but Render did not answer one of the API calls. Make sure app.py is deployed and the service is awake.
+            </div>
+            <div class="fb-row" style="margin-top:10px;">
+              <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
+              <button id="fb-open-settings2" class="fb-btn" type="button">Settings</button>
+            </div>
+          </div>
+        `);
+
+        $("#fb-retry-network")?.addEventListener("click", () => refreshAll(true));
+        $("#fb-open-settings2")?.addEventListener("click", () => {
+          const settingsTab = document.querySelector('.fb-tab[data-tab="settings"]');
+          if (settingsTab) settingsTab.click();
+        });
+      }
+      return false;
+    } finally {
+      APP.refreshing = false;
+    }
+  }
+
+  function clearBankerUiOnWrongPage() {
+    if (!isOwnFactionPage()) {
+      const box = document.querySelector("#fb-built-in-box");
+      if (box) box.remove();
+    }
+
+    // Profile coin is disabled. Remove it everywhere.
+    const profileCoin = document.querySelector("#fb-profile-bank-coin");
+    if (profileCoin) profileCoin.remove();
+
+    // Keep only the new header coin. Remove old legacy coin ids if they appear.
+    document.querySelectorAll("#fb-bank-coin").forEach((el) => el.remove());
+  }
+
+  let mountTimer = null;
+  let mountTries = 0;
+
+  function pageMount(reason = "manual") {
+    if (!isTornPage()) return;
+
+    ensureStyles();
+    clearBankerUiOnWrongPage();
+    mountCoin();
+
+    // Only create the overlay when the user taps Board/profile/header coin. Never auto-open it on normal pages.
+    if (APP.open) ensureOverlay();
+
+    if (isOwnFactionPage()) {
+      mountBuiltInBankerBox();
+      startBalanceCaptureLoop();
+
+      // PDA-safe: only load factions/me/banker status for the quick box.
+      // Do not call /api/banker/requests here because that uses the database and caused 500s.
+      if (GM_getValue(K_API_KEY, "") && (Date.now() - (APP.lastQuickLoad || 0) > 45000 || reason === "url")) {
+        refreshFactionBoxData(false);
+      }
+    }
+
+    mountProfileBankCoin();
+  }
+
+  function scheduleMount(reason = "scheduled") {
+    clearTimeout(mountTimer);
+    mountTimer = setTimeout(() => pageMount(reason), 450);
+  }
+
+  function boot() {
+    if (!isTornPage() || APP.booted) return;
+
+    ensureStyles();
+    clearBankerUiOnWrongPage();
+    mountCoin();
+
+    APP.booted = true;
+
+    // Do not restore an old open board on app start. This stops the board from appearing on Gym/Home/etc.
+    GM_setValue(K_OPEN, false);
+    APP.open = false;
+
+    pageMount("boot");
+    if (GM_getValue(K_API_KEY, "")) setTimeout(() => refreshHeaderCoinBadge(true), 2200);
+
+    // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
+    mountTries = 0;
+    const limitedRetry = setInterval(() => {
+      mountTries += 1;
+      pageMount("limited-retry");
+      if (mountTries >= 8) clearInterval(limitedRetry);
+    }, 1600);
+
+    // Very light refresh only on pages where the app is visible/open.
+    setInterval(() => {
+      if (!isTornPage()) return;
+      clearBankerUiOnWrongPage();
+
+      pageMount("slow");
+
+      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 90000) {
+        refreshHeaderCoinBadge(false);
+      }
+      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 90000) {
+        refreshAll(false);
+      }
+      if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
+        refreshFactionBoxData(false);
+      }
+    }, 30000);
+  }
+
+  function startWhenReady() {
+    if (!isTornPage()) return;
+    boot();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startWhenReady, { once: true });
+  } else {
+    startWhenReady();
+  }
+
+  let lastUrl = location.href;
+  setInterval(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      mountTries = 0;
+      scheduleMount("url");
+      setTimeout(() => pageMount("url-retry-1"), 1600);
+      setTimeout(() => pageMount("url-retry-2"), 3400);
+    }
+  }, 2500);
+
+  // Prefill only on faction banking page and only a few times. This prevents PDA freezing.
+  if (isFactionPage()) {
+    setTimeout(() => { handleIncomingBankRequestUrl(); tryPrefillFactionBankForm(); startBalanceCaptureLoop(); }, 1000);
+    setTimeout(tryPrefillFactionBankForm, 2600);
+  }
+})();
