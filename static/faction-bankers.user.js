@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.1
+// @version      0.9.2
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -1049,7 +1049,7 @@
   function mountCoin() {
     if (!isTornPage()) return;
 
-    // Main banker alert coin: lives in Torn's header/resource row, not as a random floating page icon.
+    // Header-only coin. No profile coin, no floating fallback, no random page placement.
     const coin = makeHeaderCoin();
     coin.classList.remove("fb-fixed-test", "fb-header-fallback");
     coin.classList.add("fb-fixed-header", "fb-banker-visible");
@@ -1062,16 +1062,18 @@
       if (coin.parentElement !== parent || coin.previousElementSibling !== target) {
         target.insertAdjacentElement("afterend", coin);
       }
-    } else if (row) {
-      if (coin.parentElement !== row) row.appendChild(coin);
-    } else {
-      // Last resort so bankers can still see pending requests if Torn changes the header.
-      coin.classList.remove("fb-fixed-header");
-      coin.classList.add("fb-header-fallback");
-      if (coin.parentElement !== document.body) document.body.appendChild(coin);
+      setCoinAlert(APP.pendingCount || 0);
+      return;
     }
 
-    setCoinAlert(APP.pendingCount || 0);
+    if (row) {
+      if (coin.parentElement !== row) row.appendChild(coin);
+      setCoinAlert(APP.pendingCount || 0);
+      return;
+    }
+
+    // If Torn's header/resource row is not found, remove the coin instead of floating it elsewhere.
+    if (coin.parentElement) coin.remove();
   }
 
   function findFactionBuiltInMount() {
@@ -1206,41 +1208,9 @@
   }
 
   function mountProfileBankCoin() {
-    let coin = $("#fb-profile-bank-coin");
-
-    if (!isProfilePage()) {
-      if (coin) coin.remove();
-      return;
-    }
-
-    const found = findAbspProfileIconTarget();
-    if (!found || !found.target) {
-      if (coin) coin.remove();
-      return;
-    }
-
-    const target = found.target;
-
-    if (!coin) {
-      coin = document.createElement("button");
-      coin.id = "fb-profile-bank-coin";
-      coin.type = "button";
-      coin.textContent = "🪙";
-      coin.title = "Faction Bankers settings / login";
-      coin.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        openBankerSettings();
-      });
-    }
-
-    coin.classList.remove("fb-profile-fallback");
-
-    if (target.parentElement) {
-      if (coin.parentElement !== target.parentElement || coin.previousElementSibling !== target) {
-        target.insertAdjacentElement("afterend", coin);
-      }
-    }
+    // Disabled by request: the coin must only live in Torn's header now.
+    const coin = document.querySelector("#fb-profile-bank-coin");
+    if (coin) coin.remove();
   }
 
   function mountBuiltInBankerBox() {
@@ -3326,12 +3296,11 @@
       if (box) box.remove();
     }
 
-    if (!isProfilePage()) {
-      const profileCoin = document.querySelector("#fb-profile-bank-coin");
-      if (profileCoin) profileCoin.remove();
-    }
+    // Profile coin is disabled. Remove it everywhere.
+    const profileCoin = document.querySelector("#fb-profile-bank-coin");
+    if (profileCoin) profileCoin.remove();
 
-    // Keep the new header coin. Only remove old legacy coin ids if they appear.
+    // Keep only the new header coin. Remove old legacy coin ids if they appear.
     document.querySelectorAll("#fb-bank-coin").forEach((el) => el.remove());
   }
 
@@ -3358,9 +3327,7 @@
       }
     }
 
-    if (isProfilePage()) {
-      mountProfileBankCoin();
-    }
+    mountProfileBankCoin();
   }
 
   function scheduleMount(reason = "scheduled") {
