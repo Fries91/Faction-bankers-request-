@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.9
+// @version      1.0.2
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.9.9-balance-sync-manual";
+  const FB_BUILD = "1.0.2-balance-sync-manual";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -3265,11 +3265,27 @@
     APP.busy = true;
 
     try {
-      await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, {
+      const res = await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, {
         note,
       });
+
+      // Do not wait for the next refresh to visually clear it. Torn/PDA can miss a refresh
+      // or merge a local backup, so we close it locally immediately too.
+      rememberClosedRequest(id);
+      APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+
+      const label = action === "deny" ? "denied" : action === "approve" ? "approved" : "completed";
       await refreshAll(true);
-      renderBankerTab();
+
+      if (activeTab() === "banker") {
+        renderBankerTab();
+        const body = $("#fb-body");
+        if (body) {
+          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)} and cleared from the active board.</div></div>`);
+        }
+      } else {
+        renderBody(activeTab());
+      }
     } catch (err) {
       setBody(`
         <div class="fb-box">
@@ -3320,11 +3336,40 @@
     GM_setValue(localRequestKey(), JSON.stringify(mine.slice(0, 20)));
   }
 
+  function closedRequestKey() {
+    return `fb_closed_requests_v1_${APP.me?.player_id || "guest"}`;
+  }
+
+  function getClosedRequestIds() {
+    try {
+      const raw = GM_getValue(closedRequestKey(), "[]");
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function rememberClosedRequest(id) {
+    if (!id) return;
+    const ids = [String(id), ...getClosedRequestIds()].filter(Boolean);
+    GM_setValue(closedRequestKey(), JSON.stringify(Array.from(new Set(ids)).slice(0, 80)));
+    clearLocalRequest(id);
+  }
+
+  function clearLocalRequest(id) {
+    if (!id) return;
+    const keep = getLocalRequests().filter((r) => String(r?.id) !== String(id));
+    GM_setValue(localRequestKey(), JSON.stringify(keep.slice(0, 20)));
+  }
+
   function mergeLocalRequests(items) {
-    const list = Array.isArray(items) ? items.slice() : [];
+    const closed = new Set(getClosedRequestIds());
+    const list = (Array.isArray(items) ? items.slice() : []).filter((r) => !closed.has(String(r?.id)));
     const ids = new Set(list.map((r) => String(r.id)));
     for (const r of getLocalRequests()) {
       if (!r || !r.id) continue;
+      if (closed.has(String(r.id))) continue;
       if (!ids.has(String(r.id))) list.unshift(r);
     }
     return list;
