@@ -13,6 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
+APP_VERSION = "1.0.1-action-fix"
 
 
 @app.errorhandler(Exception)
@@ -1708,14 +1709,19 @@ def create_request():
 
 @app.post("/api/banker/requests/<int:req_id>/<action>")
 def banker_action(req_id, action):
+    """Approve / deny / complete a bank request.
+
+    v1.0.1 fix:
+    - Do not accidentally block Fries91/admin from active requests.
+    - Do not filter the SELECT before we know who owns the request.
+    - Allow faction bankers, manual bankers, selected preferred banker, same-faction bankers, and admin.
+    - Return readable JSON instead of a vague action failure.
+    """
     db_ok, db_msg = db_ready()
 
     user, resp, code = require_user()
     if resp:
         return resp, code
-
-    if not user["is_banker"]:
-        return jsonify({"ok": False, "error": "Banker access required"}), 403
 
     action = str(action or "").lower().strip()
 
@@ -1734,44 +1740,87 @@ def banker_action(req_id, action):
         return jsonify({"ok": False, "error": "Invalid action"}), 400
 
     new_status = status_map[action]
-
     data = request.get_json(silent=True) or {}
     bank_note = str(data.get("note") or "").strip()
-
     if len(bank_note) > 500:
         bank_note = bank_note[:500]
 
-    # Complete/denied requests are removed from active list.
     is_active = new_status not in {"complete", "denied"}
 
-    allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
+    def can_handle_request(req_item):
+        req_faction = str(req_item.get("faction_id") or "").strip()
+        selected_banker_id = str(req_item.get("selected_banker_id") or "").strip()
+        user_id = str(user.get("player_id") or "").strip()
+        user_faction = str(user.get("faction_id") or "").strip()
+        user_banker_factions = {str(x).strip() for x in (user.get("banker_factions") or []) if str(x).strip()}
 
-    if not allowed_factions:
-        return jsonify({"ok": False, "error": "No banker access for your faction"}), 403
+        if user.get("is_admin") or user_id == ADMIN_PLAYER_ID:
+            return True, "admin"
+        if selected_banker_id and selected_banker_id == user_id:
+            return True, "selected_banker"
+        if req_faction and req_faction in user_banker_factions:
+            return True, "banker_faction"
+        if user.get("is_banker") and req_faction and user_faction and req_faction == user_faction:
+            return True, "same_faction_banker"
+        if user_id in set(manual_banker_ids_for_faction(req_faction)):
+            return True, "manual_banker"
+        if user_id in set(dynamic_banker_ids_for_faction(get_key(), req_faction)):
+            return True, "role_banker"
+        return False, "not_banker_for_request"
 
     if not db_ok:
+        # Memory fallback still checks access now, instead of failing silently.
+        existing = None
+        for item in MEMORY_REQUESTS:
+            if int(item.get("id", 0) or 0) == int(req_id) and item.get("is_active", True):
+                existing = item
+                break
+        if not existing:
+            return jsonify({"ok": False, "error": "Active request not found", "mode": "memory", "warning": db_msg}), 404
+        allowed, reason = can_handle_request(existing)
+        if not allowed:
+            return jsonify({
+                "ok": False,
+                "error": "Banker access required for this request",
+                "reason": reason,
+                "request_faction_id": existing.get("faction_id"),
+                "your_faction_id": user.get("faction_id"),
+                "your_banker_factions": user.get("banker_factions", []),
+            }), 403
         item = memory_update_request(req_id, user, new_status, bank_note)
-        if not item:
-            return jsonify({"ok": False, "error": "Active request not found for your banker faction"}), 404
-        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "warning": db_msg})
+        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "access": reason, "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
+            # First find the active request by ID only. Older versions filtered by allowed factions too early.
             cur.execute(
                 """
                 SELECT *
                 FROM banker_requests
                 WHERE id = %s
-                  AND faction_id = ANY(%s)
                   AND is_active = TRUE
                 """,
-                (req_id, allowed_factions),
+                (req_id,),
             )
-
             existing = cur.fetchone()
 
             if not existing:
-                return jsonify({"ok": False, "error": "Active request not found for your banker faction"}), 404
+                return jsonify({"ok": False, "error": "Active request not found"}), 404
+
+            allowed, reason = can_handle_request(existing)
+            if not allowed:
+                return jsonify({
+                    "ok": False,
+                    "error": "Banker access required for this request",
+                    "reason": reason,
+                    "request_faction_id": existing.get("faction_id"),
+                    "request_faction_name": existing.get("faction_name"),
+                    "your_faction_id": user.get("faction_id"),
+                    "your_faction_name": user.get("faction_name"),
+                    "your_banker_factions": user.get("banker_factions", []),
+                    "is_admin": user.get("is_admin", False),
+                    "is_banker": user.get("is_banker", False),
+                }), 403
 
             cur.execute(
                 """
@@ -1799,19 +1848,15 @@ def banker_action(req_id, action):
                     req_id,
                 ),
             )
-
             row = cur.fetchone()
-
         conn.commit()
 
-    return jsonify(
-        {
-            "ok": True,
-            "item": row_to_item(row),
-            "removed_from_active": not is_active,
-        }
-    )
-
+    return jsonify({
+        "ok": True,
+        "item": row_to_item(row),
+        "removed_from_active": not is_active,
+        "access": reason,
+    })
 
 @app.post("/api/banker/clear-completed")
 def clear_completed():
