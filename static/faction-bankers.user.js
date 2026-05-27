@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.0.2
+// @version      1.0.4
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.0.2-balance-sync-manual";
+  const FB_BUILD = "1.0.4-balance-deduct";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1780,6 +1780,29 @@
     return false;
   }
 
+  function deductRequestedAmountFromLocalBalance(requestedAmount) {
+    const amt = Number(requestedAmount || 0);
+    const current = Number(APP.balanceAmount);
+
+    // Only adjust when we already have a real/manual/saved balance showing.
+    // This is an estimated local balance until the user hits Sync/Refresh/Enter Manually again.
+    if (!Number.isFinite(amt) || amt <= 0 || !Number.isFinite(current) || current < 0) return false;
+
+    const next = Math.max(0, Math.floor(current - amt));
+    APP.balanceAmount = next;
+    APP.balanceText = money(next);
+    APP.balanceSource = "estimated after request";
+    APP.balanceUpdatedAt = Date.now();
+
+    // Save it locally so the box keeps showing the reduced balance after PDA refreshes.
+    GM_setValue("fb_last_personal_balance_amount_v2", String(next));
+    GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
+    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(next));
+    GM_setValue(K_MANUAL_BALANCE_TEXT, APP.balanceText);
+
+    return true;
+  }
+
   function detectFactionBalanceFromPage() {
     if (!isOwnFactionPage()) return false;
 
@@ -2786,11 +2809,41 @@
       await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/approve`, { note: "" });
       openBankingPageForRequest(r);
     } catch (err) {
+      const msg = String(err?.message || err || "");
+
+      // If Render says the active request is already gone, treat that as success.
+      // This happens when PDA double-taps, refreshes late, or a local backup tries to re-add it.
+      if (/active request not found|request not found|404/i.test(msg)) {
+        rememberClosedRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        const label = action === "deny" ? "denied" : action === "approve" ? "approved" : "completed";
+        if (activeTab() === "banker" || activeTab() === "my") {
+          renderBody(activeTab());
+          const body = $("#fb-body");
+          if (body) {
+            body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} was already cleared. It has been removed locally too.</div></div>`);
+          }
+        } else {
+          renderBody(activeTab());
+        }
+        return;
+      }
+
       setBody(`
         <div class="fb-box">
-          <div class="fb-error">${esc(err.message || err)}</div>
+          <div class="fb-error">${esc(msg)}</div>
+          <div class="fb-row" style="margin-top:10px;">
+            <button id="fb-force-clear-local" class="fb-btn gold" type="button">Hide This Request Locally</button>
+            <button id="fb-retry-action" class="fb-btn" type="button">Retry</button>
+          </div>
         </div>
       `);
+      $("#fb-force-clear-local")?.addEventListener("click", () => {
+        rememberClosedRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        renderBody(activeTab());
+      });
+      $("#fb-retry-action")?.addEventListener("click", () => bankerAction(id, action));
     } finally {
       APP.busy = false;
     }
@@ -3140,6 +3193,9 @@
         upsertRequestItem(res.item);
         saveLocalRequest(res.item);
       }
+      if (sendDetectedAmount) {
+        deductRequestedAmountFromLocalBalance(detectedFullBalance);
+      }
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -3198,6 +3254,7 @@
         upsertRequestItem(res.item);
         saveLocalRequest(res.item);
       }
+      deductRequestedAmountFromLocalBalance(amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
       if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -3242,6 +3299,7 @@
         upsertRequestItem(res.item);
         saveLocalRequest(res.item);
       }
+      deductRequestedAmountFromLocalBalance(amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
       const pingMsg = res && res.pushover_sent === false
@@ -3287,11 +3345,41 @@
         renderBody(activeTab());
       }
     } catch (err) {
+      const msg = String(err?.message || err || "");
+
+      // If Render says the active request is already gone, treat that as success.
+      // This happens when PDA double-taps, refreshes late, or a local backup tries to re-add it.
+      if (/active request not found|request not found|404/i.test(msg)) {
+        rememberClosedRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        const label = action === "deny" ? "denied" : action === "approve" ? "approved" : "completed";
+        if (activeTab() === "banker" || activeTab() === "my") {
+          renderBody(activeTab());
+          const body = $("#fb-body");
+          if (body) {
+            body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} was already cleared. It has been removed locally too.</div></div>`);
+          }
+        } else {
+          renderBody(activeTab());
+        }
+        return;
+      }
+
       setBody(`
         <div class="fb-box">
-          <div class="fb-error">${esc(err.message || err)}</div>
+          <div class="fb-error">${esc(msg)}</div>
+          <div class="fb-row" style="margin-top:10px;">
+            <button id="fb-force-clear-local" class="fb-btn gold" type="button">Hide This Request Locally</button>
+            <button id="fb-retry-action" class="fb-btn" type="button">Retry</button>
+          </div>
         </div>
       `);
+      $("#fb-force-clear-local")?.addEventListener("click", () => {
+        rememberClosedRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        renderBody(activeTab());
+      });
+      $("#fb-retry-action")?.addEventListener("click", () => bankerAction(id, action));
     } finally {
       APP.busy = false;
     }
@@ -3340,9 +3428,13 @@
     return `fb_closed_requests_v1_${APP.me?.player_id || "guest"}`;
   }
 
-  function getClosedRequestIds() {
+  function closedRequestGlobalKey() {
+    return "fb_closed_requests_global_v1";
+  }
+
+  function readClosedIdsFromKey(key) {
     try {
-      const raw = GM_getValue(closedRequestKey(), "[]");
+      const raw = GM_getValue(key, "[]");
       const arr = JSON.parse(raw);
       return Array.isArray(arr) ? arr.map(String) : [];
     } catch {
@@ -3350,10 +3442,19 @@
     }
   }
 
+  function getClosedRequestIds() {
+    return Array.from(new Set([
+      ...readClosedIdsFromKey(closedRequestKey()),
+      ...readClosedIdsFromKey(closedRequestGlobalKey()),
+    ]));
+  }
+
   function rememberClosedRequest(id) {
     if (!id) return;
-    const ids = [String(id), ...getClosedRequestIds()].filter(Boolean);
-    GM_setValue(closedRequestKey(), JSON.stringify(Array.from(new Set(ids)).slice(0, 80)));
+    const nextLocal = [String(id), ...readClosedIdsFromKey(closedRequestKey())].filter(Boolean);
+    const nextGlobal = [String(id), ...readClosedIdsFromKey(closedRequestGlobalKey())].filter(Boolean);
+    GM_setValue(closedRequestKey(), JSON.stringify(Array.from(new Set(nextLocal)).slice(0, 120)));
+    GM_setValue(closedRequestGlobalKey(), JSON.stringify(Array.from(new Set(nextGlobal)).slice(0, 120)));
     clearLocalRequest(id);
   }
 
@@ -3370,6 +3471,7 @@
     for (const r of getLocalRequests()) {
       if (!r || !r.id) continue;
       if (closed.has(String(r.id))) continue;
+      if (!["pending", "approved"].includes(String(r.status || "pending").toLowerCase())) continue;
       if (!ids.has(String(r.id))) list.unshift(r);
     }
     return list;
