@@ -1022,7 +1022,7 @@ def memory_update_request(req_id, user, new_status, bank_note=""):
             item["handled_at"] = now_iso()
             if bank_note:
                 item["bank_note"] = bank_note
-            item["is_active"] = new_status not in {"complete", "denied"}
+            item["is_active"] = new_status not in {"approved", "complete", "denied"}
             return item
     return None
 
@@ -1711,11 +1711,12 @@ def create_request():
 def banker_action(req_id, action):
     """Approve / deny / complete a bank request.
 
-    v1.0.1 fix:
+    v1.0.2 fix:
     - Do not accidentally block Fries91/admin from active requests.
     - Do not filter the SELECT before we know who owns the request.
     - Allow faction bankers, manual bankers, selected preferred banker, same-faction bankers, and admin.
     - Return readable JSON instead of a vague action failure.
+    - Approve, complete, and deny all remove the request from the active board.
     """
     db_ok, db_msg = db_ready()
 
@@ -1745,7 +1746,7 @@ def banker_action(req_id, action):
     if len(bank_note) > 500:
         bank_note = bank_note[:500]
 
-    is_active = new_status not in {"complete", "denied"}
+    is_active = new_status not in {"approved", "complete", "denied"}
 
     def can_handle_request(req_item):
         req_faction = str(req_item.get("faction_id") or "").strip()
