@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.2
+// @version      0.9.4
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.9.1-true-member-balance";
+  const FB_BUILD = "0.9.4-header-icons-only";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -164,14 +164,14 @@
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: 34px !important;
-        height: 28px !important;
+        width: 28px !important;
+        height: 26px !important;
         margin-left: 6px !important;
         border: 1px solid rgba(255,255,255,.12) !important;
         border-radius: 9px !important;
         background: transparent !important;
         color: #ffd36a !important;
-        font-size: 20px !important;
+        font-size: 17px !important;
         line-height: 1 !important;
         cursor: pointer !important;
         user-select: none !important;
@@ -181,16 +181,7 @@
       }
 
       #fb-bank-coin-clean.fb-fixed-test {
-        display: inline-flex !important;
-        position: fixed !important;
-        right: 10px !important;
-        bottom: 132px !important;
-        z-index: 100001 !important;
-        width: 36px !important;
-        height: 34px !important;
-        background: rgba(0,0,0,.78) !important;
-        border-color: rgba(255,211,106,.65) !important;
-        box-shadow: 0 5px 16px rgba(0,0,0,.55) !important;
+        display: none !important;
       }
 
             #fb-bank-coin-clean.fb-fixed-header {
@@ -204,14 +195,7 @@
       }
 
       #fb-bank-coin-clean.fb-header-fallback {
-        position: fixed !important;
-        right: 10px !important;
-        top: 108px !important;
-        z-index: 100001 !important;
-        width: 34px !important;
-        height: 32px !important;
-        background: rgba(0,0,0,.72) !important;
-        border-color: rgba(255,211,106,.65) !important;
+        display: none !important;
       }
 
       .fb-coin-mount-row {
@@ -807,16 +791,51 @@
       }
 
       #fb-overlay {
-          top: 62px;
+          top: auto;
           right: 6px;
           left: 6px;
+          bottom: calc(8px + env(safe-area-inset-bottom, 0px));
           width: auto;
-          max-height: calc(100vh - 72px);
+          max-height: min(56vh, 430px);
           border-radius: 14px;
         }
 
+        #fb-head {
+          padding: 8px 10px;
+        }
+
+        #fb-title strong {
+          font-size: 13px;
+        }
+
+        #fb-title span {
+          font-size: 10px;
+        }
+
+        .fb-tabs {
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          padding: 6px 8px 0;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .fb-tab {
+          flex: 0 0 auto;
+          padding: 5px 9px;
+          font-size: 11px;
+        }
+
         #fb-body {
-          padding: 10px;
+          padding: 8px;
+          max-height: calc(min(56vh, 430px) - 86px);
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .fb-box {
+          padding: 8px;
+          margin-bottom: 7px;
+          border-radius: 11px;
         }
 
         #fb-profile-bank-coin {
@@ -935,6 +954,80 @@
       cls.includes("user-info");
 
     return (hasMoneyWords || hasMoneySymbols) && (isKnownTornResourceClass || rect.top > 120);
+  }
+
+
+  function visibleRect(el) {
+    if (!el || !el.getBoundingClientRect) return null;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 4 || r.height < 4) return null;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) === 0) return null;
+    return r;
+  }
+
+  function isIconLikeNode(el) {
+    const r = visibleRect(el);
+    if (!r) return false;
+    if (r.width > 74 || r.height > 74 || r.width < 12 || r.height < 12) return false;
+
+    const text = getCleanText(el);
+    // Icon nodes usually have no text, one symbol, or a tiny label. Avoid full buttons/inputs.
+    if (text.length > 18) return false;
+    if (/bank|request|factional/i.test(text)) return false;
+
+    const tag = String(el.tagName || "").toLowerCase();
+    const cls = String(el.className || "").toLowerCase();
+    const role = String(el.getAttribute("role") || "").toLowerCase();
+    const hasVisualIcon = !!el.querySelector("img, svg, i") || tag === "img" || tag === "svg" || cls.includes("icon") || cls.includes("link") || role === "button";
+    const likelyClickable = tag === "a" || tag === "button" || el.onclick || role === "button";
+
+    return hasVisualIcon || likelyClickable || text.length <= 3;
+  }
+
+  function findCompactHeaderIconCluster() {
+    // Desktop/iPhone full-site fallback: find the real Torn header icon strip and insert beside those icons.
+    // This prevents the coin from floating on the right side when the mobile money/points row is not present.
+    const parents = Array.from(document.querySelectorAll("header, nav, div, ul"));
+    const scored = [];
+
+    for (const parent of parents) {
+      if (parent.id === "fb-overlay" || parent.closest("#fb-overlay") || parent.closest("#fb-built-in-box")) continue;
+      const pr = visibleRect(parent);
+      if (!pr) continue;
+
+      const cls = String(parent.className || "").toLowerCase();
+      const id = String(parent.id || "").toLowerCase();
+      const nearTop = pr.top >= 0 && pr.top < Math.max(190, window.innerHeight * 0.22);
+      const headerish = /header|top|menu|nav|icon|toolbar/.test(cls + " " + id);
+      if (!nearTop && !headerish) continue;
+      if (pr.width < 110 || pr.height < 18 || pr.height > 95) continue;
+
+      const children = Array.from(parent.children || []).filter(isIconLikeNode);
+      const nestedIcons = Array.from(parent.querySelectorAll(":scope > a, :scope > button, :scope > div, :scope > span, :scope > li")).filter(isIconLikeNode);
+      const icons = children.length >= nestedIcons.length ? children : nestedIcons;
+      if (icons.length < 3) continue;
+
+      const textLen = getCleanText(parent).length;
+      if (textLen > 180) continue;
+
+      const last = icons[icons.length - 1];
+      const lr = visibleRect(last);
+      if (!lr) continue;
+
+      const score =
+        icons.length * 30 +
+        (nearTop ? 80 : 0) +
+        (headerish ? 60 : 0) +
+        (pr.right > window.innerWidth * 0.5 ? 35 : 0) -
+        Math.abs(pr.height - 38) -
+        Math.max(0, textLen - 45);
+
+      scored.push({ parent, target: last, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
   }
 
   function findTornResourceRow() {
@@ -1072,7 +1165,16 @@
       return;
     }
 
-    // If Torn's header/resource row is not found, remove the coin instead of floating it elsewhere.
+    const cluster = findCompactHeaderIconCluster();
+    if (cluster && cluster.target && cluster.target.parentElement) {
+      if (coin.parentElement !== cluster.target.parentElement || coin.previousElementSibling !== cluster.target) {
+        cluster.target.insertAdjacentElement("afterend", coin);
+      }
+      setCoinAlert(APP.pendingCount || 0);
+      return;
+    }
+
+    // If Torn's header/icon row is not found, remove the coin instead of floating it on the page.
     if (coin.parentElement) coin.remove();
   }
 
