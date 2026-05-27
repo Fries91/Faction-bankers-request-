@@ -477,60 +477,86 @@ def banker_name_from_config(faction_id, banker_id):
 
 
 def classify_banker_status(data):
+    """
+    Turn Torn's user status payload into banker availability.
+
+    Important: last_action.status can say Online even when a player is
+    hospital/jail/traveling/abroad. So blocked states are checked FIRST,
+    and activity is only used after we know they are actually in Torn.
+    """
     status_obj = data.get("status") if isinstance(data, dict) else {}
     last_action = data.get("last_action") if isinstance(data, dict) else {}
     travel = data.get("travel") if isinstance(data, dict) else {}
 
-    details = ""
     state = "Unknown"
+    details = ""
     torn_color = ""
 
     if isinstance(status_obj, dict):
-        state = str(status_obj.get("state") or "Unknown")
-        details = str(status_obj.get("details") or state)
-        torn_color = str(status_obj.get("color") or "")
+        state = str(status_obj.get("state") or "Unknown").strip()
+        details = str(status_obj.get("details") or state).strip()
+        torn_color = str(status_obj.get("color") or "").strip().lower()
     elif status_obj:
-        details = str(status_obj)
+        details = str(status_obj).strip()
         state = details
 
     last_status = ""
     last_relative = ""
     if isinstance(last_action, dict):
-        last_status = str(last_action.get("status") or "")
-        last_relative = str(last_action.get("relative") or "")
+        last_status = str(last_action.get("status") or "").strip()
+        last_relative = str(last_action.get("relative") or "").strip()
 
-    travel_text = ""
+    travel_parts = []
+    travel_state = ""
+    travel_dest = ""
+    travel_time = ""
     if isinstance(travel, dict) and travel:
-        dest = travel.get("destination") or travel.get("dest") or ""
-        timestamp = travel.get("timestamp") or travel.get("time_left") or ""
-        if dest:
-            travel_text = f"Traveling: {dest}"
-        if timestamp:
-            travel_text = (travel_text + f" • {timestamp}").strip(" •")
+        travel_state = str(travel.get("status") or travel.get("state") or travel.get("phase") or "").strip()
+        travel_dest = str(travel.get("destination") or travel.get("dest") or travel.get("country") or "").strip()
+        travel_time = str(travel.get("timestamp") or travel.get("time_left") or travel.get("timeleft") or travel.get("eta") or "").strip()
+        for part in (travel_state, travel_dest, travel_time):
+            if part:
+                travel_parts.append(part)
 
-    combined = " ".join([state, details, last_status, travel_text]).lower()
+    # Check Torn state/travel first. Do NOT include last_action here because
+    # last_action often says Online while the user is unavailable.
+    blocked_text = " ".join([state, details, torn_color, " ".join(travel_parts)]).lower()
+    activity_text = " ".join([last_status, last_relative]).lower()
 
-    if any(x in combined for x in ["travel", "flying", "returning", "abroad"]):
-        app_status = "traveling"
-        app_color = "yellow" if "return" in combined or "travel" in combined or "flying" in combined else "blue"
-        app_label = "Traveling / Abroad"
-    elif "online" in combined or torn_color == "green":
-        app_status = "online"
-        app_color = "green"
-        app_label = "Online"
-    elif "idle" in combined or torn_color == "orange":
-        app_status = "idle"
-        app_color = "orange"
-        app_label = "Idle"
-    elif "hospital" in combined:
+    def has_any(text, words):
+        return any(w in text for w in words)
+
+    if has_any(blocked_text, ["hospital", "hosp"]):
         app_status = "hospital"
         app_color = "red"
         app_label = "Hospital"
-    elif "jail" in combined:
+    elif has_any(blocked_text, ["jail", "jailed"]):
         app_status = "jail"
         app_color = "red"
         app_label = "Jail"
-    elif "offline" in combined or torn_color == "red":
+    elif has_any(blocked_text, ["abroad", "overseas"]):
+        app_status = "abroad"
+        app_color = "blue"
+        app_label = "Abroad"
+    elif has_any(blocked_text, ["travel", "traveling", "travelling", "flying", "flight", "returning", "departed", "arriving"]):
+        app_status = "traveling"
+        app_color = "yellow"
+        app_label = "Traveling"
+    elif travel_dest and travel_dest.lower() not in {"torn", "home", "", "none", "null"}:
+        # Some Torn responses only expose a destination/time without a plain
+        # "traveling" word. Treat that as unavailable.
+        app_status = "traveling"
+        app_color = "yellow"
+        app_label = "Traveling"
+    elif "idle" in activity_text or "idle" in blocked_text or torn_color == "orange":
+        app_status = "idle"
+        app_color = "orange"
+        app_label = "Idle"
+    elif "online" in activity_text or "online" in blocked_text or torn_color == "green":
+        app_status = "online"
+        app_color = "green"
+        app_label = "Online"
+    elif "offline" in activity_text or "offline" in blocked_text or torn_color == "red":
         app_status = "offline"
         app_color = "red"
         app_label = "Offline"
@@ -539,9 +565,17 @@ def classify_banker_status(data):
         app_color = "gray"
         app_label = "Unknown"
 
-    subtitle = travel_text or details or last_relative or state
-    return app_status, app_color, app_label, subtitle
+    if app_status in {"traveling", "abroad"}:
+        if travel_dest and travel_time:
+            subtitle = f"{app_label}: {travel_dest} • {travel_time}"
+        elif travel_dest:
+            subtitle = f"{app_label}: {travel_dest}"
+        else:
+            subtitle = details or app_label
+    else:
+        subtitle = details or last_relative or state or app_label
 
+    return app_status, app_color, app_label, subtitle
 
 def torn_get_banker_status(key, banker_id, faction_id=""):
     bid = str(banker_id or "").strip()
@@ -943,6 +977,7 @@ def home():
         {
             "ok": True,
             "app": "Faction Bankers",
+            "version": "0.9.5-status-fix",
             "mode": "postgres",
             "note": "Active requests are stored until banker completes or denies them.",
             "endpoints": [
@@ -1164,7 +1199,7 @@ def banker_status():
     items = [x for x in items if not is_hidden_banker_name_or_id(x.get("player_id")) and not is_hidden_banker_name_or_id(x.get("name"))]
 
     # Available bankers first, then traveling/idle/offline.
-    rank = {"online": 0, "idle": 1, "traveling": 2, "hospital": 3, "jail": 4, "offline": 5, "unknown": 6}
+    rank = {"online": 0, "idle": 1, "traveling": 2, "abroad": 3, "hospital": 4, "jail": 5, "offline": 6, "unknown": 7}
     items.sort(key=lambda x: (rank.get(str(x.get("status")), 9), str(x.get("name") or "").lower()))
 
     return jsonify({
