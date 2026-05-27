@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.8
+// @version      0.9.9
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.9.8-open-balance-capture";
+  const FB_BUILD = "0.9.9-balance-sync-manual";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -36,6 +36,8 @@
   const K_PAY_PREFILL = "fb_pay_prefill_v1";
   const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
   const K_BALANCE_CAPTURE = "fb_balance_capture_pending_v1";
+  const K_MANUAL_BALANCE_AMOUNT = "fb_manual_personal_balance_amount_v1";
+  const K_MANUAL_BALANCE_TEXT = "fb_manual_personal_balance_text_v1";
 
   // Dynamic role mode: no hard-coded faction list.
   // The backend uses the logged-in player's own faction and finds bankers by faction role.
@@ -1386,8 +1388,9 @@
         <div class="fb-own-faction">Faction: <b>${esc(APP.me?.faction_name || factionLabelById(selectedFaction) || "Your faction")}</b></div>
         ${balanceLineHtml()}
         <div class="fb-row" style="gap:6px; margin:0;">
-          <button id="fb-built-open-balance" type="button">Open Balance Page</button>
-          <button id="fb-built-refresh-balance" type="button">Refresh Balance</button>
+          <button id="fb-built-open-balance" type="button">Sync Balance</button>
+          <button id="fb-built-refresh-balance" type="button">Refresh</button>
+          <button id="fb-built-manual-balance" type="button">Enter Manually</button>
         </div>
         <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
         <select id="fb-built-banker" aria-label="Choose available banker">
@@ -1418,11 +1421,12 @@
     $("#fb-built-open-balance")?.addEventListener("click", openBalancePageForCapture);
     $("#fb-built-refresh-balance")?.addEventListener("click", async () => {
       if (!detectFactionBalanceFromPage()) {
-        setFactionBalance(null, "", "Tap Open Balance Page first");
+        setFactionBalance(null, "", "Tap Sync Balance or Enter Manually");
       }
       await loadFactionBalance(true);
       mountBuiltInBankerBox();
     });
+    $("#fb-built-manual-balance")?.addEventListener("click", promptManualBalance);
     $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
     $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
 
@@ -1689,7 +1693,7 @@
         setFactionBalance(null, "", "Balance not visible on this page yet");
         mountBuiltInBankerBox();
         const st = status();
-        if (st) st.textContent = "Could not see your balance. Open Faction → Controls → Give Money, then tap Refresh Balance.";
+        if (st) st.textContent = "Could not see your balance. Tap Enter Manually, or open Faction → Controls → Give Money and tap Refresh.";
         clearInterval(timer);
       }
     }, 650);
@@ -1703,6 +1707,51 @@
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
   }
 
+  function parseBalanceInput(raw) {
+    const cleaned = String(raw || "").replace(/[^0-9]/g, "");
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  }
+
+  function setManualBalance(amount) {
+    const n = parseBalanceInput(amount);
+    if (n === null) return false;
+    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(n));
+    GM_setValue(K_MANUAL_BALANCE_TEXT, money(n));
+    APP.balanceAmount = n;
+    APP.balanceText = money(n);
+    APP.balanceSource = "manual";
+    APP.balanceUpdatedAt = Date.now();
+    GM_setValue("fb_last_personal_balance_amount_v2", String(n));
+    GM_setValue("fb_last_personal_balance_text_v2", money(n));
+    return true;
+  }
+
+  function promptManualBalance() {
+    const current = Number.isFinite(Number(APP.balanceAmount)) ? String(APP.balanceAmount) : "";
+    const raw = prompt("Enter your faction bank balance. Example: 25000000", current);
+    if (raw === null) return;
+    if (!setManualBalance(raw)) {
+      alert("Enter numbers only, example: 25000000");
+      return;
+    }
+    mountBuiltInBankerBox();
+    if (APP.open) renderBody(activeTab());
+  }
+
+  function loadManualBalanceCache() {
+    const manual = Number(GM_getValue(K_MANUAL_BALANCE_AMOUNT, ""));
+    const manualText = GM_getValue(K_MANUAL_BALANCE_TEXT, "");
+    if (Number.isFinite(manual) && manual >= 0 && manualText) {
+      APP.balanceAmount = Math.floor(manual);
+      APP.balanceText = manualText;
+      APP.balanceSource = "manual";
+      return true;
+    }
+    return false;
+  }
+
   function setFactionBalance(amount, source = "", fallbackText = "Balance unavailable") {
     if (Number.isFinite(Number(amount)) && Number(amount) >= 0) {
       APP.balanceAmount = Math.floor(Number(amount));
@@ -1713,6 +1762,8 @@
       GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
       return true;
     }
+
+    if (loadManualBalanceCache()) return true;
 
     const cached = Number(GM_getValue("fb_last_personal_balance_amount_v2", ""));
     const cachedText = GM_getValue("fb_last_personal_balance_text_v2", "");
@@ -1792,6 +1843,7 @@
     // Page text is the source of truth for personal faction-bank balance.
     // The API may expose vault/funds/member data, which is not always the user's exact bank balance.
     if (detectFactionBalanceFromPage()) return true;
+    if (loadManualBalanceCache()) return true;
 
     if (!GM_getValue(K_API_KEY, "")) {
       setFactionBalance(null, "", "Save key to check balance");
@@ -1976,6 +2028,11 @@
         <div class="fb-input" style="height:auto;">${esc(APP.me?.faction_name || "Your faction")}</div>
         <input id="fb-target-faction" type="hidden" value="${esc(APP.me?.faction_id || currentTargetFactionId())}">
         <div style="margin-top:8px;">${balanceLineHtml()}</div>
+        <div class="fb-row" style="gap:6px; margin-top:8px;">
+          <button id="fb-open-balance-page" class="fb-btn" type="button">Sync Balance</button>
+          <button id="fb-refresh-balance" class="fb-btn" type="button">Refresh</button>
+          <button id="fb-manual-balance" class="fb-btn blue" type="button">Enter Manually</button>
+        </div>
 
         <label class="fb-label" style="margin-top:10px;">Choose banker now</label>
         <select id="fb-target-banker" class="fb-input fb-banker-select">
@@ -2003,6 +2060,9 @@
 
     $("#fb-submit-request")?.addEventListener("click", submitRequest);
     $("#fb-full-request")?.addEventListener("click", submitFullBalanceRequest);
+    $("#fb-open-balance-page")?.addEventListener("click", openBalancePageForCapture);
+    $("#fb-refresh-balance")?.addEventListener("click", async () => { await loadFactionBalance(true); renderRequestTab(); });
+    $("#fb-manual-balance")?.addEventListener("click", promptManualBalance);
     $("#fb-refresh")?.addEventListener("click", () => refreshAll(true));
   }
 
