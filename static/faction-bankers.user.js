@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.5
+// @version      0.9.6
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.9.5-status-fix";
+  const FB_BUILD = "0.9.6-balance-fix";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -394,6 +394,17 @@
         border-radius: 8px;
         padding: 7px 9px;
         font-size: 12px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      #fb-built-refresh-balance {
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(255,255,255,.07);
+        color: #ddd;
+        border-radius: 8px;
+        padding: 6px 8px;
+        font-size: 11px;
         font-weight: 900;
         cursor: pointer;
       }
@@ -1373,6 +1384,7 @@
       <div class="fb-built-grid">
         <div class="fb-own-faction">Faction: <b>${esc(APP.me?.faction_name || factionLabelById(selectedFaction) || "Your faction")}</b></div>
         ${balanceLineHtml()}
+        <button id="fb-built-refresh-balance" type="button">Refresh Balance</button>
         <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
         <select id="fb-built-banker" aria-label="Choose available banker">
           ${bankerOptions($("#fb-built-banker")?.value || "")}
@@ -1399,6 +1411,13 @@
     }
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
+    $("#fb-built-refresh-balance")?.addEventListener("click", async () => {
+      if (!detectFactionBalanceFromPage()) {
+        setFactionBalance(null, "", "Open Controls → Give Money to read balance");
+      }
+      await loadFactionBalance(true);
+      mountBuiltInBankerBox();
+    });
     $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
     $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
 
@@ -1623,13 +1642,13 @@
       APP.balanceText = money(APP.balanceAmount);
       APP.balanceSource = source || "detected";
       APP.balanceUpdatedAt = Date.now();
-      GM_setValue("fb_last_faction_balance_amount_v1", String(APP.balanceAmount));
-      GM_setValue("fb_last_faction_balance_text_v1", APP.balanceText);
+      GM_setValue("fb_last_personal_balance_amount_v2", String(APP.balanceAmount));
+      GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
       return true;
     }
 
-    const cached = Number(GM_getValue("fb_last_faction_balance_amount_v1", ""));
-    const cachedText = GM_getValue("fb_last_faction_balance_text_v1", "");
+    const cached = Number(GM_getValue("fb_last_personal_balance_amount_v2", ""));
+    const cachedText = GM_getValue("fb_last_personal_balance_text_v2", "");
     if (Number.isFinite(cached) && cached >= 0 && cachedText) {
       APP.balanceAmount = Math.floor(cached);
       APP.balanceText = cachedText;
@@ -1686,7 +1705,9 @@
   }
 
   async function loadFactionBalance(force = false) {
-    detectFactionBalanceFromPage();
+    // Page text is the source of truth for personal faction-bank balance.
+    // The API may expose vault/funds/member data, which is not always the user's exact bank balance.
+    if (detectFactionBalanceFromPage()) return true;
 
     if (!GM_getValue(K_API_KEY, "")) {
       setFactionBalance(null, "", "Save key to check balance");
@@ -1698,7 +1719,8 @@
     try {
       const res = await gmRequest("GET", "/api/banker/balance");
       if (res && res.ok && Number.isFinite(Number(res.balance))) {
-        return setFactionBalance(Number(res.balance), res.source || "api");
+        // API balance is only used when the page exact balance is not visible.
+        return setFactionBalance(Number(res.balance), res.source || "api optional");
       }
       if (res && res.message) APP.balanceText = String(res.message);
     } catch (err) {
