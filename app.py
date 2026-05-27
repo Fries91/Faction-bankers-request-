@@ -1,7 +1,3 @@
-app.py — Faction Bankers v1.0.0 Pushover Diagnostics
-Copy everything in the code box and replace your Render app.py.
-
-Copy all app.py code
 import json
 import os
 import time
