@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      0.9.6
+// @version      0.9.8
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "0.9.6-balance-fix";
+  const FB_BUILD = "0.9.8-open-balance-capture";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -35,6 +35,7 @@
   const K_TARGET_FACTION = "fb_target_faction_v1";
   const K_PAY_PREFILL = "fb_pay_prefill_v1";
   const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
+  const K_BALANCE_CAPTURE = "fb_balance_capture_pending_v1";
 
   // Dynamic role mode: no hard-coded faction list.
   // The backend uses the logged-in player's own faction and finds bankers by faction role.
@@ -1384,7 +1385,10 @@
       <div class="fb-built-grid">
         <div class="fb-own-faction">Faction: <b>${esc(APP.me?.faction_name || factionLabelById(selectedFaction) || "Your faction")}</b></div>
         ${balanceLineHtml()}
-        <button id="fb-built-refresh-balance" type="button">Refresh Balance</button>
+        <div class="fb-row" style="gap:6px; margin:0;">
+          <button id="fb-built-open-balance" type="button">Open Balance Page</button>
+          <button id="fb-built-refresh-balance" type="button">Refresh Balance</button>
+        </div>
         <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
         <select id="fb-built-banker" aria-label="Choose available banker">
           ${bankerOptions($("#fb-built-banker")?.value || "")}
@@ -1411,9 +1415,10 @@
     }
 
     $("#fb-built-open")?.addEventListener("click", openOverlay);
+    $("#fb-built-open-balance")?.addEventListener("click", openBalancePageForCapture);
     $("#fb-built-refresh-balance")?.addEventListener("click", async () => {
       if (!detectFactionBalanceFromPage()) {
-        setFactionBalance(null, "", "Open Controls → Give Money to read balance");
+        setFactionBalance(null, "", "Tap Open Balance Page first");
       }
       await loadFactionBalance(true);
       mountBuiltInBankerBox();
@@ -1628,6 +1633,68 @@
   }
 
 
+
+  function openBalancePageForCapture() {
+    GM_setValue(K_BALANCE_CAPTURE, "1");
+    setFactionBalance(null, "", "Opening balance page...");
+
+    const target = "https://www.torn.com/factions.php?step=your#/tab=controls";
+    if (location.href.startsWith("https://www.torn.com/factions.php") || location.href.startsWith("https://torn.com/factions.php")) {
+      // Try to open the controls/bank area without leaving first. If Torn/PDA does not switch tabs,
+      // the URL below will force the faction page back into the right area.
+      try { clickTextButton(["controls", "bank", "give money", "deposit", "vault"]); } catch {}
+      setTimeout(() => { window.location.href = target; }, 350);
+    } else {
+      window.location.href = target;
+    }
+  }
+
+  function balanceCaptureWanted() {
+    return String(GM_getValue(K_BALANCE_CAPTURE, "")) === "1";
+  }
+
+  function stopBalanceCapture(ok) {
+    if (ok) GM_setValue(K_BALANCE_CAPTURE, "");
+  }
+
+  function tryOpenTornBalanceControls() {
+    // The exact tab names vary between Torn desktop/PDA/iPhone. Click a few safe labels only.
+    try { clickTextButton(["controls", "bank", "give money", "deposit", "vault", "balance"]); } catch {}
+  }
+
+  function startBalanceCaptureLoop() {
+    if (!isOwnFactionPage() || !balanceCaptureWanted()) return;
+
+    let tries = 0;
+    const status = () => document.querySelector("#fb-built-status");
+    const timer = setInterval(() => {
+      tries += 1;
+      tryOpenTornBalanceControls();
+
+      if (detectFactionBalanceFromPage()) {
+        stopBalanceCapture(true);
+        mountBuiltInBankerBox();
+        const st = status();
+        if (st) st.textContent = `Balance found: ${money(APP.balanceAmount || 0)}`;
+        clearInterval(timer);
+        return;
+      }
+
+      if (tries === 1 || tries === 4 || tries === 8) {
+        const st = status();
+        if (st) st.textContent = "Looking for Torn's balance line...";
+      }
+
+      if (tries >= 28) {
+        setFactionBalance(null, "", "Balance not visible on this page yet");
+        mountBuiltInBankerBox();
+        const st = status();
+        if (st) st.textContent = "Could not see your balance. Open Faction → Controls → Give Money, then tap Refresh Balance.";
+        clearInterval(timer);
+      }
+    }, 650);
+  }
+
   function parseMoneyAmount(text) {
     const raw = String(text || "");
     const m = raw.match(/\$\s*([0-9][0-9,]*)/);
@@ -1665,6 +1732,20 @@
   function detectFactionBalanceFromPage() {
     if (!isOwnFactionPage()) return false;
 
+    const allText = String(document.body?.innerText || document.body?.textContent || "").replace(/\s+/g, " ");
+    const exactPatterns = [
+      /[A-Za-z0-9_\-]+(?:\'s|’s)\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
+      /your\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
+      /your\s+(?:faction\s+)?balance\s*(?:is|:)\s*\$\s*([0-9][0-9,]*)/i,
+    ];
+    for (const re of exactPatterns) {
+      const m = allText.match(re);
+      if (m) {
+        const n = Number(String(m[1] || "").replace(/,/g, ""));
+        if (Number.isFinite(n) && n >= 0) return setFactionBalance(n, "Torn balance page");
+      }
+    }
+
     // Be strict: only read the MEMBER'S own faction-bank balance, not faction vault money,
     // points, jackpot, or our own request amount field.
     const roots = Array.from(document.querySelectorAll("div, span, li, td, p, section, label"));
@@ -1684,16 +1765,19 @@
       const lower = text.toLowerCase();
       if (badWords.some((w) => lower.includes(w))) continue;
 
-      // Torn normally labels this as Your balance / Balance / Faction balance near the personal banking row.
+      // Torn normally labels this as: "Fries91's current balance is $0"
+      // or "Your balance is $..." near the Give Money form.
       // We do NOT accept generic dollar amounts anymore because that caused wrong balances.
       let score = 0;
-      if (/\byour\s+(faction\s+)?balance\b/i.test(text)) score += 120;
-      if (/\bmy\s+(faction\s+)?balance\b/i.test(text)) score += 100;
-      if (/\bbalance\s*[:\-]?\s*\$/i.test(text)) score += 70;
+      if (/\bcurrent\s+balance\s+is\s*\$/i.test(text)) score += 160;
+      if (/\b[a-z0-9_\-]+(?:\'s|’s)\s+current\s+balance\s+is\s*\$/i.test(text)) score += 180;
+      if (/\byour\s+(faction\s+)?balance\b/i.test(text)) score += 140;
+      if (/\bmy\s+(faction\s+)?balance\b/i.test(text)) score += 110;
+      if (/\bbalance\s*[:\-]?\s*\$/i.test(text)) score += 80;
       if (/\$[\d,]+\s*\b(balance)\b/i.test(text)) score += 50;
       if (lower.includes("member balance")) score += 90;
       if (lower.includes("bank balance")) score += 35;
-      if (score < 70) continue;
+      if (score < 80) continue;
 
       const amount = parseMoneyAmount(text);
       if (amount === null) continue;
@@ -2986,12 +3070,16 @@
     if (status) status.textContent = sendDetectedAmount ? `Sending full balance request for ${money(detectedFullBalance)}...` : "Sending full balance request...";
 
     try {
-      await gmRequest("POST", "/api/banker/requests", {
+      const res = await gmRequest("POST", "/api/banker/requests", {
         amount: sendDetectedAmount ? detectedFullBalance : 1,
         note: sendDetectedAmount ? `Full balance requested: ${money(detectedFullBalance)}` : FULL_BALANCE_NOTE,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -3040,12 +3128,16 @@
     if (status) status.textContent = "Sending request...";
 
     try {
-      await gmRequest("POST", "/api/banker/requests", {
+      const res = await gmRequest("POST", "/api/banker/requests", {
         amount,
         note,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
       if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -3086,6 +3178,10 @@
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
       const pingMsg = res && res.pushover_sent === false
@@ -3138,6 +3234,40 @@
     else list.unshift(item);
 
     APP.requests = list;
+  }
+
+  function localRequestKey() {
+    return `fb_local_requests_v1_${APP.me?.player_id || "guest"}`;
+  }
+
+  function getLocalRequests() {
+    try {
+      const raw = GM_getValue(localRequestKey(), "[]");
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveLocalRequest(item) {
+    if (!item || !item.id) return;
+    const now = Date.now();
+    const mine = getLocalRequests()
+      .filter((r) => r && String(r.id) !== String(item.id))
+      .filter((r) => !r._local_saved_at || now - Number(r._local_saved_at) < 1000 * 60 * 60 * 24 * 2);
+    mine.unshift({ ...item, _local_saved_at: now, _local_backup: true });
+    GM_setValue(localRequestKey(), JSON.stringify(mine.slice(0, 20)));
+  }
+
+  function mergeLocalRequests(items) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    const ids = new Set(list.map((r) => String(r.id)));
+    for (const r of getLocalRequests()) {
+      if (!r || !r.id) continue;
+      if (!ids.has(String(r.id))) list.unshift(r);
+    }
+    return list;
   }
 
   function getSeenPendingIds() {
@@ -3289,9 +3419,9 @@
 
       const list = await gmRequest("GET", "/api/banker/requests");
       const items = Array.isArray(list.items) ? list.items : [];
-      APP.requests = items;
+      APP.requests = mergeLocalRequests(items);
 
-      const pendingItems = items.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
       setCoinAlert(pendingItems.length);
       notifyBankerForNewPending(pendingItems);
       return true;
@@ -3341,7 +3471,7 @@
       }
 
       const list = await gmRequest("GET", "/api/banker/requests");
-      APP.requests = Array.isArray(list.items) ? list.items : [];
+      APP.requests = mergeLocalRequests(Array.isArray(list.items) ? list.items : []);
 
       await loadBankerStatus(currentTargetFactionId());
 
@@ -3443,6 +3573,7 @@
 
     if (isOwnFactionPage()) {
       mountBuiltInBankerBox();
+      startBalanceCaptureLoop();
 
       // PDA-safe: only load factions/me/banker status for the quick box.
       // Do not call /api/banker/requests here because that uses the database and caused 500s.
@@ -3526,7 +3657,7 @@
 
   // Prefill only on faction banking page and only a few times. This prevents PDA freezing.
   if (isFactionPage()) {
-    setTimeout(() => { handleIncomingBankRequestUrl(); tryPrefillFactionBankForm(); }, 1000);
+    setTimeout(() => { handleIncomingBankRequestUrl(); tryPrefillFactionBankForm(); startBalanceCaptureLoop(); }, 1000);
     setTimeout(tryPrefillFactionBankForm, 2600);
   }
 })();
