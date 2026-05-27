@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.0.4
+// @version      1.0.6
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.0.4-balance-deduct";
+  const FB_BUILD = "1.0.6-leaders-settings-polish";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -401,7 +401,9 @@
         cursor: pointer;
       }
 
-      #fb-built-refresh-balance {
+      #fb-built-open-balance,
+      #fb-built-refresh-balance,
+      #fb-built-manual-balance {
         border: 1px solid rgba(255,255,255,.14);
         background: rgba(255,255,255,.07);
         color: #ddd;
@@ -410,6 +412,19 @@
         font-size: 11px;
         font-weight: 900;
         cursor: pointer;
+      }
+
+
+      #fb-built-open-balance {
+        border-color: rgba(110,170,255,.55);
+        background: rgba(45,105,180,.28);
+        color: #e0efff;
+      }
+
+      #fb-built-manual-balance {
+        border-color: rgba(255,211,106,.48);
+        background: rgba(255,211,106,.16);
+        color: #ffe39a;
       }
 
       #fb-built-full,
@@ -776,6 +791,148 @@
 
       .fb-banker-select {
         margin-top: 8px;
+      }
+
+
+
+      /* v1.0.6 polished vault theme */
+      #fb-overlay,
+      #fb-built-in-box {
+        --fb-gold: #ffd36a;
+        --fb-gold-soft: rgba(255,211,106,.14);
+        --fb-safe: #72ff9f;
+        --fb-blue: #9bd1ff;
+        --fb-red: #ff7d7d;
+        --fb-card: rgba(18,18,18,.86);
+        --fb-card2: rgba(0,0,0,.34);
+      }
+
+      #fb-overlay {
+        background:
+          radial-gradient(circle at 12% 0%, rgba(255,211,106,.22), transparent 30%),
+          radial-gradient(circle at 90% 8%, rgba(65,120,180,.13), transparent 30%),
+          linear-gradient(180deg, #15120b, #090909 62%, #060606) !important;
+        border-color: rgba(255,211,106,.42) !important;
+      }
+
+      #fb-title strong,
+      .fb-request-title {
+        letter-spacing: .2px;
+      }
+
+      .fb-box {
+        background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.025)) !important;
+        border-color: rgba(255,255,255,.13) !important;
+      }
+
+      .fb-hero-card {
+        border: 1px solid rgba(255,211,106,.34) !important;
+        background:
+          radial-gradient(circle at top left, rgba(255,211,106,.16), transparent 42%),
+          linear-gradient(180deg, rgba(22,19,12,.95), rgba(7,7,7,.95)) !important;
+      }
+
+      .fb-flow-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .fb-flow-card {
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 12px;
+        padding: 9px;
+        background: rgba(0,0,0,.22);
+      }
+
+      .fb-flow-card b {
+        display: block;
+        color: var(--fb-gold);
+        font-size: 12px;
+        margin-bottom: 3px;
+      }
+
+      .fb-flow-card span {
+        display: block;
+        color: #bbb;
+        font-size: 11px;
+        line-height: 1.35;
+      }
+
+      .fb-login-status {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 10px;
+        border-radius: 12px;
+        border: 1px solid rgba(114,255,159,.35);
+        background: rgba(30,130,75,.12);
+      }
+
+      .fb-login-status.off {
+        border-color: rgba(255,125,125,.35);
+        background: rgba(140,30,30,.12);
+      }
+
+      .fb-status-dot {
+        display: inline-flex;
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        margin-right: 6px;
+        background: #999;
+        box-shadow: 0 0 6px currentColor;
+      }
+
+      .fb-status-dot.ok { background: #46e67d; color: #46e67d; }
+      .fb-status-dot.warn { background: #ffd36a; color: #ffd36a; }
+      .fb-status-dot.bad { background: #ff5757; color: #ff5757; }
+
+      .fb-legal-list {
+        margin: 8px 0 0 0;
+        padding-left: 18px;
+        color: #cfcfcf;
+        font-size: 11px;
+        line-height: 1.38;
+      }
+
+      .fb-legal-list li { margin: 4px 0; }
+
+      .fb-mini-note {
+        color: #aaa;
+        font-size: 10px;
+        line-height: 1.35;
+        margin-top: 6px;
+      }
+
+      .fb-leader-current {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+
+      .fb-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+      }
+
+      .fb-chip {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,.15);
+        background: rgba(255,255,255,.06);
+        color: #ddd;
+        padding: 5px 8px;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      @media (max-width: 520px) {
+        .fb-flow-grid { grid-template-columns: 1fr; }
       }
 
       @media (max-width: 520px) {
@@ -1928,16 +2085,21 @@
       // Keep the last good list so the request box does not flicker/disappear on PDA.
       APP.bankerFactionId = fid;
       APP.bankerStatusError = String(err?.message || err || "Banker status failed");
-      if (!APP.bankers.length) {
-        APP.bankers = [{
-          player_id: "3679030",
-          name: "Fries91",
+      if (!APP.bankers.length && Array.isArray(APP.manualBankers) && APP.manualBankers.length) {
+        APP.bankers = APP.manualBankers.map((b) => ({
+          player_id: String(b.banker_id || b.id || ""),
+          name: String(b.banker_name || b.name || b.banker_id || b.id || "Banker"),
           status: "unknown",
           color: "gray",
           label: "Status unavailable",
           details: APP.bankerStatusError,
           is_available: false,
-        }];
+          has_pushover: !!b.has_pushover,
+          source: "leaders",
+        })).filter((b) => b.player_id && !isHiddenBanker(b));
+      }
+      if (!APP.bankers.length) {
+        APP.bankers = [];
       }
       return false;
     }
@@ -1977,11 +2139,11 @@
       if (onlineCount) bits.push(`${onlineCount} online`);
       if (travelingCount) bits.push(`${travelingCount} traveling`);
       if (offlineCount) bits.push(`${offlineCount} offline`);
-      anyLabel = `Any available banker — ${bits.join(", ") || bankers.length + " listed"}`;
+      anyLabel = `Any banker — ${bits.join(", ") || bankers.length + " listed"}`;
     } else if (APP.bankerStatusError) {
-      anyLabel = "Any available banker — status unavailable";
+      anyLabel = "Any banker — status unavailable";
     } else {
-      anyLabel = "Any available banker — loading status";
+      anyLabel = "Any banker — loading";
     }
 
     const options = [`<option value="">${esc(anyLabel)}</option>`];
@@ -3012,13 +3174,17 @@
 
     if (!canManage) {
       setBody(`
-        <div class="fb-box">
+        <div class="fb-box fb-hero-card">
           <div class="fb-request-title">Leaders</div>
           <div class="fb-error" style="margin-top:6px;">Leader/banker access is required to manage bankers.</div>
+          <div class="fb-small" style="margin-top:8px;">This tab is for the leader team of your own faction only.</div>
         </div>
       `);
       return;
     }
+
+    const factionName = APP.me?.faction_name || "Your faction";
+    const yourRole = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "Role not detected");
 
     const rows = (APP.manualBankers || []).map((b) => `
       <div class="fb-box">
@@ -3030,14 +3196,14 @@
           <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove</button>
         </div>
       </div>
-    `).join("") || `<div class="fb-box"><div class="fb-muted">No manually added bankers yet. Add specific banker IDs below if role detection misses someone.</div></div>`;
+    `).join("") || `<div class="fb-box"><div class="fb-muted">No specific banker overrides yet. Add one only if role detection misses someone.</div></div>`;
 
     const roleRows = (APP.leaderRoleNames || []).map((role) => `
       <div class="fb-box">
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">${esc(role)}</div>
-            <div class="fb-small">Members with this faction role are treated as bankers.</div>
+            <div class="fb-small">Anyone in ${esc(factionName)} with this role shows as a banker.</div>
           </div>
           <button class="fb-btn red" data-leader-role-remove="${esc(role)}" type="button">Remove</button>
         </div>
@@ -3048,46 +3214,49 @@
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
       ${APP.leaderLoadError ? `<div class="fb-box"><div class="fb-error">${esc(APP.leaderLoadError)}</div></div>` : ""}
 
-      <div class="fb-box">
-        <div class="fb-request-title">Leaders</div>
-        <div class="fb-small" style="margin-top:5px;">
-          Add the faction role names that should count as bankers. Example: Banker, Treasurer, Finance, Vault Keeper, or your own custom role.
-          Anyone in your faction with a saved role will show in the request dropdown with online/travel/offline status.
+      <div class="fb-box fb-hero-card">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">👑 Leaders • ${esc(factionName)}</div>
+            <div class="fb-small">This setup only affects your own faction. Other factions get their own Leaders tab and their own roles.</div>
+          </div>
+          <span class="fb-pill approved">${esc(yourRole)}</span>
+        </div>
+        <div class="fb-flow-grid" style="margin-top:10px;">
+          <div class="fb-flow-card"><b>1. Add roles</b><span>Type the exact Torn faction role that means “can bank” for your faction.</span></div>
+          <div class="fb-flow-card"><b>2. Optional pings</b><span>Add specific banker IDs with Pushover keys for direct phone alerts.</span></div>
         </div>
       </div>
 
       <div class="fb-box">
         <div class="fb-request-title">Banker role names</div>
+        <div class="fb-small" style="margin-top:5px;">Examples: Banker, Treasurer, Finance, Vault Keeper, Money Manager, Co-Leader.</div>
         <label class="fb-label" style="margin-top:10px;">Faction role name</label>
         <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Treasurer">
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
+          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
         </div>
       </div>
       ${roleRows}
 
       <div class="fb-box">
         <div class="fb-request-title">Specific banker override</div>
-        <div class="fb-small" style="margin-top:5px;">
-          Use this only if a banker does not show by role. Optional Pushover key lets that banker get phone pings directly.
-        </div>
+        <div class="fb-small" style="margin-top:5px;">Use this only if a banker does not show by role. Optional Pushover key lets that banker get phone pings directly.</div>
         <label class="fb-label" style="margin-top:10px;">Banker Torn ID</label>
         <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030">
-
         <label class="fb-label" style="margin-top:10px;">Banker name</label>
         <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91">
-
         <label class="fb-label" style="margin-top:10px;">Pushover User Key optional</label>
         <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their Pushover User Key for phone pings">
-
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-add" class="fb-btn gold" type="button">Add Banker</button>
-          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
         </div>
       </div>
 
       <div class="fb-box">
         <div class="fb-request-title">Specific banker overrides</div>
+        <div class="fb-mini-note">These are manual banker entries for ${esc(factionName)} only.</div>
       </div>
       ${rows}
     `);
@@ -3108,48 +3277,70 @@
 
   function renderSettings(msg = "") {
     const key = GM_getValue(K_API_KEY, "");
+    const loggedIn = !!APP.me;
+    const roleText = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "role not detected");
 
     setBody(`
-      ${msg ? `<div class="fb-box"><div class="fb-error">${esc(msg)}</div></div>` : ""}
+      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
 
-      <div class="fb-box">
-        <div class="fb-request-title">Settings</div>
-        <div class="fb-small" style="margin-top:4px;">
-          Save your Torn API key so the banker app can verify your faction/account. After saving, tap Test Login.
+      <div class="fb-box fb-hero-card">
+        <div class="fb-request-title">⚙️ Settings & Login</div>
+        <div class="fb-small" style="margin-top:5px;">Login once with a limited Torn API key so Factional Banking can verify who you are and which faction you belong to.</div>
+        <div class="fb-login-status ${loggedIn ? "" : "off"}" style="margin-top:10px;">
+          <div>
+            <b><span class="fb-status-dot ${loggedIn ? "ok" : "bad"}"></span>${loggedIn ? `Logged in as ${esc(APP.me.name || "Torn user")}` : "Not logged in yet"}</b>
+            <div class="fb-small">${loggedIn ? `${esc(APP.me.faction_name || "Faction")} • ${esc(roleText)}` : "Save your key at the bottom, then tap Test Login."}</div>
+          </div>
+          <span class="fb-pill ${loggedIn ? "approved" : "denied"}">${loggedIn ? "Verified" : "Login needed"}</span>
         </div>
       </div>
 
       <div class="fb-box">
-        <label class="fb-label">Torn API key</label>
-        <input id="fb-api-key" class="fb-input" value="${esc(key)}" placeholder="Paste Torn API key">
+        <div class="fb-request-title">How this app uses your Torn API key</div>
+        <ul class="fb-legal-list">
+          <li>Used to verify your Torn name, ID, faction, and role for request access.</li>
+          <li>Used to show banker availability/status and your faction banking tools.</li>
+          <li>Stored only in your userscript/PDA storage on your device, not displayed to other players.</li>
+          <li>The backend receives the key only on API calls needed to verify account/faction data.</li>
+          <li>The app does not ask for your Torn password and does not auto-click Give Money.</li>
+        </ul>
+      </div>
 
+      <div class="fb-box">
+        <div class="fb-request-title">Why a limited API key?</div>
+        <div class="fb-small" style="margin-top:6px; line-height:1.4;">
+          A limited key is enough for this banking helper because it only needs identity/faction verification and safe read-only checks. Using the smallest useful key is the safer way to follow Torn-friendly API use.
+        </div>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">Torn-friendly rules</div>
+        <ul class="fb-legal-list">
+          <li>Requests are a queue/notification helper only.</li>
+          <li>Bankers still manually review and press Torn’s Give Money button themselves.</li>
+          <li>Pushover phone pings are only notifications, not automated payments.</li>
+          <li>Faction leaders manage their own banker roles in the Leaders tab.</li>
+        </ul>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">Login</div>
+        <label class="fb-label" style="margin-top:10px;">Torn limited API key</label>
+        <input id="fb-api-key" class="fb-input" value="${esc(key)}" placeholder="Paste Torn limited API key">
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-save-key" class="fb-btn gold" type="button">Save Key</button>
           <button id="fb-test-login" class="fb-btn" type="button">Test Login</button>
           <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable In-App Ping</button>
         </div>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">Phone Pushover Ping</div>
-        <div class="fb-small" style="margin-top:6px;">
-          Your phone ping is sent by Render when a request is created. Add these Render env vars: PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN. Test with /api/test-pushover.
-        </div>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-small">
-          Backend URL:
-          <br>
-          <span style="color:#ffd36a;">${esc(BANKER_API_BASE)}</span>
-        </div>
+        <div class="fb-mini-note">Backend: <span style="color:#ffd36a;">${esc(BANKER_API_BASE)}</span></div>
       </div>
     `);
 
     $("#fb-save-key")?.addEventListener("click", () => {
       const keyInput = $("#fb-api-key")?.value?.trim() || "";
       GM_setValue(K_API_KEY, keyInput);
-      renderSettings("Saved. Tap Test Login.");
+      APP.me = null;
+      renderSettings("Saved. Tap Test Login to verify your faction login.");
     });
 
     $("#fb-test-login")?.addEventListener("click", () => refreshAll(true));
