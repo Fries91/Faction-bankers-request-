@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.2.2-role-pushover-notify"
+APP_VERSION = "1.2.4-complete-ping-fix"
 
 
 @app.errorhandler(Exception)
@@ -1097,39 +1097,49 @@ def send_pushover_alert(title, message, url=None):
     return sent
 
 
+def is_wrath_like_request(item):
+    """True for Fries91/Wrath requests that should hit the global Fries phone key.
+
+    This is intentionally narrow: faction id 49384, or a faction name containing
+    Wrath / 7DS. Other factions still only use their own Leaders-tab Pushover keys.
+    """
+    fid = str((item or {}).get("faction_id") or "").strip()
+    fname = str((item or {}).get("faction_name") or "").strip().lower()
+    ids = {"49384"} | {str(x).strip() for x in fries91_notify_faction_ids() if str(x).strip() and str(x).strip() != "*"}
+    return fid in ids or "wrath" in fname or "7ds" in fname
+
+
 def notification_target_keys_for_request(item):
     """Return a de-duplicated list of Pushover keys for this request.
 
     Priority:
     1. Pushover keys saved in this faction's Leaders tab.
-    2. Render/global Fries91 keys only for FRIES91_NOTIFY_FACTION_IDS / names.
+    2. Pushover keys saved to banker roles selected by the leader.
+    3. Fries91/global Render keys only for Wrath / configured Fries91 factions.
 
-    This keeps other factions private and prevents Fries91 from being pinged for
-    every outside faction unless the Render env explicitly allows it.
+    This keeps other factions private, while making Wrath reliably ping Fries91.
     """
     keys = []
     seen = set()
 
+    def add_key(k):
+        k = clean_pushover_key(k)
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+
     for k in manual_pushover_keys_for_request(item):
-        k = clean_pushover_key(k)
-        if k and k not in seen:
-            seen.add(k)
-            keys.append(k)
+        add_key(k)
 
-    # v1.2.2: also notify role-level Pushover keys saved by the faction leader.
-    # This makes the selected banker roles notify directly without selecting one banker.
     for k in role_pushover_keys_for_faction((item or {}).get("faction_id")):
-        k = clean_pushover_key(k)
-        if k and k not in seen:
-            seen.add(k)
-            keys.append(k)
+        add_key(k)
 
-    if should_ping_global_pushover_for_item(item):
+    # v1.2.4: make Wrath phone pings reliable.  If this is Wrath/49384,
+    # include the Render global Fries91 key even when a role/manual key lookup
+    # returns empty. Do not do this for outside factions unless explicitly allowed.
+    if should_ping_global_pushover_for_item(item) or is_wrath_like_request(item):
         for k in configured_pushover_keys():
-            k = clean_pushover_key(k)
-            if k and k not in seen:
-                seen.add(k)
-                keys.append(k)
+            add_key(k)
 
     return keys
 
@@ -1195,7 +1205,8 @@ def send_bank_request_ping_debug(item):
         "target_keys_masked": [mask_key(k) for k in target_keys],
         "manual_key_count": len(manual_pushover_keys_for_request(item)),
         "role_key_count": len(role_pushover_keys_for_faction((item or {}).get("faction_id"))),
-        "global_allowed": should_ping_global_pushover_for_item(item),
+        "global_allowed": should_ping_global_pushover_for_item(item) or is_wrath_like_request(item),
+        "wrath_like": is_wrath_like_request(item),
         "global_key_count": len(configured_pushover_keys()),
         "results": results,
         "sent": any(bool(r.get("ok")) for r in results),
@@ -1385,7 +1396,7 @@ def home():
         {
             "ok": True,
             "app": "Faction Bankers",
-            "version": "1.0.7-request-list-coin-fix",
+            "version": "1.2.4-complete-ping-fix",
             "mode": "postgres",
             "note": "Active requests stay visible until completed; recently completed requests show who completed them to prevent double-pay.",
             "endpoints": [
@@ -2162,6 +2173,68 @@ def create_request():
         }
     )
 
+
+
+@app.post("/api/banker/requests/<int:req_id>/cancel")
+def cancel_own_request(req_id):
+    """Requester removes their own pending request.
+
+    This lets the My Requests tab remove a request before a banker pays it.
+    It is intentionally limited to the original requester (or admin) and only
+    clears active/pending requests from the board.
+    """
+    db_ok, db_msg = db_ready()
+
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    data = request.get_json(silent=True) or {}
+    bank_note = str(data.get("note") or "Canceled by requester").strip()[:500]
+
+    if not db_ok:
+        existing = None
+        for item in MEMORY_REQUESTS:
+            if int(item.get("id", 0) or 0) == int(req_id):
+                existing = item
+                break
+        if not existing:
+            return jsonify({"ok": True, "removed_from_active": True, "already_cleared": True, "mode": "memory", "warning": db_msg})
+        if str(existing.get("requester_id")) != str(user.get("player_id")) and not user.get("is_admin"):
+            return jsonify({"ok": False, "error": "Only the requester can remove this request"}), 403
+        existing["status"] = "canceled"
+        existing["is_active"] = False
+        existing["bank_note"] = bank_note
+        existing["handled_by_id"] = user.get("player_id")
+        existing["handled_by_name"] = user.get("name")
+        existing["handled_at"] = now_iso()
+        return jsonify({"ok": True, "item": existing, "removed_from_active": True, "mode": "memory", "warning": db_msg})
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM banker_requests WHERE id = %s", (req_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"ok": True, "removed_from_active": True, "already_cleared": True})
+            item = row_to_item(row)
+            if str(item.get("requester_id")) != str(user.get("player_id")) and not user.get("is_admin"):
+                return jsonify({"ok": False, "error": "Only the requester can remove this request"}), 403
+            if not item.get("is_active", True) or str(item.get("status") or "").lower() != "pending":
+                return jsonify({"ok": True, "item": item, "removed_from_active": True, "already_cleared": True})
+            cur.execute(
+                """
+                UPDATE banker_requests
+                SET status = 'canceled', is_active = FALSE, bank_note = %s,
+                    handled_by_id = %s, handled_by_name = %s, handled_at = %s
+                WHERE id = %s
+                RETURNING *
+                """,
+                (bank_note, user.get("player_id"), user.get("name"), now_iso(), req_id),
+            )
+            updated = cur.fetchone()
+        conn.commit()
+
+    return jsonify({"ok": True, "item": row_to_item(updated), "removed_from_active": True})
 
 @app.post("/api/banker/requests/<int:req_id>/<action>")
 def banker_action(req_id, action):
