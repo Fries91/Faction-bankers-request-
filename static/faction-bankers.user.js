@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.8
+// @version      1.1.9
 // @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -4339,8 +4339,180 @@
     }, 30000);
   }
 
+
+
+  // v1.1.9: faction chat command banking.
+  // Handles both PC Enter and PDA/mobile send-button taps.
+  function fbParseBankerAmountToken(token) {
+    const raw = String(token || "").trim().toLowerCase().replace(/[$,]/g, "");
+    if (!raw) return 0;
+    const m = raw.match(/^(\d+(?:\.\d+)?)(k|m|b|mil|mill|million|bil|billion)?$/i);
+    if (!m) return 0;
+    let n = Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const suffix = String(m[2] || "").toLowerCase();
+    if (suffix === "k") n *= 1000;
+    if (["m", "mil", "mill", "million"].includes(suffix)) n *= 1000000;
+    if (["b", "bil", "billion"].includes(suffix)) n *= 1000000000;
+    return Math.floor(n);
+  }
+
+  function fbGetEditableText(el) {
+    if (!el) return "";
+    if (el.isContentEditable) return String(el.innerText || el.textContent || "").trim();
+    return String(el.value || "").trim();
+  }
+
+  function fbSetEditableText(el, value) {
+    if (!el) return;
+    if (el.isContentEditable) {
+      el.textContent = value;
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+    } else {
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
+  function fbLikelyChatInput(el) {
+    if (!el) return false;
+    const tag = String(el.tagName || "").toLowerCase();
+    const type = String(el.getAttribute("type") || "").toLowerCase();
+    const cls = String(el.className || "").toLowerCase();
+    const ph = String(el.getAttribute("placeholder") || "").toLowerCase();
+    const aria = String(el.getAttribute("aria-label") || "").toLowerCase();
+    const role = String(el.getAttribute("role") || "").toLowerCase();
+    const editable = !!el.isContentEditable || tag === "textarea" || (tag === "input" && ["", "text", "search"].includes(type));
+    if (!editable) return false;
+    const text = fbGetEditableText(el);
+    if (String(text || "").trim().toLowerCase().startsWith("/banker")) return true;
+    const hint = `${cls} ${ph} ${aria} ${role}`;
+    return hint.includes("chat") || hint.includes("message") || hint.includes("send") || location.href.includes("/messages.php") || !!document.querySelector('[class*="chat" i], [id*="chat" i]');
+  }
+
+  function fbFindBankerCommandInput() {
+    const active = document.activeElement;
+    if (active && fbLikelyChatInput(active) && fbGetEditableText(active).trim().toLowerCase().startsWith("/banker")) return active;
+    const inputs = Array.from(document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]'));
+    return inputs.find((el) => fbLikelyChatInput(el) && fbGetEditableText(el).trim().toLowerCase().startsWith("/banker")) || null;
+  }
+
+  async function fbSendBankerChatCommand(commandText) {
+    const text = String(commandText || "").trim();
+    const parts = text.split(/\s+/).filter(Boolean);
+    const cmd = String(parts.shift() || "").toLowerCase();
+    if (cmd !== "/banker") return false;
+
+    if (!GM_getValue(K_API_KEY, "")) {
+      showPayNotice("Save your limited Torn API key in Factional Banking settings first.");
+      openOverlay("settings");
+      return true;
+    }
+
+    const amountToken = String(parts.shift() || "").trim();
+    const note = parts.join(" ").trim();
+    let amount = 0;
+    let fullRequest = false;
+
+    if (["full", "balance", "all", "max"].includes(amountToken.toLowerCase())) {
+      fullRequest = true;
+      await loadFactionBalance(true);
+      const detected = Number(APP.balanceAmount || 0);
+      amount = Number.isFinite(detected) && detected > 0 ? Math.floor(detected) : 1;
+    } else {
+      amount = fbParseBankerAmountToken(amountToken);
+    }
+
+    if (!amount || amount < 1) {
+      showPayNotice("Use /banker 25m, /banker 25000000, or /banker full");
+      return true;
+    }
+
+    try {
+      if (!APP.me) APP.me = await gmRequest("GET", "/api/banker/me");
+      const targetFactionId = String(APP.me?.faction_id || selectedFactionFromPage() || "").trim();
+      if (!targetFactionId) {
+        showPayNotice("Could not detect your faction. Open Factional Banking settings and test login.");
+        return true;
+      }
+
+      showPayNotice(fullRequest ? "Sending full balance bank request..." : `Sending bank request for ${money(amount)}...`);
+      const requestNote = fullRequest
+        ? (amount > 1 ? `Full balance requested from chat command: ${money(amount)}${note ? ` • ${note}` : ""}` : FULL_BALANCE_NOTE)
+        : (note ? `Chat command: ${note}` : "Chat command request");
+
+      const res = await gmRequest("POST", "/api/banker/requests", {
+        amount,
+        note: requestNote,
+        target_faction_id: targetFactionId,
+        target_banker_id: "",
+      });
+
+      if (res && res.item) {
+        upsertRequestItem(res.item);
+        saveLocalRequest(res.item);
+      }
+      if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
+      await refreshHeaderCoinBadge(true);
+      showPayNotice(fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`);
+      return true;
+    } catch (err) {
+      showPayNotice(`Bank request failed: ${String(err.message || err).slice(0, 90)}`);
+      return true;
+    }
+  }
+
+  function fbInterceptBankerCommandInput(el, ev) {
+    if (!el || !fbLikelyChatInput(el)) return false;
+    const text = fbGetEditableText(el);
+    if (!String(text || "").trim().toLowerCase().startsWith("/banker")) return false;
+
+    if (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+    }
+
+    fbSetEditableText(el, "");
+    try { el.blur?.(); } catch (_) {}
+    fbSendBankerChatCommand(text);
+    return true;
+  }
+
+  function installChatBankerCommand() {
+    if (installChatBankerCommand._installed) return;
+    installChatBankerCommand._installed = true;
+
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+      fbInterceptBankerCommandInput(ev.target, ev);
+    }, true);
+
+    const pointerHandler = (ev) => {
+      const t = ev.target;
+      if (t && t.closest && t.closest('#fb-board, #fb-built-in-box, #fb-header-coin, #fb-pay-prefill-notice')) return;
+      const el = fbFindBankerCommandInput();
+      if (!el) return;
+      const targetText = `${String(t?.textContent || "").toLowerCase()} ${String(t?.className || "").toLowerCase()} ${String(t?.id || "").toLowerCase()} ${String(t?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(t?.getAttribute?.("title") || "").toLowerCase()}`;
+      const looksLikeSend = targetText.includes("send") || targetText.includes("submit") || targetText.includes("message") || (t && t.closest && t.closest('button, [role="button"], input[type="submit"], a'));
+      if (!looksLikeSend && ev.type !== "click") return;
+      fbInterceptBankerCommandInput(el, ev);
+    };
+
+    document.addEventListener("pointerdown", pointerHandler, true);
+    document.addEventListener("touchstart", pointerHandler, true);
+    document.addEventListener("click", pointerHandler, true);
+
+    document.addEventListener("submit", (ev) => {
+      const el = fbFindBankerCommandInput();
+      if (el) fbInterceptBankerCommandInput(el, ev);
+    }, true);
+  }
+
   function startWhenReady() {
     if (!isTornPage()) return;
+    installChatBankerCommand();
     boot();
   }
 
