@@ -1396,7 +1396,7 @@ def home():
         {
             "ok": True,
             "app": "Faction Bankers",
-            "version": "1.2.4-complete-ping-fix",
+            "version": "1.2.6-chat-command-route",
             "mode": "postgres",
             "note": "Active requests stay visible until completed; recently completed requests show who completed them to prevent double-pay.",
             "endpoints": [
@@ -2500,6 +2500,136 @@ def debug_notification_targets():
         "global_allowed_for_this_faction": should_ping_global_pushover_for_item(fake),
         "global_key_count": len(configured_pushover_keys()),
         "fries91_notify_faction_ids": sorted(fries91_notify_faction_ids()),
+    })
+
+
+# v1.2.6: dedicated chat-command request route.
+# This avoids PDA/Torn chat interception edge cases where the userscript parsed/sent the
+# command but the normal request route did not create a visible request.
+def parse_chat_banker_amount_token(token):
+    raw = str(token or "").strip().lower().replace("$", "").replace(",", "")
+    if not raw:
+        return 0
+    import re
+    m = re.match(r"^(\d+(?:\.\d+)?)(k|m|b|mil|mill|million|bil|billion)?$", raw)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    suffix = (m.group(2) or "").lower()
+    if suffix == "k":
+        n *= 1000
+    elif suffix in {"m", "mil", "mill", "million"}:
+        n *= 1000000
+    elif suffix in {"b", "bil", "billion"}:
+        n *= 1000000000
+    try:
+        return int(n)
+    except Exception:
+        return 0
+
+
+@app.post("/api/banker/chat-command")
+def create_request_from_chat_command():
+    """Create a bank request from a user's own /banker chat command.
+
+    This route intentionally ignores any target faction/banker supplied by the client.
+    The request always belongs to the logged-in user's faction, then the backend sends
+    notifications to that faction's configured manual banker keys, role keys, and the
+    allowed Fries91/Wrath global key rules.
+    """
+    db_ok, db_msg = db_ready()
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    data = request.get_json(silent=True) or {}
+    command_text = str(data.get("command_text") or data.get("command") or "").strip()
+    amount = data.get("amount", 0)
+    note = str(data.get("note") or "").strip()
+
+    if command_text.lower().startswith("/banker"):
+        parts = command_text.split()
+        if len(parts) >= 2:
+            token = parts[1]
+            extra_note = " ".join(parts[2:]).strip()
+            if token.lower() in {"full", "balance", "all", "max"}:
+                amount = int(data.get("amount") or 1)
+                note = note or "Full balance requested from /banker chat command"
+                if extra_note:
+                    note = (note + " • " + extra_note).strip()
+            else:
+                parsed = parse_chat_banker_amount_token(token)
+                if parsed > 0:
+                    amount = parsed
+                    note = note or (f"Chat command: {extra_note}" if extra_note else "Chat command request")
+
+    try:
+        amount = int(str(amount).replace(",", "").replace("$", "").strip())
+    except Exception:
+        amount = 0
+
+    if amount <= 0:
+        return jsonify({"ok": False, "error": "Use /banker 25m, /banker 25000000, or /banker full"}), 400
+
+    if len(note) > 500:
+        note = note[:500]
+
+    target_faction_id = str(user.get("faction_id") or "").strip()
+    target_faction_name = str(user.get("faction_name") or target_faction_id or "Faction").strip()
+    if not target_faction_id:
+        return jsonify({"ok": False, "error": "Could not detect your faction. Save API key and Test Login again."}), 400
+
+    created_at = now_iso()
+    created_ts = time.time()
+
+    if not db_ok:
+        item = memory_insert_request(user, amount, note, target_faction_id, target_faction_name, "", "")
+        notify_debug = send_bank_request_ping_debug(item)
+        return jsonify({
+            "ok": True,
+            "item": item,
+            "pushover_sent": bool(notify_debug.get("sent")),
+            "notify_debug": notify_debug,
+            "mode": "memory",
+            "warning": db_msg,
+        })
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO banker_requests (
+                    status, amount, note, requester_id, requester_name, faction_id, faction_name,
+                    selected_banker_id, selected_banker_name, created_at, created_ts, is_active
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                RETURNING *
+                """,
+                (
+                    "pending",
+                    amount,
+                    note,
+                    user.get("player_id"),
+                    user.get("name"),
+                    target_faction_id,
+                    target_faction_name,
+                    "",
+                    "",
+                    created_at,
+                    created_ts,
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    item = row_to_item(row)
+    notify_debug = send_bank_request_ping_debug(item)
+    return jsonify({
+        "ok": True,
+        "item": item,
+        "pushover_sent": bool(notify_debug.get("sent")),
+        "notify_debug": notify_debug,
+        "mode": "postgres",
     })
 
 
