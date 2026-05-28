@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.2.2
+// @version      1.2.4
 // @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -2590,6 +2590,46 @@
     `);
 
     $("#fb-refresh-my")?.addEventListener("click", () => refreshAll(true));
+
+    $$("[data-fb-cancel]").forEach((btn) => {
+      btn.addEventListener("click", () => cancelMyRequest(btn.dataset.id));
+    });
+  }
+
+
+  async function cancelMyRequest(id) {
+    if (APP.busy || !id) return;
+    const item = (APP.requests || []).find((r) => String(r.id) === String(id));
+    if (!item) return;
+
+    const ok = confirm("Remove this bank request? Bankers will no longer see it as pending.");
+    if (!ok) return;
+
+    APP.busy = true;
+    try {
+      await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/cancel`, { note: "Canceled by requester" });
+      rememberClosedRequest(id);
+      clearLocalRequest(id);
+      APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+      await refreshHeaderCoinBadge(true);
+      renderMyTab();
+      const body = $("#fb-body");
+      if (body) body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} removed.</div></div>`);
+    } catch (err) {
+      const msg = String(err?.message || err || "");
+      if (/not found|already|404/i.test(msg)) {
+        rememberClosedRequest(id);
+        clearLocalRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        renderMyTab();
+        return;
+      }
+      renderMyTab();
+      const body = $("#fb-body");
+      if (body) body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-error">Could not remove request: ${esc(msg.slice(0, 120))}</div></div>`);
+    } finally {
+      APP.busy = false;
+    }
   }
 
   function renderBankerTab() {
@@ -3345,6 +3385,15 @@
       : `<div class="fb-small">Notify: all faction bankers</div>`;
 
     let actions = "";
+    const isMine = String(r.requester_id || "") === String(APP.me?.player_id || "");
+
+    if (isMine && status === "pending") {
+      actions += `
+        <div class="fb-row" style="margin-top:10px;">
+          <button class="fb-btn danger" data-id="${id}" data-fb-cancel="1" type="button">Remove Request</button>
+        </div>
+      `;
+    }
 
     if (isBanker && status === "pending") {
       actions = `
@@ -3838,19 +3887,29 @@
         note,
       });
 
-      // Do not wait for the next refresh to visually clear it. Torn/PDA can miss a refresh
-      // or merge a local backup, so we close it locally immediately too.
-      rememberClosedRequest(id);
-      APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+      const isCompleteAction = ["paid", "complete", "mark_paid", "mark_complete"].includes(String(action || "").toLowerCase());
+      const label = isCompleteAction ? "completed" : action === "deny" ? "denied" : "approved";
 
-      const label = action === "deny" ? "denied" : action === "approve" ? "approved" : "completed";
+      // Important: completed requests should NOT be hidden locally. Bankers need
+      // to see who completed it so nobody double-pays. Deny/cancel can still hide.
+      if (isCompleteAction) {
+        forgetClosedRequest(id);
+        clearLocalRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        if (res && res.item) APP.requests.unshift(res.item);
+      } else {
+        rememberClosedRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+      }
+
       await refreshAll(true);
 
       if (activeTab() === "banker") {
         renderBankerTab();
         const body = $("#fb-body");
         if (body) {
-          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)} and cleared from the active board.</div></div>`);
+          const who = res?.item?.handled_by_name ? ` by ${esc(res.item.handled_by_name)}` : "";
+          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)}${who}. Other bankers can see this in Recently Completed.</div></div>`);
         }
       } else {
         renderBody(activeTab());
@@ -3969,6 +4028,15 @@
     clearLocalRequest(id);
   }
 
+  function forgetClosedRequest(id) {
+    if (!id) return;
+    const sid = String(id);
+    const nextLocal = readClosedIdsFromKey(closedRequestKey()).filter((x) => String(x) !== sid);
+    const nextGlobal = readClosedIdsFromKey(closedRequestGlobalKey()).filter((x) => String(x) !== sid);
+    GM_setValue(closedRequestKey(), JSON.stringify(nextLocal.slice(0, 120)));
+    GM_setValue(closedRequestGlobalKey(), JSON.stringify(nextGlobal.slice(0, 120)));
+  }
+
   function clearLocalRequest(id) {
     if (!id) return;
     const keep = getLocalRequests().filter((r) => String(r?.id) !== String(id));
@@ -3977,7 +4045,11 @@
 
   function mergeLocalRequests(items) {
     const closed = new Set(getClosedRequestIds());
-    const list = (Array.isArray(items) ? items.slice() : []).filter((r) => !closed.has(String(r?.id)));
+    const list = (Array.isArray(items) ? items.slice() : []).filter((r) => {
+      const status = String(r?.status || "pending").toLowerCase();
+      if (status === "complete") return true;
+      return !closed.has(String(r?.id));
+    });
     const ids = new Set(list.map((r) => String(r.id)));
     for (const r of getLocalRequests()) {
       if (!r || !r.id) continue;
@@ -4353,7 +4425,7 @@
 
 
 
-  // v1.1.9: faction chat command banking.
+  // v1.2.4: faction chat command banking, send-only intercept, and user remove request.
   // Handles both PC Enter and PDA/mobile send-button taps.
   function fbParseBankerAmountToken(token) {
     const raw = String(token || "").trim().toLowerCase().replace(/[$,]/g, "");
@@ -4410,8 +4482,17 @@
     return inputs.find((el) => fbLikelyChatInput(el) && fbGetEditableText(el).trim().toLowerCase().startsWith("/banker")) || null;
   }
 
+  let FB_CHAT_COMMAND_BUSY = false;
+  let FB_CHAT_LAST_SENT = { text: "", ts: 0 };
+
   async function fbSendBankerChatCommand(commandText) {
     const text = String(commandText || "").trim();
+    const now = Date.now();
+    if (FB_CHAT_COMMAND_BUSY) return true;
+    if (FB_CHAT_LAST_SENT.text === text && now - FB_CHAT_LAST_SENT.ts < 6000) return true;
+    FB_CHAT_COMMAND_BUSY = true;
+    FB_CHAT_LAST_SENT = { text, ts: now };
+    setTimeout(() => { FB_CHAT_COMMAND_BUSY = false; }, 10000);
     const parts = text.split(/\s+/).filter(Boolean);
     const cmd = String(parts.shift() || "").toLowerCase();
     if (cmd !== "/banker") return false;
@@ -4468,9 +4549,11 @@
       if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
       await refreshHeaderCoinBadge(true);
       showPayNotice(fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`);
+      FB_CHAT_COMMAND_BUSY = false;
       return true;
     } catch (err) {
       showPayNotice(`Bank request failed: ${String(err.message || err).slice(0, 90)}`);
+      FB_CHAT_COMMAND_BUSY = false;
       return true;
     }
   }
@@ -4507,8 +4590,10 @@
       const el = fbFindBankerCommandInput();
       if (!el) return;
       const targetText = `${String(t?.textContent || "").toLowerCase()} ${String(t?.className || "").toLowerCase()} ${String(t?.id || "").toLowerCase()} ${String(t?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(t?.getAttribute?.("title") || "").toLowerCase()}`;
-      const looksLikeSend = targetText.includes("send") || targetText.includes("submit") || targetText.includes("message") || (t && t.closest && t.closest('button, [role="button"], input[type="submit"], a'));
-      if (!looksLikeSend && ev.type !== "click") return;
+      const sendButton = t && t.closest && t.closest('button, [role="button"], input[type="submit"], a');
+      const looksLikeSend = targetText.includes("send") || targetText.includes("submit") || targetText.includes("message") || targetText.includes("sendmessage") || (sendButton && !String(t?.closest?.('[class*="chat" i], [id*="chat" i]') || "").includes("tab"));
+      // Important: do NOT submit just because the user taps/focuses the chat box. Only Enter, form submit, or an actual send button should trigger /banker.
+      if (!looksLikeSend) return;
       fbInterceptBankerCommandInput(el, ev);
     };
 
