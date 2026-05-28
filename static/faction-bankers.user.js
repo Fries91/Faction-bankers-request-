@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.4
+// @version      1.1.6
 // @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.1.4-clean-board-no-notify-card";
+  const FB_BUILD = "1.1.6-completed-history-limit-5";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -2076,6 +2076,7 @@
       approved: "Approved",
       denied: "Denied",
       paid: "Complete",
+      complete: "Complete",
       cancelled: "Cancelled",
     }[s] || s;
 
@@ -2615,7 +2616,7 @@
         ? `<div class="fb-box"><strong style="color:#ffd36a;">Pending Requests</strong></div>${pending.map(requestCard).join("")}`
         : `<div class="fb-box"><div class="fb-muted">No pending requests.</div></div>`,
       others.length
-        ? `<div class="fb-box"><strong>Recent History</strong></div>${others.slice(0, 20).map(requestCard).join("")}`
+        ? `<div class="fb-box"><strong>Recently Completed / Last 5</strong><div class="fb-small">Shows the newest 5 completed payouts so nobody double-pays.</div></div>${others.slice(0, 5).map(requestCard).join("")}`
         : "",
     ].join("");
 
@@ -3336,7 +3337,9 @@
     const created = r.created_at ? esc(r.created_at) : "";
     const requester = esc(r.requester_name || `User ${r.requester_id || ""}`);
     const targetFaction = esc(r.faction_name || factionLabelById(r.faction_id) || "Faction");
-    const handledBy = r.handled_by_name ? `<div class="fb-small">Handled by: ${esc(r.handled_by_name)}</div>` : "";
+    const handledBy = r.handled_by_name
+      ? `<div class="fb-small" style="color:#8dffac;font-weight:900;">${status === "complete" ? "Completed" : "Handled"} by: ${esc(r.handled_by_name)}${r.handled_at ? ` • ${esc(r.handled_at)}` : ""}</div>`
+      : "";
     const preferredBanker = r.selected_banker_name || r.selected_banker_id
       ? `<div class="fb-small">Preferred banker: ${esc(r.selected_banker_name || r.selected_banker_id)}</div>`
       : `<div class="fb-small">Notify: all faction bankers</div>`;
@@ -3347,21 +3350,8 @@
       actions = `
         <div class="fb-row" style="margin-top:10px;">
           <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
-          <button class="fb-btn gold" data-id="${id}" data-fb-pay="approve-open" type="button">Approve + Open Bank</button>
-          <button class="fb-btn green" data-id="${id}" data-fb-action="approve" type="button">Approve Only</button>
-          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
-          <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
-        </div>
-      `;
-    }
-
-    if (isBanker && status === "approved") {
-      actions = `
-        <div class="fb-row" style="margin-top:10px;">
-          <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
           <button class="fb-btn gold" data-id="${id}" data-fb-pay="open" type="button">Open Bank Page</button>
           <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
-          <button class="fb-btn red" data-id="${id}" data-fb-action="deny" type="button">Deny</button>
         </div>
       `;
     }
@@ -3377,6 +3367,7 @@
         </div>
 
         ${String(r.note || "") === FULL_BALANCE_NOTE ? `<div class="fb-request-note">Full balance requested.</div>` : ""}
+        ${status === "complete" && r.handled_by_name ? `<div class="fb-request-note" style="color:#8dffac;">Paid/cleared by ${esc(r.handled_by_name)}. Do not pay this request again.</div>` : ""}
 
         ${preferredBanker}
         ${handledBy}
