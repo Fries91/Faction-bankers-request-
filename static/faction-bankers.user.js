@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.3
+// @version      1.1.4
 // @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.1.3-all-bankers-theme";
+  const FB_BUILD = "1.1.4-clean-board-no-notify-card";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1197,6 +1197,42 @@
         }
       }
 
+
+
+      /* v1.1.4 cleanup: keep board clean and stop the faction box from sitting behind the board */
+      body.fb-board-open #fb-built-in-box {
+        display: none !important;
+      }
+
+      #fb-overlay.fb-show {
+        max-height: min(72vh, 620px) !important;
+      }
+
+      @media (max-width: 520px) {
+        #fb-overlay.fb-show {
+          top: auto !important;
+          bottom: 74px !important;
+          left: 8px !important;
+          right: 8px !important;
+          width: auto !important;
+          max-height: 58vh !important;
+          border-radius: 16px !important;
+        }
+        #fb-head {
+          padding: 8px 10px !important;
+        }
+        #fb-body {
+          padding: 8px !important;
+        }
+        .fb-box {
+          padding: 9px !important;
+          margin-bottom: 7px !important;
+        }
+      }
+
+      .fb-notify-card {
+        display: none !important;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -1824,7 +1860,7 @@
       <div class="fb-built-head">
         <div>
           <b>🪙 Factional Banking</b>
-          <span id="fb-built-status">Enter amount — all faction bankers get notified.</span>
+          <span id="fb-built-status">Enter amount — faction bankers get notified.</span>
         </div>
         <button id="fb-built-open" type="button">Board</button>
       </div>
@@ -1838,10 +1874,6 @@
           <button id="fb-built-manual-balance" type="button">Enter Manually</button>
         </div>
         <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
-        <div class="fb-notify-card">
-          <b>All faction bankers notified</b>
-          Requests go to the banker roles/leaders your faction set in the Leaders tab. No choosing needed.
-        </div>
         <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
         <button id="fb-built-send" type="button">Send Request</button>
         <button id="fb-built-full" type="button">Request Full Balance</button>
@@ -1945,6 +1977,7 @@
     APP.open = true;
     GM_setValue(K_OPEN, true);
     ensureOverlay();
+    document.body.classList.add("fb-board-open");
     $("#fb-overlay").classList.add("fb-show");
     refreshAll(true);
   }
@@ -1952,6 +1985,7 @@
   function closeOverlay() {
     APP.open = false;
     GM_setValue(K_OPEN, false);
+    document.body.classList.remove("fb-board-open");
     const ov = $("#fb-overlay");
     if (ov) ov.classList.remove("fb-show");
   }
@@ -2460,7 +2494,7 @@
 
   async function handleFactionChangeAndReload(selectId, rerender = true) {
     const val = rememberFactionFromSelect(selectId);
-    await loadBankerStatus(val);
+    APP.bankers = [];
     if (rerender && APP.open) renderBody(activeTab());
     mountBuiltInBankerBox();
   }
@@ -2506,11 +2540,6 @@
           <button id="fb-open-balance-page" class="fb-btn" type="button">Sync Balance</button>
           <button id="fb-refresh-balance" class="fb-btn" type="button">Refresh</button>
           <button id="fb-manual-balance" class="fb-btn blue" type="button">Enter Manually</button>
-        </div>
-
-        <div class="fb-notify-card" style="margin-top:10px;">
-          <b>All faction bankers notified</b>
-          Your request is sent to this faction's banker board and phone pings go to saved banker keys.
         </div>
 
         <label class="fb-label" style="margin-top:10px;">Amount requested</label>
