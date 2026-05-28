@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.0.9
+// @version      1.1.0
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.0.9-travel-opens-request";
+  const FB_BUILD = "1.1.0-header-gender-board-tabs";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -168,16 +168,16 @@
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: 30px !important;
-        height: 30px !important;
-        min-width: 30px !important;
-        margin: 0 4px !important;
+        width: 23px !important;
+        height: 23px !important;
+        min-width: 23px !important;
+        margin: 0 2px !important;
         padding: 0 !important;
         border: 0 !important;
-        border-radius: 6px !important;
+        border-radius: 4px !important;
         background: transparent !important;
         color: #ffd36a !important;
-        font-size: 19px !important;
+        font-size: 15px !important;
         line-height: 1 !important;
         cursor: pointer !important;
         user-select: none !important;
@@ -201,6 +201,7 @@
         z-index: 40 !important;
         flex: 0 0 auto !important;
         vertical-align: middle !important;
+        transform: none !important;
       }
 
       #fb-bank-coin-clean.fb-header-fallback {
@@ -222,9 +223,9 @@
 
       #fb-bank-coin-clean.fb-alert {
         opacity: 1 !important;
-        background: rgba(170,0,0,.28) !important;
-        border-radius: 7px !important;
-        box-shadow: 0 0 8px rgba(255,0,0,.68) !important;
+        background: transparent !important;
+        border-radius: 4px !important;
+        box-shadow: 0 0 5px rgba(255,0,0,.55) !important;
         filter: drop-shadow(0 1px 2px rgba(0,0,0,.9)) saturate(1.1) brightness(1.02) !important;
       }
 
@@ -232,16 +233,16 @@
         content: attr(data-count);
         position: absolute;
         top: -5px;
-        right: -6px;
-        min-width: 13px;
-        height: 13px;
+        right: -5px;
+        min-width: 12px;
+        height: 12px;
         padding: 0 3px;
         border-radius: 999px;
         background: #ff3131;
         color: #fff;
         font-size: 8px;
         font-weight: 900;
-        line-height: 13px;
+        line-height: 12px;
         text-align: center;
         box-shadow: 0 1px 3px rgba(0,0,0,.65);
       }
@@ -613,9 +614,9 @@
       }
 
       .fb-tabs {
-        display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 7px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
         padding: 10px 12px 0;
       }
 
@@ -624,11 +625,13 @@
         background: rgba(255,255,255,.055);
         color: #ddd;
         border-radius: 999px;
-        padding: 8px 8px;
+        padding: 9px 12px;
         font-size: 12px;
         cursor: pointer;
         font-weight: 900;
-        min-height: 36px;
+        min-height: 38px;
+        min-width: 118px;
+        flex: 1 1 118px;
         white-space: nowrap;
         text-align: center;
       }
@@ -993,18 +996,19 @@
         }
 
         .fb-tabs {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 7px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
           padding: 8px 8px 0;
           overflow: visible;
         }
 
         .fb-tab {
-          padding: 8px 6px;
-          font-size: 11px;
-          min-height: 36px;
-          width: 100%;
+          padding: 9px 10px;
+          font-size: 12px;
+          min-height: 39px;
+          min-width: calc(50% - 6px);
+          flex: 1 1 calc(50% - 6px);
         }
 
         #fb-body {
@@ -1268,7 +1272,8 @@
       const title = String(el.getAttribute("title") || "").toLowerCase();
       const alt = String(el.getAttribute("alt") || "").toLowerCase();
 
-      return text === "♂" || text === "♀" || cls.includes("gender") || title.includes("gender") || alt.includes("gender");
+      const html = String(el.innerHTML || "").toLowerCase();
+      return text.includes("♂") || text.includes("♀") || cls.includes("gender") || title.includes("gender") || alt.includes("gender") || html.includes("male") || html.includes("female");
     });
 
     if (target) return target;
@@ -1461,6 +1466,46 @@
     return coin;
   }
 
+
+  function findGlobalHeaderGenderTarget() {
+    const nodes = Array.from(document.querySelectorAll("a, button, div, span, li, i, img, svg"));
+    const candidates = [];
+
+    for (const el of nodes) {
+      if (!el || el.id === "fb-bank-coin-clean" || el.closest?.("#fb-overlay") || el.closest?.("#fb-built-in-box")) continue;
+      const r = visibleRect(el);
+      if (!r) continue;
+      if (r.top < 0 || r.top > Math.max(650, window.innerHeight * 0.62)) continue;
+      if (r.width > 70 || r.height > 70 || r.width < 8 || r.height < 8) continue;
+
+      const text = getCleanText(el);
+      const hay = [
+        text,
+        String(el.className || ""),
+        String(el.id || ""),
+        String(el.getAttribute("title") || ""),
+        String(el.getAttribute("alt") || ""),
+        String(el.getAttribute("aria-label") || ""),
+        String(el.innerHTML || "").slice(0, 150),
+      ].join(" ").toLowerCase();
+
+      const genderHit = text.includes("♂") || text.includes("♀") || hay.includes("gender") || hay.includes("male") || hay.includes("female") || hay.includes("&male") || hay.includes("&female");
+      if (!genderHit) continue;
+
+      // Prefer the resource/icon row area, not profile text or overlay text.
+      const score =
+        (text.includes("♂") || text.includes("♀") ? 120 : 0) +
+        (hay.includes("gender") ? 90 : 0) +
+        (r.left > window.innerWidth * 0.25 ? 25 : 0) -
+        Math.abs(r.height - 24) -
+        Math.abs(r.width - 24);
+      candidates.push({ el, score });
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.el || null;
+  }
+
   function mountCoin() {
     if (!isTornPage()) return;
 
@@ -1468,6 +1513,15 @@
     const coin = makeHeaderCoin();
     coin.classList.remove("fb-fixed-test", "fb-header-fallback");
     coin.classList.add("fb-fixed-header", "fb-banker-visible");
+
+    const globalGender = findGlobalHeaderGenderTarget();
+    if (globalGender && globalGender.parentElement) {
+      if (coin.parentElement !== globalGender.parentElement || coin.previousElementSibling !== globalGender) {
+        globalGender.insertAdjacentElement("afterend", coin);
+      }
+      setCoinAlert(APP.pendingCount || 0);
+      return;
+    }
 
     const row = findTornResourceRow();
     const target = row ? findGenderInsertTarget(row) : null;
@@ -1725,7 +1779,7 @@
       else mount.appendChild(box);
     }
 
-    $("#fb-built-open")?.addEventListener("click", openOverlay);
+    $("#fb-built-open")?.addEventListener("click", openBankerBoard);
     $("#fb-built-open-balance")?.addEventListener("click", openBalancePageForCapture);
     $("#fb-built-refresh-balance")?.addEventListener("click", async () => {
       if (!detectFactionBalanceFromPage()) {
