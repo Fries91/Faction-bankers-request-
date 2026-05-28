@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.2.6
-// @description  Faction vault request board with reliable /banker chat command backend route and notifications.
+// @version      1.2.7
+// @description  Faction vault request board with reliable /banker chat requests, request visibility, and banker coin notifications.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -3987,11 +3987,21 @@
   function saveLocalRequest(item) {
     if (!item || !item.id) return;
     const now = Date.now();
-    const mine = getLocalRequests()
-      .filter((r) => r && String(r.id) !== String(item.id))
-      .filter((r) => !r._local_saved_at || now - Number(r._local_saved_at) < 1000 * 60 * 60 * 24 * 2);
-    mine.unshift({ ...item, _local_saved_at: now, _local_backup: true });
-    GM_setValue(localRequestKey(), JSON.stringify(mine.slice(0, 20)));
+    const saveToKey = (key) => {
+      try {
+        const raw = GM_getValue(key, "[]");
+        const arr = JSON.parse(raw);
+        const current = Array.isArray(arr) ? arr : [];
+        const mine = current
+          .filter((r) => r && String(r.id) !== String(item.id))
+          .filter((r) => !r._local_saved_at || now - Number(r._local_saved_at) < 1000 * 60 * 60 * 24 * 2);
+        mine.unshift({ ...item, _local_saved_at: now, _local_backup: true });
+        GM_setValue(key, JSON.stringify(mine.slice(0, 20)));
+      } catch (_) {}
+    };
+    saveToKey(localRequestKey());
+    const requesterKey = `fb_local_requests_v1_${item.requester_id || item.player_id || APP.me?.player_id || "guest"}`;
+    saveToKey(requesterKey);
   }
 
   function closedRequestKey() {
@@ -4544,10 +4554,16 @@
       if (res && res.item) {
         upsertRequestItem(res.item);
         saveLocalRequest(res.item);
+        APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
+        if (APP.open && activeTab() === "my") renderMyRequestsTab();
       }
       if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
       await refreshAll(true);
       await refreshHeaderCoinBadge(true);
+      if (res && res.item) {
+        APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
+        if (APP.open && activeTab() === "my") renderMyRequestsTab();
+      }
       showPayNotice((res && res.pushover_sent === false) ? `🪙 Request saved, but phone ping did not confirm. Check Leaders Pushover keys.` : (fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`));
       FB_CHAT_COMMAND_BUSY = false;
       return true;
