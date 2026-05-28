@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.0
+// @version      1.1.2
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.1.0-header-gender-board-tabs";
+  const FB_BUILD = "1.1.2-exact-status";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -2343,8 +2343,8 @@
     if (bankers.length) {
       const bits = [];
       if (onlineCount) bits.push(`${onlineCount} online`);
-      if (travelingCount) bits.push(`${travelingCount} traveling`);
-      if (offlineCount) bits.push(`${offlineCount} offline`);
+      if (travelingCount) bits.push(`${travelingCount} travel/abroad`);
+      if (offlineCount) bits.push(`${offlineCount} unavailable`);
       anyLabel = `Any banker — ${bits.join(", ") || bankers.length + " listed"}`;
     } else if (APP.bankerStatusError) {
       anyLabel = "Any banker — status unavailable";
@@ -2358,11 +2358,11 @@
       const id = String(b.player_id || "");
       const name = String(b.name || id);
       const label = String(b.label || b.status_text || b.status || "Unknown");
-      const details = String(b.details || "");
+      const details = String(b.details || b.raw_details || "");
       const c = String(b.color || b.status_color || "").toLowerCase();
       const available = b.is_available || c === "green" ? "🟢" : (c === "yellow" || c === "blue" ? "🟡" : "🔴");
       const phoneText = friesPhoneText(b);
-      const extra = details ? ` (${esc(details).slice(0, 42)})` : "";
+      const extra = details && details.toLowerCase() !== label.toLowerCase() ? ` (${esc(details).slice(0, 30)})` : "";
       options.push(`<option value="${esc(id)}" ${String(selected) === id ? "selected" : ""}>${available} ${esc(name)} — ${esc(label)}${phoneText}${extra}</option>`);
     }
 
