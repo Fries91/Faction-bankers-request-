@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.9
+// @version      1.2.2
 // @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -3384,6 +3384,7 @@
       const res = await gmRequest("GET", "/api/banker/leaders");
       APP.manualBankers = Array.isArray(res.items) ? res.items : [];
       APP.leaderRoleNames = Array.isArray(res.role_names) ? res.role_names : [];
+      APP.leaderRoleItems = Array.isArray(res.role_items) ? res.role_items : [];
       APP.defaultRoleNames = Array.isArray(res.default_role_names) ? res.default_role_names : [];
       return true;
     } catch (err) {
@@ -3441,6 +3442,7 @@
   async function addLeaderRoleName() {
     if (APP.busy) return;
     const roleName = String($("#fb-leader-role-name")?.value || "").trim();
+    const rolePushoverKey = String($("#fb-leader-role-pushover")?.value || "").trim();
 
     if (!roleName) {
       renderLeadersTab(`<div class="fb-error">Enter the faction role name that should count as a banker.</div>`);
@@ -3449,11 +3451,11 @@
 
     APP.busy = true;
     try {
-      await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName });
+      const res = await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName, pushover_key: rolePushoverKey });
       await loadLeaderBankers();
       APP.bankers = [];
       mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that role should show as a banker.</div>`);
+      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`);
     } catch (err) {
       renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -3506,17 +3508,24 @@
       </div>
     `).join("") || `<div class="fb-box"><div class="fb-muted">No specific banker overrides yet. Add one only if role detection misses someone.</div></div>`;
 
-    const roleRows = (APP.leaderRoleNames || []).map((role) => `
-      <div class="fb-box">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">${esc(role)}</div>
-            <div class="fb-small">Anyone in ${esc(factionName)} with this role shows as a banker.</div>
+    const roleList = (APP.leaderRoleItems && APP.leaderRoleItems.length)
+      ? APP.leaderRoleItems
+      : (APP.leaderRoleNames || []).map((role) => ({ role_name: role, has_pushover: false, source: "leaders" }));
+
+    const roleRows = roleList.map((roleObj) => {
+      const role = roleObj.role_name || roleObj.name || roleObj;
+      return `
+        <div class="fb-box">
+          <div class="fb-row fb-space">
+            <div>
+              <div class="fb-request-title">${esc(role)}</div>
+              <div class="fb-small">Anyone in ${esc(factionName)} with this role counts as a banker.${roleObj.has_pushover ? " • role phone ping enabled" : " • no role phone ping key"}</div>
+            </div>
+            <button class="fb-btn red" data-leader-role-remove="${esc(role)}" type="button">Remove</button>
           </div>
-          <button class="fb-btn red" data-leader-role-remove="${esc(role)}" type="button">Remove</button>
         </div>
-      </div>
-    `).join("") || `<div class="fb-box"><div class="fb-muted">No custom banker roles saved yet. Defaults are: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Leader, Co-leader")}</div></div>`;
+      `;
+    }).join("") || `<div class="fb-box"><div class="fb-muted">No custom banker roles saved yet. Defaults are: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Leader, Co-leader")}</div></div>`;
 
     setBody(`
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
@@ -3532,7 +3541,7 @@
         </div>
         <div class="fb-flow-grid" style="margin-top:10px;">
           <div class="fb-flow-card"><b>1. Add roles</b><span>Type the exact Torn faction role that means “can bank” for your faction.</span></div>
-          <div class="fb-flow-card"><b>2. Optional pings</b><span>Add specific banker IDs with Pushover keys for direct phone alerts.</span></div>
+          <div class="fb-flow-card"><b>2. Optional pings</b><span>Add role Pushover keys or specific banker keys for direct phone alerts.</span></div>
         </div>
       </div>
 
@@ -3541,6 +3550,9 @@
         <div class="fb-small" style="margin-top:5px;">Examples: Banker, Treasurer, Finance, Vault Keeper, Money Manager, Co-Leader.</div>
         <label class="fb-label" style="margin-top:10px;">Faction role name</label>
         <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Treasurer">
+        <label class="fb-label" style="margin-top:10px;">Optional Pushover key for this role</label>
+        <input id="fb-leader-role-pushover" class="fb-input" placeholder="Paste a Pushover key to ping this role/team phone">
+        <div class="fb-small" style="margin-top:5px;">When a request is sent, all saved banker keys plus role keys for this faction get notified.</div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
           <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
