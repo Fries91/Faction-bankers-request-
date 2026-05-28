@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.2.9
-// @description  Faction vault banking using /banker chat commands, banker board, leader role setup, and header coin notifications.
+// @version      1.3.1
+// @description  Faction vault banking with /banker chat commands, role-based banker/leader tabs, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.1.8-safe-bank-prefill";
+  const FB_BUILD = "1.3.1-role-tab-settings";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1558,18 +1558,26 @@
   }
 
   async function openHeaderCoinBoard() {
-    // v1.2.9: command-only mode. The coin is for banker acceptance and leader setup, not request forms.
+    // Coin is visible to everyone. New users land on Settings/Login.
     try {
-      if (!APP.me && GM_getValue(K_API_KEY, "")) APP.me = await gmRequest("GET", "/api/banker/me");
+      if (!APP.me && GM_getValue(K_API_KEY, "")) {
+        gmRequest("GET", "/api/banker/me").then((me) => {
+          APP.me = me;
+          if (APP.open) {
+            rebuildTabs(defaultTabForMe());
+            renderBody(defaultTabForMe());
+          }
+        }).catch(() => {});
+      }
     } catch {}
 
     openOverlay();
     setTimeout(() => {
-      const tabName = (APP.me?.is_banker || APP.me?.is_admin)
-        ? "banker"
-        : ((APP.me?.can_manage_leaders || APP.me?.is_leader_role) ? "leaders" : "settings");
+      const tabName = defaultTabForMe();
+      rebuildTabs(tabName);
       const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
       if (tab) tab.click();
+      else renderBody(tabName);
     }, 120);
   }
 
@@ -1819,7 +1827,7 @@
   }
 
   function mountBuiltInBankerBox() {
-    // v1.2.9 command-only mode: no faction-page request box.
+    // v1.2.9 command-only mode with guarded chat send: no faction-page request box.
     const oldBox = document.querySelector("#fb-built-in-box");
     if (oldBox) oldBox.remove();
   }
@@ -1862,12 +1870,7 @@
         <button id="fb-close" type="button">✕</button>
       </div>
 
-      <div class="fb-tabs">
-        <button class="fb-tab active" data-tab="commands" type="button">Commands</button>
-        <button class="fb-tab" data-tab="banker" type="button">Banker</button>
-        <button class="fb-tab" data-tab="leaders" type="button">Leaders</button>
-        <button class="fb-tab" data-tab="settings" type="button">Settings</button>
-      </div>
+      <div class="fb-tabs" id="fb-tabs"></div>
 
       <div id="fb-body"></div>
     `;
@@ -1876,13 +1879,7 @@
 
     $("#fb-close").addEventListener("click", closeOverlay);
 
-    $$(".fb-tab", overlay).forEach((btn) => {
-      btn.addEventListener("click", () => {
-        $$(".fb-tab", overlay).forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        renderBody(btn.dataset.tab);
-      });
-    });
+    rebuildTabs(defaultTabForMe());
   }
 
   function openOverlay() {
@@ -1927,9 +1924,77 @@
     }, 150);
   }
 
+  function isLeaderUiUser() {
+    return !!(APP.me?.can_manage_leaders || APP.me?.is_leader_role || APP.me?.is_admin);
+  }
+
+  function isBankerUiUser() {
+    return !!(APP.me?.is_banker || APP.me?.is_admin || isLeaderUiUser());
+  }
+
+  function allowedTabsForMe() {
+    const hasKey = !!GM_getValue(K_API_KEY, "");
+    if (!hasKey || !APP.me) {
+      return [{ id: "settings", label: "Settings / Login" }];
+    }
+
+    if (isLeaderUiUser()) {
+      return [
+        { id: "banker", label: "Banking" },
+        { id: "leaders", label: "Leaders" },
+        { id: "settings", label: "Settings" },
+      ];
+    }
+
+    if (isBankerUiUser()) {
+      return [
+        { id: "banker", label: "Banking" },
+        { id: "settings", label: "Settings" },
+      ];
+    }
+
+    return [
+      { id: "commands", label: "Commands" },
+      { id: "settings", label: "Settings" },
+    ];
+  }
+
+  function defaultTabForMe() {
+    const hasKey = !!GM_getValue(K_API_KEY, "");
+    if (!hasKey || !APP.me) return "settings";
+    if (isBankerUiUser() || isLeaderUiUser()) return "banker";
+    return "commands";
+  }
+
+  function isTabAllowed(tab) {
+    return allowedTabsForMe().some((t) => t.id === tab);
+  }
+
+  function rebuildTabs(preferredTab = "") {
+    ensureOverlay();
+    const wrap = $("#fb-tabs");
+    if (!wrap) return;
+
+    const tabs = allowedTabsForMe();
+    const active = tabs.some((t) => t.id === preferredTab) ? preferredTab : defaultTabForMe();
+
+    wrap.innerHTML = tabs.map((t) => `
+      <button class="fb-tab ${t.id === active ? "active" : ""}" data-tab="${esc(t.id)}" type="button">${esc(t.label)}</button>
+    `).join("");
+
+    $$(".fb-tab", wrap).forEach((btn) => {
+      btn.addEventListener("click", () => {
+        $$(".fb-tab", wrap).forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        renderBody(btn.dataset.tab);
+      });
+    });
+  }
+
   function activeTab() {
     const btn = $(".fb-tab.active");
-    return btn?.dataset?.tab || "commands";
+    const tab = btn?.dataset?.tab || defaultTabForMe();
+    return isTabAllowed(tab) ? tab : defaultTabForMe();
   }
 
   function setCoinAlert(count) {
@@ -2413,15 +2478,22 @@
   }
 
   function renderBody(tab = activeTab()) {
+    ensureOverlay();
+
     if (!GM_getValue(K_API_KEY, "")) {
-      renderSettings("Add your Torn API key first.");
+      rebuildTabs("settings");
+      renderSettings("Add your Torn limited API key first.");
       return;
     }
 
     if (!APP.me) {
-      setBody(`<div class="fb-box"><div class="fb-muted">Loading account...</div></div>`);
+      rebuildTabs("settings");
+      renderSettings("Saved key found. Tap Test Login at the bottom to verify your Torn account.");
       return;
     }
+
+    if (!isTabAllowed(tab)) tab = defaultTabForMe();
+    rebuildTabs(tab);
 
     if (tab === "commands" || tab === "request") renderCommandsTab();
     if (tab === "my") renderMyTab();
@@ -3545,52 +3617,74 @@
     const key = GM_getValue(K_API_KEY, "");
     const loggedIn = !!APP.me;
     const roleText = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "role not detected");
+    const factionText = APP.me?.faction_name || "Faction not verified yet";
+    const accessText = !loggedIn
+      ? "Login needed"
+      : (isLeaderUiUser() ? "Leader tools enabled" : (isBankerUiUser() ? "Banker board enabled" : "Member command mode"));
 
     setBody(`
-      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
+      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") || String(msg).toLowerCase().includes("verified") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
 
       <div class="fb-box fb-hero-card">
-        <div class="fb-request-title">⚙️ Settings & Login</div>
-        <div class="fb-small" style="margin-top:5px;">Login once with a limited Torn API key so Factional Banking can verify who you are and which faction you belong to.</div>
-        <div class="fb-login-status ${loggedIn ? "" : "off"}" style="margin-top:10px;">
+        <div class="fb-row fb-space">
           <div>
-            <b><span class="fb-status-dot ${loggedIn ? "ok" : "bad"}"></span>${loggedIn ? `Logged in as ${esc(APP.me.name || "Torn user")}` : "Not logged in yet"}</b>
-            <div class="fb-small">${loggedIn ? `${esc(APP.me.faction_name || "Faction")} • ${esc(roleText)}` : "Save your key at the bottom, then tap Test Login."}</div>
+            <div class="fb-request-title">⚙️ Factional Banking Settings</div>
+            <div class="fb-small" style="margin-top:5px;">Start here. Save a limited Torn API key, test login, then use <b>/banker</b> commands in faction chat.</div>
           </div>
-          <span class="fb-pill ${loggedIn ? "approved" : "denied"}">${loggedIn ? "Verified" : "Login needed"}</span>
+          <span class="fb-pill ${loggedIn ? "approved" : "denied"}">${esc(accessText)}</span>
+        </div>
+
+        <div class="fb-login-status ${loggedIn ? "" : "off"}" style="margin-top:12px;">
+          <div>
+            <b><span class="fb-status-dot ${loggedIn ? "ok" : "bad"}"></span>${loggedIn ? `Logged in as ${esc(APP.me.name || "Torn user")} [${esc(APP.me.player_id || "")}]` : "Not logged in yet"}</b>
+            <div class="fb-small">${loggedIn ? `${esc(factionText)} • ${esc(roleText)}` : "Paste your limited API key at the bottom and tap Test Login."}</div>
+          </div>
         </div>
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">How this app uses your Torn API key</div>
+        <div class="fb-request-title">Rules / Terms of Use</div>
         <ul class="fb-legal-list">
-          <li>Used to verify your Torn name, ID, faction, and role for request access.</li>
-          <li>Used to show banker availability/status and your faction banking tools.</li>
-          <li>Stored only in your userscript/PDA storage on your device, not displayed to other players.</li>
-          <li>The backend receives the key only on API calls needed to verify account/faction data.</li>
-          <li>The app does not ask for your Torn password and does not auto-click Give Money.</li>
+          <li>This script is a faction banking request and notification helper.</li>
+          <li>It does not auto-pay, auto-click Torn buttons, or move money by itself.</li>
+          <li>Bankers still manually review requests and manually complete payouts in Torn.</li>
+          <li>Members are responsible for making accurate requests with <code>/banker amount</code>.</li>
+          <li>Faction leaders control their own banker roles and Pushover role keys in the Leaders tab.</li>
+          <li>Completed requests are shown so bankers can avoid double-paying.</li>
+        </ul>
+      </div>
+
+      <div class="fb-box">
+        <div class="fb-request-title">How this follows Torn-friendly API use</div>
+        <ul class="fb-legal-list">
+          <li>Uses Torn API data for verification and read-only checks such as your Torn ID, name, faction, and role.</li>
+          <li>Uses the smallest useful key type: a limited API key.</li>
+          <li>Does not ask for your Torn password.</li>
+          <li>Does not automate gameplay actions or payments.</li>
+          <li>Pushover is only used to notify configured bankers that a request exists.</li>
         </ul>
       </div>
 
       <div class="fb-box">
         <div class="fb-request-title">Why a limited API key?</div>
-        <div class="fb-small" style="margin-top:6px; line-height:1.4;">
-          A limited key is enough for this banking helper because it only needs identity/faction verification and safe read-only checks. Using the smallest useful key is the safer way to follow Torn-friendly API use.
+        <div class="fb-small" style="margin-top:6px; line-height:1.45;">
+          A limited key lets the app confirm that the request belongs to the correct Torn player and faction. This keeps other factions separate, helps prevent fake requests, and lets the board show the right banker/leader tools without needing unsafe access.
         </div>
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">Torn-friendly rules</div>
+        <div class="fb-request-title">Privacy / Storage</div>
         <ul class="fb-legal-list">
-          <li>Requests are a queue/notification helper only.</li>
-          <li>Bankers still manually review and press Torn’s Give Money button themselves.</li>
-          <li>Pushover phone pings are only notifications, not automated payments.</li>
-          <li>Faction leaders manage their own banker roles in the Leaders tab.</li>
+          <li>Your key is saved in your userscript/PDA local storage on your device.</li>
+          <li>The backend only receives it when the app needs to verify your Torn account/faction.</li>
+          <li>Other players cannot see your key.</li>
+          <li>You can replace or clear the saved key anytime by editing the field below.</li>
         </ul>
       </div>
 
-      <div class="fb-box">
+      <div class="fb-box fb-login-card">
         <div class="fb-request-title">Login</div>
+        <div class="fb-small" style="margin-top:4px;">Paste your Torn limited API key here, save it, then tap Test Login.</div>
         <label class="fb-label" style="margin-top:10px;">Torn limited API key</label>
         <input id="fb-api-key" class="fb-input" value="${esc(key)}" placeholder="Paste Torn limited API key">
         <div class="fb-row" style="margin-top:10px;">
@@ -3606,10 +3700,15 @@
       const keyInput = $("#fb-api-key")?.value?.trim() || "";
       GM_setValue(K_API_KEY, keyInput);
       APP.me = null;
+      rebuildTabs("settings");
       renderSettings("Saved. Tap Test Login to verify your faction login.");
     });
 
-    $("#fb-test-login")?.addEventListener("click", () => refreshAll(true));
+    $("#fb-test-login")?.addEventListener("click", async () => {
+      await refreshAll(true);
+      rebuildTabs(defaultTabForMe());
+      renderSettings(APP.me ? "Login verified." : "Login check finished. If this still shows not logged in, check your key.");
+    });
     $("#fb-enable-notify")?.addEventListener("click", requestNotifyPermission);
   }
 
@@ -4160,6 +4259,7 @@
 
       const me = await gmRequest("GET", "/api/banker/me");
       APP.me = me;
+      if (APP.open) rebuildTabs(activeTab());
 
       await loadFactionBalance(false);
 
@@ -4348,6 +4448,19 @@
     return Math.floor(n);
   }
 
+
+  function fbIsCompleteBankerCommandText(text) {
+    const t = String(text || "").trim();
+    if (!/^\/banker(\s|$)/i.test(t)) return false;
+    const parts = t.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return false;
+    const action = String(parts[1] || "").toLowerCase();
+    if (["help", "commands", "?", "status", "check", "mine", "cancel", "remove", "delete"].includes(action)) return true;
+    if (["change", "edit", "update"].includes(action)) return parts.length >= 3;
+    if (["full", "balance", "all", "max"].includes(action)) return true;
+    return fbParseBankerAmountToken(action) > 0;
+  }
+
   function fbGetEditableText(el) {
     if (!el) return "";
     if (el.isContentEditable) return String(el.innerText || el.textContent || "").trim();
@@ -4384,9 +4497,9 @@
 
   function fbFindBankerCommandInput() {
     const active = document.activeElement;
-    if (active && fbLikelyChatInput(active) && fbGetEditableText(active).trim().toLowerCase().startsWith("/banker")) return active;
+    if (active && fbLikelyChatInput(active) && fbIsCompleteBankerCommandText(fbGetEditableText(active))) return active;
     const inputs = Array.from(document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]'));
-    return inputs.find((el) => fbLikelyChatInput(el) && fbGetEditableText(el).trim().toLowerCase().startsWith("/banker")) || null;
+    return inputs.find((el) => fbLikelyChatInput(el) && fbIsCompleteBankerCommandText(fbGetEditableText(el))) || null;
   }
 
   let FB_CHAT_COMMAND_BUSY = false;
@@ -4414,10 +4527,15 @@
       return true;
     }
 
-    if (["help", "commands", "?"].includes(action) || parts.length === 1) {
+    if (parts.length === 1) {
+      // Do not open the overlay or send anything while the user is still typing "/banker".
+      FB_CHAT_COMMAND_BUSY = false;
+      return false;
+    }
+
+    if (["help", "commands", "?"].includes(action)) {
       showPayNotice("Commands: /banker 25m, /banker full, /banker status, /banker cancel, /banker change 50m");
-      openOverlay();
-      setTimeout(() => document.querySelector('.fb-tab[data-tab="commands"]')?.click(), 120);
+      // Keep this as a toast only so typing /banker never pops the banking overlay open.
       FB_CHAT_COMMAND_BUSY = false;
       return true;
     }
@@ -4446,11 +4564,13 @@
           upsertRequestItem(res.item);
           saveLocalRequest(res.item);
           APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
+          if (APP.me?.is_banker || APP.me?.is_admin) setCoinAlert(APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending").length);
+          if (APP.open) renderBody(activeTab());
         }
       }
 
-      await refreshAll(true);
-      await refreshHeaderCoinBadge(true);
+      try { await refreshAll(true); } catch (_) { if (APP.open) renderBody(activeTab()); }
+      try { await refreshHeaderCoinBadge(true); } catch (_) {}
 
       const a = String(res?.action || "created");
       if (a === "created") {
@@ -4482,6 +4602,7 @@
     if (!el || !fbLikelyChatInput(el)) return false;
     const text = fbGetEditableText(el);
     if (!String(text || "").trim().toLowerCase().startsWith("/banker")) return false;
+    if (!fbIsCompleteBankerCommandText(text)) return false;
 
     if (ev) {
       ev.preventDefault();
@@ -4539,7 +4660,7 @@
   function fbRememberTypedBankerCommandFrom(el) {
     if (!el || !fbLikelyChatInput(el)) return;
     const text = String(fbGetEditableText(el) || "").trim();
-    if (!text.toLowerCase().startsWith("/banker")) return;
+    if (!fbIsCompleteBankerCommandText(text)) return;
     FB_CHAT_LAST_TYPED_COMMAND = { text, ts: Date.now() };
   }
 
@@ -4551,7 +4672,7 @@
 
   function fbFindPostedBankerCommandText() {
     const remembered = String(FB_CHAT_LAST_TYPED_COMMAND.text || "").trim();
-    if (!remembered || Date.now() - Number(FB_CHAT_LAST_TYPED_COMMAND.ts || 0) > 25000) return "";
+    if (!remembered || !fbIsCompleteBankerCommandText(remembered) || Date.now() - Number(FB_CHAT_LAST_TYPED_COMMAND.ts || 0) > 25000) return "";
 
     // Look for exact command text in visible chat/message nodes. Exact-match keeps this
     // from creating requests from other players' old /banker messages.
