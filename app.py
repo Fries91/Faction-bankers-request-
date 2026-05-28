@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.0.1-action-fix"
+APP_VERSION = "1.1.2-exact-status"
 
 
 @app.errorhandler(Exception)
@@ -647,6 +647,38 @@ def torn_get_banker_status(key, banker_id, faction_id=""):
         if isinstance(data, dict) and not data.get("error"):
             name = str(data.get("name") or banker_name_from_config(faction_id, bid) or bid).strip()
             status, color, label, details = classify_banker_status(data)
+
+            # Be honest about what Torn proves. A profile saying Online/Okay
+            # means Torn says the player is online and not in a blocked state,
+            # but it does not prove the banker is watching the app or able to pay.
+            status_obj = data.get("status") if isinstance(data, dict) else {}
+            last_action = data.get("last_action") if isinstance(data, dict) else {}
+            raw_state = ""
+            raw_details = ""
+            raw_last = ""
+            raw_last_rel = ""
+            if isinstance(status_obj, dict):
+                raw_state = str(status_obj.get("state") or "").strip()
+                raw_details = str(status_obj.get("details") or "").strip()
+            elif status_obj:
+                raw_details = str(status_obj).strip()
+            if isinstance(last_action, dict):
+                raw_last = str(last_action.get("status") or "").strip()
+                raw_last_rel = str(last_action.get("relative") or "").strip()
+
+            if status in {"traveling", "abroad", "hospital", "jail"}:
+                confidence = "verified_unavailable"
+                verify_note = "Torn status blocks banking"
+            elif status in {"online", "idle"}:
+                confidence = "torn_activity"
+                verify_note = "Torn reports this banker as Online/Idle and not travel/abroad/hospital/jail"
+            elif status == "offline":
+                confidence = "offline"
+                verify_note = "Torn says offline"
+            else:
+                confidence = "unknown"
+                verify_note = "Torn did not provide enough status detail"
+
             item = {
                 "player_id": bid,
                 "name": name,
@@ -655,6 +687,14 @@ def torn_get_banker_status(key, banker_id, faction_id=""):
                 "label": label,
                 "details": details or label,
                 "is_available": status in {"online", "idle"},
+                "checked_ts": time.time(),
+                "checked_at": now_iso(),
+                "confidence": confidence,
+                "verify_note": verify_note,
+                "raw_state": raw_state,
+                "raw_details": raw_details,
+                "raw_last_action": raw_last,
+                "raw_last_relative": raw_last_rel,
             }
         elif isinstance(data, dict) and data.get("error"):
             err = data.get("error") or {}
