@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.2.7-request-visibility-ping-fix"
+APP_VERSION = "1.2.9-chat-command-only"
 
 
 @app.errorhandler(Exception)
@@ -2534,14 +2534,18 @@ def parse_chat_banker_amount_token(token):
         return 0
 
 
+
 @app.post("/api/banker/chat-command")
 def create_request_from_chat_command():
-    """Create a bank request from a user's own /banker chat command.
+    """Handle faction chat banking commands.
 
-    This route intentionally ignores any target faction/banker supplied by the client.
-    The request always belongs to the logged-in user's faction, then the backend sends
-    notifications to that faction's configured manual banker keys, role keys, and the
-    allowed Fries91/Wrath global key rules.
+    Supported:
+      /banker 25m [note]
+      /banker full [note]
+      /banker cancel [request_id]
+      /banker change [request_id] 50m [note]
+      /banker status
+      /banker help
     """
     db_ok, db_msg = db_ready()
     user, resp, code = require_user()
@@ -2550,24 +2554,181 @@ def create_request_from_chat_command():
 
     data = request.get_json(silent=True) or {}
     command_text = str(data.get("command_text") or data.get("command") or "").strip()
+    if not command_text.lower().startswith("/banker"):
+        return jsonify({"ok": False, "error": "Use /banker 25m, /banker full, /banker cancel, /banker change, or /banker status"}), 400
+
+    parts = command_text.split()
+    # drop /banker
+    parts = parts[1:]
+    action = (parts[0].lower() if parts else "help").strip()
+    target_faction_id = str(user.get("faction_id") or "").strip()
+    target_faction_name = str(user.get("faction_name") or target_faction_id or "Faction").strip()
+    player_id = str(user.get("player_id") or "").strip()
+
+    if not target_faction_id or not player_id:
+        return jsonify({"ok": False, "error": "Could not detect your faction/user. Save API key and Test Login again."}), 400
+
+    def latest_own_pending_memory():
+        mine = [r for r in MEMORY_REQUESTS if str(r.get("requester_id")) == player_id and str(r.get("status", "")).lower() == "pending" and r.get("is_active", True)]
+        mine.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+        return mine[0] if mine else None
+
+    def latest_own_pending_db(cur):
+        cur.execute(
+            """
+            SELECT * FROM banker_requests
+            WHERE requester_id = %s AND status = 'pending' AND is_active = TRUE
+            ORDER BY created_ts DESC, id DESC
+            LIMIT 1
+            """,
+            (player_id,),
+        )
+        return cur.fetchone()
+
+    def own_pending_by_id_memory(req_id):
+        for r in MEMORY_REQUESTS:
+            if str(r.get("id")) == str(req_id) and str(r.get("requester_id")) == player_id and str(r.get("status", "")).lower() == "pending" and r.get("is_active", True):
+                return r
+        return None
+
+    # Help / command list
+    if action in {"help", "commands", "?"} or not parts:
+        return jsonify({
+            "ok": True,
+            "action": "help",
+            "message": "Commands: /banker 25m [note], /banker full, /banker status, /banker cancel [id], /banker change [id] 50m [note]",
+        })
+
+    # Status: return latest own visible request.
+    if action in {"status", "check", "mine"}:
+        if not db_ok:
+            mine = [r for r in memory_visible_items(user) if str(r.get("requester_id")) == player_id]
+            mine.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+            item = mine[0] if mine else None
+            return jsonify({"ok": True, "action": "status", "item": item, "message": "No bank requests found." if not item else "Latest bank request found.", "mode": "memory", "warning": db_msg})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM banker_requests
+                    WHERE requester_id = %s
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (player_id,),
+                )
+                row = cur.fetchone()
+        return jsonify({"ok": True, "action": "status", "item": row_to_item(row) if row else None, "message": "No bank requests found." if not row else "Latest bank request found.", "mode": "postgres"})
+
+    # Cancel: /banker cancel or /banker cancel 123
+    if action in {"cancel", "remove", "delete"}:
+        req_id = parts[1] if len(parts) >= 2 and parts[1].isdigit() else ""
+        if not db_ok:
+            item = own_pending_by_id_memory(req_id) if req_id else latest_own_pending_memory()
+            if not item:
+                return jsonify({"ok": False, "error": "No pending request found to cancel."}), 404
+            item["status"] = "canceled"
+            item["is_active"] = False
+            item["bank_note"] = "Canceled by requester with /banker cancel"
+            item["handled_at"] = now_iso()
+            return jsonify({"ok": True, "action": "canceled", "item": item, "removed_from_active": True, "mode": "memory", "warning": db_msg})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if req_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM banker_requests
+                        WHERE id = %s AND requester_id = %s AND status = 'pending' AND is_active = TRUE
+                        """,
+                        (req_id, player_id),
+                    )
+                    row = cur.fetchone()
+                else:
+                    row = latest_own_pending_db(cur)
+                if not row:
+                    return jsonify({"ok": False, "error": "No pending request found to cancel."}), 404
+                cur.execute(
+                    """
+                    UPDATE banker_requests
+                    SET status = 'canceled', is_active = FALSE, bank_note = %s, handled_at = %s
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    ("Canceled by requester with /banker cancel", now_iso(), row["id"]),
+                )
+                updated = cur.fetchone()
+            conn.commit()
+        return jsonify({"ok": True, "action": "canceled", "item": row_to_item(updated), "removed_from_active": True, "mode": "postgres"})
+
+    # Change: /banker change 50m [note] OR /banker change 123 50m [note]
+    if action in {"change", "edit", "update"}:
+        rest = parts[1:]
+        req_id = ""
+        if rest and rest[0].isdigit() and len(rest) >= 2:
+            req_id = rest.pop(0)
+        if not rest:
+            return jsonify({"ok": False, "error": "Use /banker change 50m or /banker change REQUEST_ID 50m"}), 400
+        amount = parse_chat_banker_amount_token(rest.pop(0))
+        note = " ".join(rest).strip() or "Updated from /banker change"
+        if amount <= 0:
+            return jsonify({"ok": False, "error": "Enter a valid new amount, like /banker change 25m"}), 400
+        if len(note) > 500:
+            note = note[:500]
+        if not db_ok:
+            item = own_pending_by_id_memory(req_id) if req_id else latest_own_pending_memory()
+            if not item:
+                return jsonify({"ok": False, "error": "No pending request found to change."}), 404
+            item["amount"] = int(amount)
+            item["note"] = note
+            item["bank_note"] = "Changed by requester with /banker change"
+            return jsonify({"ok": True, "action": "changed", "item": item, "mode": "memory", "warning": db_msg})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if req_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM banker_requests
+                        WHERE id = %s AND requester_id = %s AND status = 'pending' AND is_active = TRUE
+                        """,
+                        (req_id, player_id),
+                    )
+                    row = cur.fetchone()
+                else:
+                    row = latest_own_pending_db(cur)
+                if not row:
+                    return jsonify({"ok": False, "error": "No pending request found to change."}), 404
+                cur.execute(
+                    """
+                    UPDATE banker_requests
+                    SET amount = %s, note = %s, bank_note = %s
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (int(amount), note, "Changed by requester with /banker change", row["id"]),
+                )
+                updated = cur.fetchone()
+            conn.commit()
+        return jsonify({"ok": True, "action": "changed", "item": row_to_item(updated), "mode": "postgres"})
+
+    # Request creation: /banker 25m [note] or /banker full [note]
     amount = data.get("amount", 0)
     note = str(data.get("note") or "").strip()
+    token = parts[0] if parts else ""
+    extra_note = " ".join(parts[1:]).strip()
 
-    if command_text.lower().startswith("/banker"):
-        parts = command_text.split()
-        if len(parts) >= 2:
-            token = parts[1]
-            extra_note = " ".join(parts[2:]).strip()
-            if token.lower() in {"full", "balance", "all", "max"}:
-                amount = int(data.get("amount") or 1)
-                note = note or "Full balance requested from /banker chat command"
-                if extra_note:
-                    note = (note + " • " + extra_note).strip()
-            else:
-                parsed = parse_chat_banker_amount_token(token)
-                if parsed > 0:
-                    amount = parsed
-                    note = note or (f"Chat command: {extra_note}" if extra_note else "Chat command request")
+    if token.lower() in {"full", "balance", "all", "max"}:
+        try:
+            amount = int(data.get("amount") or 1)
+        except Exception:
+            amount = 1
+        note = note or "Full balance requested from /banker chat command"
+        if extra_note:
+            note = (note + " • " + extra_note).strip()
+    else:
+        parsed = parse_chat_banker_amount_token(token)
+        if parsed > 0:
+            amount = parsed
+            note = note or (f"Chat command: {extra_note}" if extra_note else "Chat command request")
 
     try:
         amount = int(str(amount).replace(",", "").replace("$", "").strip())
@@ -2580,11 +2741,6 @@ def create_request_from_chat_command():
     if len(note) > 500:
         note = note[:500]
 
-    target_faction_id = str(user.get("faction_id") or "").strip()
-    target_faction_name = str(user.get("faction_name") or target_faction_id or "Faction").strip()
-    if not target_faction_id:
-        return jsonify({"ok": False, "error": "Could not detect your faction. Save API key and Test Login again."}), 400
-
     created_at = now_iso()
     created_ts = time.time()
 
@@ -2593,6 +2749,7 @@ def create_request_from_chat_command():
         notify_debug = send_bank_request_ping_debug(item)
         return jsonify({
             "ok": True,
+            "action": "created",
             "item": item,
             "pushover_sent": bool(notify_debug.get("sent")),
             "notify_debug": notify_debug,
@@ -2632,11 +2789,12 @@ def create_request_from_chat_command():
     notify_debug = send_bank_request_ping_debug(item)
     return jsonify({
         "ok": True,
+        "action": "created",
         "item": item,
         "pushover_sent": bool(notify_debug.get("sent")),
         "notify_debug": notify_debug,
         "mode": "postgres",
-        "request_visible_hint": "Saved as pending; refresh My Requests/Banker Board",
+        "request_visible_hint": "Saved as pending; refresh Banker Board",
     })
 
 
