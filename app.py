@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.1.6-completed-history-limit-5"
+APP_VERSION = "1.2.2-role-pushover-notify"
 
 
 @app.errorhandler(Exception)
@@ -111,6 +111,7 @@ MEMORY_REQUESTS = []
 MEMORY_NEXT_ID = 1
 MEMORY_MANUAL_BANKERS = {}  # faction_id -> list of manual banker dicts
 MEMORY_BANKER_ROLE_NAMES = {}  # faction_id -> list of role names leaders entered
+MEMORY_BANKER_ROLE_PUSHOVER_KEYS = {}  # faction_id -> role_name -> optional Pushover key
 
 def is_hidden_banker_name_or_id(name_or_id):
     """Hide bankers the owner removed from the user-facing app.
@@ -288,6 +289,76 @@ def banker_role_names_for_faction(faction_id):
 
     return roles
 
+
+
+def banker_role_records_for_faction(faction_id):
+    """Return saved role records for this faction, including optional role-level Pushover keys.
+
+    Leaders can add a role name plus an optional Pushover key. When a request is
+    created, the app pings these role-level keys in addition to any specific
+    manual banker keys. This lets a faction notify the selected banking roles
+    without forcing every banker to be manually added by Torn ID.
+    """
+    fid = str(faction_id or "").strip()
+    records = []
+    seen = set()
+
+    # Memory fallback.
+    for role in MEMORY_BANKER_ROLE_NAMES.get(fid, []):
+        role_name = str(role or "").strip()
+        if not role_name:
+            continue
+        key = clean_pushover_key((MEMORY_BANKER_ROLE_PUSHOVER_KEYS.get(fid, {}) or {}).get(role_name, ""))
+        norm = clean_role_name(role_name)
+        if norm not in seen:
+            seen.add(norm)
+            records.append({"role_name": role_name, "pushover_key": key, "has_pushover": bool(key), "source": "leaders"})
+
+    # Database saved faction roles.
+    if DATABASE_URL:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT role_name, COALESCE(pushover_key, '') AS pushover_key
+                        FROM faction_banker_roles
+                        WHERE faction_id = %s
+                          AND is_active = TRUE
+                        ORDER BY role_name ASC
+                        """,
+                        (fid,),
+                    )
+                    for row in cur.fetchall():
+                        role_name = str(row.get("role_name") or "").strip()
+                        if not role_name:
+                            continue
+                        norm = clean_role_name(role_name)
+                        if norm in seen:
+                            continue
+                        key = clean_pushover_key(row.get("pushover_key") or "")
+                        seen.add(norm)
+                        records.append({"role_name": role_name, "pushover_key": key, "has_pushover": bool(key), "source": "leaders"})
+        except Exception as e:
+            print("Faction banker role record DB lookup failed; using memory/env:", e)
+
+    # If no custom roles exist, show defaults without phone keys.
+    if not records:
+        for role in sorted(BANKER_ROLE_NAMES):
+            records.append({"role_name": role, "pushover_key": "", "has_pushover": False, "source": "default"})
+
+    return records
+
+
+def role_pushover_keys_for_faction(faction_id):
+    keys = []
+    seen = set()
+    for rec in banker_role_records_for_faction(faction_id):
+        k = clean_pushover_key(rec.get("pushover_key"))
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys
 
 def is_banker_role(value, faction_id=None):
     role = clean_role_name(value)
@@ -789,6 +860,8 @@ def init_db():
                 """
             )
 
+            cur.execute("ALTER TABLE faction_banker_roles ADD COLUMN IF NOT EXISTS pushover_key TEXT NOT NULL DEFAULT ''")
+
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_banker_requests_faction_active
@@ -955,6 +1028,28 @@ def should_ping_global_pushover_for_faction(faction_id):
     return "*" in ids or fid in ids
 
 
+def should_ping_global_pushover_for_item(item):
+    """Decide if the Render/global Fries91 Pushover key should be pinged.
+
+    Normal path is by faction id.  We also allow a safe name fallback for
+    Wrath because Torn/API/PDA can sometimes hand back a faction name before
+    the id is stable.  This still avoids pinging Fries91 for every faction.
+    """
+    if should_ping_global_pushover_for_faction((item or {}).get("faction_id")):
+        return True
+
+    raw_names = (
+        os.getenv("FRIES91_NOTIFY_FACTION_NAMES", "")
+        or os.getenv("GLOBAL_PUSHOVER_FACTION_NAMES", "")
+        or "7DS*: Wrath,Wrath"
+    )
+    names = {str(x).strip().lower() for x in str(raw_names).replace("\n", ",").split(",") if str(x).strip()}
+    fname = str((item or {}).get("faction_name") or "").strip().lower()
+    if not fname:
+        return False
+    return fname in names or any(n and n in fname for n in names)
+
+
 def send_pushover_to_key_detailed(user_key, title, message, url=None):
     api_token = pushover_api_token()
     user_key = clean_pushover_key(user_key)
@@ -1002,6 +1097,43 @@ def send_pushover_alert(title, message, url=None):
     return sent
 
 
+def notification_target_keys_for_request(item):
+    """Return a de-duplicated list of Pushover keys for this request.
+
+    Priority:
+    1. Pushover keys saved in this faction's Leaders tab.
+    2. Render/global Fries91 keys only for FRIES91_NOTIFY_FACTION_IDS / names.
+
+    This keeps other factions private and prevents Fries91 from being pinged for
+    every outside faction unless the Render env explicitly allows it.
+    """
+    keys = []
+    seen = set()
+
+    for k in manual_pushover_keys_for_request(item):
+        k = clean_pushover_key(k)
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+
+    # v1.2.2: also notify role-level Pushover keys saved by the faction leader.
+    # This makes the selected banker roles notify directly without selecting one banker.
+    for k in role_pushover_keys_for_faction((item or {}).get("faction_id")):
+        k = clean_pushover_key(k)
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+
+    if should_ping_global_pushover_for_item(item):
+        for k in configured_pushover_keys():
+            k = clean_pushover_key(k)
+            if k and k not in seen:
+                seen.add(k)
+                keys.append(k)
+
+    return keys
+
+
 def send_bank_request_ping(item):
     if not item:
         return False
@@ -1013,30 +1145,61 @@ def send_bank_request_ping(item):
     message = (
         f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
         f"Amount: {amount_text}\n"
-        f"Faction: {item.get('faction_name')}\n"
-        f"Notify: All faction bankers\n"
+        f"Faction: {item.get('faction_name')} [{item.get('faction_id')}]\n"
+        f"Notify: All configured faction bankers\n"
         f"Request ID: #{item.get('id')}"
     )
 
     title = "🪙 New Torn Bank Request"
     sent = False
-    seen_keys = set()
+    target_keys = notification_target_keys_for_request(item)
 
-    # Ping manual banker keys from the Leaders tab first.
-    for k in manual_pushover_keys_for_request(item):
-        if k and k not in seen_keys:
-            seen_keys.add(k)
-            sent = send_pushover_to_key(k, title, message, request_url) or sent
+    if not target_keys:
+        print(
+            "Bank request created but no Pushover targets found:",
+            {
+                "request_id": item.get("id"),
+                "faction_id": item.get("faction_id"),
+                "faction_name": item.get("faction_name"),
+                "manual_key_count": len(manual_pushover_keys_for_request(item)),
+                "global_allowed": should_ping_global_pushover_for_item(item),
+                "global_key_count": len(configured_pushover_keys()),
+            },
+        )
+        return False
 
-    # Ping global Render-configured Fries91 keys only for Fries91's configured faction(s).
-    # Other factions only notify their own banker keys saved in the Leaders tab.
-    if should_ping_global_pushover_for_faction(item.get("faction_id")):
-        for k in configured_pushover_keys():
-            if k and k not in seen_keys:
-                seen_keys.add(k)
-                sent = send_pushover_to_key(k, title, message, request_url) or sent
+    for k in target_keys:
+        sent = send_pushover_to_key(k, title, message, request_url) or sent
 
     return sent
+
+
+def send_bank_request_ping_debug(item):
+    """Same as send_bank_request_ping but returns useful JSON diagnostics."""
+    target_keys = notification_target_keys_for_request(item)
+    results = []
+    is_full_balance = str(item.get("note") or "") == "__FULL_BALANCE_REQUEST__"
+    amount_text = "Full Balance" if is_full_balance else f"${int(item.get('amount') or 0):,}"
+    request_url = f"https://www.torn.com/factions.php?step=your&fb_bank_req={item.get('id')}#/tab=controls"
+    message = (
+        f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
+        f"Amount: {amount_text}\n"
+        f"Faction: {item.get('faction_name')} [{item.get('faction_id')}]\n"
+        f"Notify: All configured faction bankers\n"
+        f"Request ID: #{item.get('id')}"
+    )
+    for k in target_keys:
+        results.append(send_pushover_to_key_detailed(k, "🪙 New Torn Bank Request", message, request_url))
+    return {
+        "target_key_count": len(target_keys),
+        "target_keys_masked": [mask_key(k) for k in target_keys],
+        "manual_key_count": len(manual_pushover_keys_for_request(item)),
+        "role_key_count": len(role_pushover_keys_for_faction((item or {}).get("faction_id"))),
+        "global_allowed": should_ping_global_pushover_for_item(item),
+        "global_key_count": len(configured_pushover_keys()),
+        "results": results,
+        "sent": any(bool(r.get("ok")) for r in results),
+    }
 
 
 def row_to_item(row):
@@ -1557,6 +1720,11 @@ def get_leader_bankers():
             for x in manual_bankers_for_faction(fid)
         ],
         "role_names": banker_role_names_for_faction(fid),
+        "role_items": [
+            {"role_name": r.get("role_name"), "has_pushover": bool(r.get("pushover_key")), "source": r.get("source", "leaders")}
+            for r in banker_role_records_for_faction(fid)
+        ],
+        "role_key_count": len(role_pushover_keys_for_faction(fid)),
         "default_role_names": sorted(BANKER_ROLE_NAMES),
         "can_manage": True,
         "manager_role": user.get("faction_role", ""),
@@ -1573,6 +1741,7 @@ def add_leader_banker_role():
 
     data = request.get_json(silent=True) or {}
     role_name = str(data.get("role_name") or "").strip()
+    pushover_key = clean_pushover_key(data.get("pushover_key") or "")
     if not role_name:
         return jsonify({"ok": False, "error": "Enter the banker role name"}), 400
     if len(role_name) > 80:
@@ -1588,27 +1757,46 @@ def add_leader_banker_role():
                 cur.execute(
                     """
                     INSERT INTO faction_banker_roles (
-                        faction_id, faction_name, role_name, added_by_id, added_by_name, created_at, is_active
+                        faction_id, faction_name, role_name, pushover_key, added_by_id, added_by_name, created_at, is_active
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,TRUE)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,TRUE)
                     ON CONFLICT (faction_id, role_name) DO UPDATE SET
                         faction_name = EXCLUDED.faction_name,
+                        pushover_key = EXCLUDED.pushover_key,
                         added_by_id = EXCLUDED.added_by_id,
                         added_by_name = EXCLUDED.added_by_name,
                         created_at = EXCLUDED.created_at,
                         is_active = TRUE
                     """,
-                    (fid, fname, role_name, user.get("player_id"), user.get("name"), now_iso()),
+                    (fid, fname, role_name, pushover_key, user.get("player_id"), user.get("name"), now_iso()),
                 )
             conn.commit()
     else:
         rows = MEMORY_BANKER_ROLE_NAMES.setdefault(fid, [])
         if role_name not in rows:
             rows.append(role_name)
+        MEMORY_BANKER_ROLE_PUSHOVER_KEYS.setdefault(fid, {})[role_name] = pushover_key
 
     FACTION_ROLE_BANKER_CACHE.clear()
     BANKER_STATUS_CACHE.clear()
-    return jsonify({"ok": True, "role_name": role_name, "role_names": banker_role_names_for_faction(fid), "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
+    test_ping = False
+    if pushover_key:
+        test_ping = send_pushover_to_key(
+            pushover_key,
+            "🪙 Banker Role Phone Ping Enabled",
+            f"{user.get('name')} added the role '{role_name}' for {fname}. Requests for this faction can now ping this key.",
+            "https://www.torn.com/factions.php?step=your#/tab=controls",
+        )
+    return jsonify({
+        "ok": True,
+        "role_name": role_name,
+        "has_pushover": bool(pushover_key),
+        "test_ping_sent": test_ping,
+        "role_names": banker_role_names_for_faction(fid),
+        "role_items": [{"role_name": r.get("role_name"), "has_pushover": bool(r.get("pushover_key")), "source": r.get("source", "leaders")} for r in banker_role_records_for_faction(fid)],
+        "mode": "postgres" if db_ok else "memory",
+        "warning": "" if db_ok else db_msg,
+    })
 
 
 @app.post("/api/banker/leaders/roles/remove")
@@ -1621,6 +1809,7 @@ def remove_leader_banker_role():
 
     data = request.get_json(silent=True) or {}
     role_name = str(data.get("role_name") or "").strip()
+    pushover_key = clean_pushover_key(data.get("pushover_key") or "")
     if not role_name:
         return jsonify({"ok": False, "error": "Missing role name"}), 400
 
@@ -1637,6 +1826,7 @@ def remove_leader_banker_role():
     else:
         rows = MEMORY_BANKER_ROLE_NAMES.setdefault(fid, [])
         rows[:] = [x for x in rows if str(x) != role_name]
+        MEMORY_BANKER_ROLE_PUSHOVER_KEYS.setdefault(fid, {}).pop(role_name, None)
 
     FACTION_ROLE_BANKER_CACHE.clear()
     BANKER_STATUS_CACHE.clear()
@@ -1917,8 +2107,8 @@ def create_request():
 
     if not db_ok:
         item = memory_insert_request(user, amount, note, target_faction_id, target_faction_name, selected_banker_id, selected_banker_name)
-        ping_sent = send_bank_request_ping(item)
-        return jsonify({"ok": True, "item": item, "pushover_sent": ping_sent, "mode": "memory", "warning": db_msg})
+        notify_debug = send_bank_request_ping_debug(item)
+        return jsonify({"ok": True, "item": item, "pushover_sent": bool(notify_debug.get("sent")), "notify_debug": notify_debug, "mode": "memory", "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1961,13 +2151,14 @@ def create_request():
         conn.commit()
 
     item = row_to_item(row)
-    ping_sent = send_bank_request_ping(item)
+    notify_debug = send_bank_request_ping_debug(item)
 
     return jsonify(
         {
             "ok": True,
             "item": item,
-            "pushover_sent": ping_sent,
+            "pushover_sent": bool(notify_debug.get("sent")),
+            "notify_debug": notify_debug,
         }
     )
 
@@ -2198,6 +2389,45 @@ def clear_completed():
         conn.commit()
 
     return jsonify({"ok": True, "removed": removed})
+
+
+
+
+@app.get("/api/debug/notification-targets")
+def debug_notification_targets():
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    fake = {
+        "id": "debug",
+        "amount": 1,
+        "note": "",
+        "requester_id": user.get("player_id"),
+        "requester_name": user.get("name"),
+        "faction_id": user.get("faction_id"),
+        "faction_name": user.get("faction_name"),
+    }
+    return jsonify({
+        "ok": True,
+        "user": {
+            "id": user.get("player_id"),
+            "name": user.get("name"),
+            "faction_id": user.get("faction_id"),
+            "faction_name": user.get("faction_name"),
+        },
+        "manual_bankers": [
+            {"id": x.get("id"), "name": x.get("name"), "has_pushover": bool(clean_pushover_key(x.get("pushover_key")))}
+            for x in manual_bankers_for_faction(user.get("faction_id"))
+        ],
+        "target_key_count": len(notification_target_keys_for_request(fake)),
+        "target_keys_masked": [mask_key(k) for k in notification_target_keys_for_request(fake)],
+        "manual_key_count": len(manual_pushover_keys_for_request(fake)),
+        "role_key_count": len(role_pushover_keys_for_faction(user.get("faction_id"))),
+        "role_items": [{"role_name": r.get("role_name"), "has_pushover": bool(r.get("pushover_key")), "source": r.get("source", "leaders")} for r in banker_role_records_for_faction(user.get("faction_id"))],
+        "global_allowed_for_this_faction": should_ping_global_pushover_for_item(fake),
+        "global_key_count": len(configured_pushover_keys()),
+        "fries91_notify_faction_ids": sorted(fries91_notify_faction_ids()),
+    })
 
 
 if __name__ == "__main__":
