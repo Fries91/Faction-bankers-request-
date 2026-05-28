@@ -1741,6 +1741,12 @@ def remove_leader_banker():
 def list_requests():
     """List active requests plus recent completed requests visible to the logged-in user.
 
+    v1.2.0 fix:
+    - Removed accidental second fetchall() that emptied the results.
+      That bug made Pushover work, but coin/banker boards showed 0 pending.
+
+    
+
     v1.0.7 fix:
     - Restores the GET /api/banker/requests route used by the header coin,
       banker board, and PDA refresh. Without this, Render returned 405
