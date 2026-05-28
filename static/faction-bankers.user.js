@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.3.1
-// @description  Faction vault banking with /banker chat commands, role-based banker/leader tabs, and Torn-friendly settings/login.
+// @version      1.3.2
+// @description  Faction vault banking with strict /banker chat commands, banker board, leader role setup, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.3.1-role-tab-settings";
+  const FB_BUILD = "1.3.2-strict-chat-confirm";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -4575,7 +4575,7 @@
       const a = String(res?.action || "created");
       if (a === "created") {
         if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
-        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm." : `🪙 Bank request sent${amount > 1 ? `: ${money(amount)}` : ""}.`);
+        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved, but phone ping did not confirm. Bankers can still check the board." : `🪙 Bank request sent${amount > 1 ? `: ${money(amount)}` : ""} — alerted bankers.`);
       } else if (a === "canceled") {
         showPayNotice("🪙 Bank request canceled.");
       } else if (a === "changed") {
@@ -4626,16 +4626,47 @@
       fbInterceptBankerCommandInput(ev.target, ev);
     }, true);
 
+    function fbIsActualChatSendTap(target, inputEl) {
+      if (!target || !inputEl || fbIsInsideOurBankerUi(target)) return false;
+
+      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"]');
+      const text = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
+
+      // Text-labeled send buttons are safe.
+      if (/\b(send|submit|sendmessage|send-message)\b/.test(text)) return true;
+
+      // PDA's chat send icon often has no text. Only treat it as send if it is a small
+      // button immediately to the right of the chat input on the same row.
+      const clickEl = btn || target;
+      let r1, r2;
+      try {
+        r1 = inputEl.getBoundingClientRect();
+        r2 = clickEl.getBoundingClientRect();
+      } catch (_) {
+        return false;
+      }
+      if (!r1 || !r2 || !r1.width || !r1.height || !r2.width || !r2.height) return false;
+
+      const inputMidY = r1.top + r1.height / 2;
+      const btnMidY = r2.top + r2.height / 2;
+      const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(70, r1.height * 1.4);
+      const rightSide = r2.left >= (r1.right - 12);
+      const smallish = r2.width <= 130 && r2.height <= 130;
+      const nearInput = r2.left <= (r1.right + 140);
+
+      return !!(btn && closeY && rightSide && nearInput && smallish);
+    }
+
     const pointerHandler = (ev) => {
       const t = ev.target;
       if (t && t.closest && t.closest('#fb-board, #fb-built-in-box, #fb-header-coin, #fb-pay-prefill-notice')) return;
       const el = fbFindBankerCommandInput();
       if (!el) return;
-      const targetText = `${String(t?.textContent || "").toLowerCase()} ${String(t?.className || "").toLowerCase()} ${String(t?.id || "").toLowerCase()} ${String(t?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(t?.getAttribute?.("title") || "").toLowerCase()}`;
-      const sendButton = t && t.closest && t.closest('button, [role="button"], input[type="submit"], a');
-      const looksLikeSend = targetText.includes("send") || targetText.includes("submit") || targetText.includes("message") || targetText.includes("sendmessage") || (sendButton && !String(t?.closest?.('[class*="chat" i], [id*="chat" i]') || "").includes("tab"));
-      // Important: do NOT submit just because the user taps/focuses the chat box. Only Enter, form submit, or an actual send button should trigger /banker.
-      if (!looksLikeSend) return;
+
+      // Important: do NOT submit just because the user taps/focuses the chat box,
+      // taps suggestions, taps the message area, or types "/banker" midway.
+      // Only Enter, form submit, or the actual chat send button can trigger it.
+      if (!fbIsActualChatSendTap(t, el)) return;
       fbInterceptBankerCommandInput(el, ev);
     };
 
@@ -4694,16 +4725,12 @@
     document.addEventListener('input', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
     document.addEventListener('keyup', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
 
-    setInterval(() => {
-      const cmd = fbFindPostedBankerCommandText();
-      if (!cmd) return;
-      const key = cmd.toLowerCase();
-      if (FB_CHAT_FALLBACK_DONE.has(key)) return;
-      FB_CHAT_FALLBACK_DONE.add(key);
-      setTimeout(() => FB_CHAT_FALLBACK_DONE.delete(key), 60000);
-      showPayNotice("Caught /banker chat command. Sending bank request...");
-      fbSendBankerChatCommand(cmd);
-    }, 900);
+    // v1.3.2: disabled post-to-chat fallback.
+    // The old fallback could fire from a visible /banker draft/message and ping before
+    // the user intentionally pressed send. Commands now only run on Enter or the real
+    // chat send button, and the script tries to prevent the command from posting.
+    // This intentionally does nothing.
+    return;
   }
 
   function startWhenReady() {
