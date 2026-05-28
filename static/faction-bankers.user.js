@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.3.2
+// @version      1.3.3
 // @description  Faction vault banking with strict /banker chat commands, banker board, leader role setup, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.3.2-strict-chat-confirm";
+  const FB_BUILD = "1.3.3-command-send-visibility";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -156,6 +156,21 @@
         ontimeout: () => reject(new Error("Request timed out")),
       });
     });
+  }
+
+  async function fbGetRequestListSafe() {
+    try {
+      return await gmRequest("GET", "/api/banker/requests");
+    } catch (firstErr) {
+      try {
+        const lite = await gmRequest("GET", "/api/banker/requests-lite");
+        lite._fallback_used = true;
+        lite._first_error = String(firstErr?.message || firstErr || "");
+        return lite;
+      } catch (secondErr) {
+        throw firstErr || secondErr;
+      }
+    }
   }
 
   function ensureStyles() {
@@ -4213,7 +4228,7 @@
         return true;
       }
 
-      const list = await gmRequest("GET", "/api/banker/requests");
+      const list = await fbGetRequestListSafe();
       const items = Array.isArray(list.items) ? list.items : [];
       APP.requests = mergeLocalRequests(items);
 
@@ -4267,7 +4282,7 @@
         await loadLeaderBankers();
       }
 
-      const list = await gmRequest("GET", "/api/banker/requests");
+      const list = await fbGetRequestListSafe();
       APP.requests = mergeLocalRequests(Array.isArray(list.items) ? list.items : []);
 
       APP.bankers = [];
@@ -4575,7 +4590,7 @@
       const a = String(res?.action || "created");
       if (a === "created") {
         if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
-        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved, but phone ping did not confirm. Bankers can still check the board." : `🪙 Bank request sent${amount > 1 ? `: ${money(amount)}` : ""} — alerted bankers.`);
+        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm, but bankers can check the board." : `🪙 Confirmed: bank request sent${amount > 1 ? ` for ${money(amount)}` : ""}. Bankers alerted.`);
       } else if (a === "canceled") {
         showPayNotice("🪙 Bank request canceled.");
       } else if (a === "changed") {
@@ -4626,35 +4641,43 @@
       fbInterceptBankerCommandInput(ev.target, ev);
     }, true);
 
-    function fbIsActualChatSendTap(target, inputEl) {
+    function fbIsActualChatSendTap(ev, target, inputEl) {
       if (!target || !inputEl || fbIsInsideOurBankerUi(target)) return false;
 
-      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"]');
-      const text = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
+      const targetText = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()}`;
+      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a');
+      const btnText = `${String(btn?.textContent || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
 
-      // Text-labeled send buttons are safe.
-      if (/\b(send|submit|sendmessage|send-message)\b/.test(text)) return true;
+      // Text-labeled send buttons are okay. Do not match generic words like "message".
+      if (/\b(send|submit|sendmessage|send-message)\b/.test(targetText + " " + btnText)) return true;
 
-      // PDA's chat send icon often has no text. Only treat it as send if it is a small
-      // button immediately to the right of the chat input on the same row.
+      let r1;
+      try { r1 = inputEl.getBoundingClientRect(); } catch (_) { return false; }
+      if (!r1 || !r1.width || !r1.height) return false;
+
+      // PDA send arrow: pointer is directly to the right of the chat input on the same row.
+      const touch = ev?.changedTouches?.[0] || ev?.touches?.[0] || null;
+      const x = Number(ev?.clientX || touch?.clientX || 0);
+      const y = Number(ev?.clientY || touch?.clientY || 0);
+      if (x && y) {
+        const rowY = y >= (r1.top - 22) && y <= (r1.bottom + 22);
+        const rightOfInput = x >= (r1.right + 2) && x <= (r1.right + 150);
+        if (rowY && rightOfInput) return true;
+      }
+
+      // Fallback for wrapped icon/button geometry.
       const clickEl = btn || target;
-      let r1, r2;
       try {
-        r1 = inputEl.getBoundingClientRect();
-        r2 = clickEl.getBoundingClientRect();
+        const r2 = clickEl.getBoundingClientRect();
+        const inputMidY = r1.top + r1.height / 2;
+        const btnMidY = r2.top + r2.height / 2;
+        const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(55, r1.height * 1.15);
+        const smallish = r2.width <= 120 && r2.height <= 120;
+        const toRight = r2.left >= (r1.right - 2) && r2.left <= (r1.right + 150);
+        return !!(closeY && smallish && toRight);
       } catch (_) {
         return false;
       }
-      if (!r1 || !r2 || !r1.width || !r1.height || !r2.width || !r2.height) return false;
-
-      const inputMidY = r1.top + r1.height / 2;
-      const btnMidY = r2.top + r2.height / 2;
-      const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(70, r1.height * 1.4);
-      const rightSide = r2.left >= (r1.right - 12);
-      const smallish = r2.width <= 130 && r2.height <= 130;
-      const nearInput = r2.left <= (r1.right + 140);
-
-      return !!(btn && closeY && rightSide && nearInput && smallish);
     }
 
     const pointerHandler = (ev) => {
@@ -4663,15 +4686,15 @@
       const el = fbFindBankerCommandInput();
       if (!el) return;
 
-      // Important: do NOT submit just because the user taps/focuses the chat box,
-      // taps suggestions, taps the message area, or types "/banker" midway.
-      // Only Enter, form submit, or the actual chat send button can trigger it.
-      if (!fbIsActualChatSendTap(t, el)) return;
+      // Only the chat send button/arrow sends. Tapping the coin, chat history,
+      // suggestions, or the input itself never sends.
+      if (!fbIsActualChatSendTap(ev, t, el)) return;
       fbInterceptBankerCommandInput(el, ev);
     };
 
     document.addEventListener("pointerdown", pointerHandler, true);
     document.addEventListener("touchstart", pointerHandler, true);
+    document.addEventListener("mousedown", pointerHandler, true);
     document.addEventListener("click", pointerHandler, true);
 
     document.addEventListener("submit", (ev) => {
@@ -4679,7 +4702,6 @@
       if (el) fbInterceptBankerCommandInput(el, ev);
     }, true);
   }
-
 
   // v1.2.5 reliable chat fallback:
   // PDA sometimes posts /banker as a normal message before our send-button hook sees it.
