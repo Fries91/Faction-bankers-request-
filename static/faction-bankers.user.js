@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.2
-// @description  Faction vault request app with coin-only launcher and faction dropdown.
+// @version      1.1.3
+// @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.1.2-exact-status";
+  const FB_BUILD = "1.1.3-all-bankers-theme";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1112,6 +1112,91 @@
           box-sizing: border-box;
         }
       }
+
+
+      /* v1.1.3 vault theme cleanup */
+      #fb-overlay,
+      #fb-built-in-box {
+        background:
+          radial-gradient(circle at top left, rgba(255, 211, 106, .16), transparent 32%),
+          linear-gradient(180deg, rgba(20,18,13,.98), rgba(4,4,4,.98)) !important;
+        border-color: rgba(255,211,106,.42) !important;
+        box-shadow: 0 18px 48px rgba(0,0,0,.65), inset 0 0 0 1px rgba(255,255,255,.04) !important;
+      }
+
+      #fb-head,
+      .fb-built-head {
+        background: linear-gradient(90deg, rgba(255,211,106,.09), rgba(0,0,0,.15)) !important;
+      }
+
+      .fb-tab {
+        min-width: 106px !important;
+        text-align: center !important;
+        justify-content: center !important;
+      }
+
+      .fb-notify-card {
+        border: 1px solid rgba(255,211,106,.34);
+        background: linear-gradient(180deg, rgba(255,211,106,.12), rgba(255,211,106,.035));
+        border-radius: 12px;
+        padding: 10px 11px;
+        color: #f7e7b6;
+        font-size: 12px;
+        line-height: 1.35;
+        box-shadow: inset 0 0 18px rgba(255,211,106,.045);
+      }
+
+      .fb-notify-card b {
+        display: block;
+        color: #ffd36a;
+        font-size: 13px;
+        margin-bottom: 2px;
+      }
+
+      .fb-built-grid {
+        grid-template-columns: 1fr 1fr !important;
+        align-items: stretch !important;
+      }
+
+      .fb-built-grid .fb-wide,
+      .fb-built-grid .fb-notify-card,
+      .fb-built-grid .fb-own-faction,
+      .fb-built-grid .fb-balance-line {
+        grid-column: 1 / -1 !important;
+      }
+
+      #fb-built-amount,
+      #fb-built-send,
+      #fb-built-full,
+      #fb-built-open-balance,
+      #fb-built-refresh-balance,
+      #fb-built-manual-balance {
+        min-height: 42px !important;
+      }
+
+      @media (max-width: 520px) {
+        .fb-built-grid {
+          grid-template-columns: 1fr 1fr !important;
+        }
+        #fb-built-full,
+        .fb-built-grid .fb-wide,
+        .fb-built-grid .fb-notify-card,
+        .fb-built-grid .fb-own-faction,
+        .fb-built-grid .fb-balance-line {
+          grid-column: 1 / -1 !important;
+        }
+        #fb-overlay .fb-tabs {
+          display: grid !important;
+          grid-template-columns: 1fr 1fr 1fr !important;
+          gap: 7px !important;
+        }
+        #fb-overlay .fb-tab {
+          min-width: 0 !important;
+          padding: 9px 6px !important;
+          font-size: 12px !important;
+        }
+      }
+
     `;
     document.head.appendChild(style);
   }
@@ -1717,8 +1802,6 @@
     const userIsTyping = !!(box && activeEl && box.contains(activeEl) && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(activeEl.tagName));
     const renderSig = JSON.stringify({
       f: (APP.factions || []).map((x) => [String(x.faction_id || ""), String(x.faction_name || "")]),
-      b: (APP.bankers || []).map((x) => [String(x.player_id || ""), String(x.name || ""), String(x.bucket || x.status_color || x.color || ""), String(x.status_text || x.status || x.label || "")]),
-      err: APP.bankerStatusError || "",
       sf: selectedFaction,
       bal: String(APP.balanceAmount ?? APP.balanceText ?? ""),
     });
@@ -1741,7 +1824,7 @@
       <div class="fb-built-head">
         <div>
           <b>🪙 Factional Banking</b>
-          <span id="fb-built-status">Choose faction, banker, amount — send.</span>
+          <span id="fb-built-status">Enter amount — all faction bankers get notified.</span>
         </div>
         <button id="fb-built-open" type="button">Board</button>
       </div>
@@ -1755,10 +1838,10 @@
           <button id="fb-built-manual-balance" type="button">Enter Manually</button>
         </div>
         <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
-        <select id="fb-built-banker" aria-label="Choose available banker">
-          ${bankerOptions($("#fb-built-banker")?.value || "")}
-        </select>
-        <div id="fb-built-bankers">${bankerStatusPanel()}</div>
+        <div class="fb-notify-card">
+          <b>All faction bankers notified</b>
+          Requests go to the banker roles/leaders your faction set in the Leaders tab. No choosing needed.
+        </div>
         <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
         <button id="fb-built-send" type="button">Send Request</button>
         <button id="fb-built-full" type="button">Request Full Balance</button>
@@ -2339,7 +2422,7 @@
     const travelingCount = bankers.filter((b) => ["yellow", "blue"].includes(String(b.color || "").toLowerCase())).length;
     const offlineCount = Math.max(0, bankers.length - onlineCount - travelingCount);
 
-    let anyLabel = "Any available banker";
+    let anyLabel = "All faction bankers";
     if (bankers.length) {
       const bits = [];
       if (onlineCount) bits.push(`${onlineCount} online`);
@@ -2407,7 +2490,7 @@
       <div class="fb-box">
         <div class="fb-row fb-space">
           <div>
-            <div class="fb-request-title">Request money from faction bank</div>
+            <div class="fb-request-title">🪙 Request from the Vault</div>
             <div class="fb-small">Logged in as ${esc(APP.me?.name || "Unknown")} ${APP.me?.faction_name ? `• ${esc(APP.me.faction_name)}` : ""}</div>
           </div>
           <span class="fb-pill">Member</span>
@@ -2425,11 +2508,10 @@
           <button id="fb-manual-balance" class="fb-btn blue" type="button">Enter Manually</button>
         </div>
 
-        <label class="fb-label" style="margin-top:10px;">Choose banker now</label>
-        <select id="fb-target-banker" class="fb-input fb-banker-select">
-          ${bankerOptions($("#fb-target-banker")?.value || "")}
-        </select>
-        ${bankerStatusPanel()}
+        <div class="fb-notify-card" style="margin-top:10px;">
+          <b>All faction bankers notified</b>
+          Your request is sent to this faction's banker board and phone pings go to saved banker keys.
+        </div>
 
         <label class="fb-label" style="margin-top:10px;">Amount requested</label>
         <input id="fb-amount" class="fb-input" inputmode="numeric" placeholder="Example: 25000000">
@@ -2444,7 +2526,7 @@
         </div>
 
         <div class="fb-small" style="margin-top:8px;">
-          Bankers are found from your faction roles automatically. Set the banker role name in Torn/Render as Banker, Treasurer, Leader, or Co-leader.
+          Bankers are controlled by your faction leader in the Leaders tab. Requests notify all configured faction bankers.
         </div>
       </div>
     `);
@@ -3228,7 +3310,7 @@
     const handledBy = r.handled_by_name ? `<div class="fb-small">Handled by: ${esc(r.handled_by_name)}</div>` : "";
     const preferredBanker = r.selected_banker_name || r.selected_banker_id
       ? `<div class="fb-small">Preferred banker: ${esc(r.selected_banker_name || r.selected_banker_id)}</div>`
-      : `<div class="fb-small">Preferred banker: Any available banker</div>`;
+      : `<div class="fb-small">Notify: all faction bankers</div>`;
 
     let actions = "";
 
@@ -3310,7 +3392,7 @@
         pushover_key: pushoverKey,
       });
       await loadLeaderBankers();
-      await loadBankerStatus(currentTargetFactionId());
+      APP.bankers = [];
       mountBuiltInBankerBox();
       renderLeadersTab(`<div class="fb-success">Banker saved.${res.test_ping_sent ? " Test phone ping sent." : ""}</div>`);
     } catch (err) {
@@ -3326,7 +3408,7 @@
     try {
       await gmRequest("POST", "/api/banker/leaders/remove", { banker_id: bankerId });
       await loadLeaderBankers();
-      await loadBankerStatus(currentTargetFactionId());
+      APP.bankers = [];
       mountBuiltInBankerBox();
       renderLeadersTab(`<div class="fb-success">Banker removed.</div>`);
     } catch (err) {
@@ -3349,7 +3431,7 @@
     try {
       await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName });
       await loadLeaderBankers();
-      await loadBankerStatus(currentTargetFactionId());
+      APP.bankers = [];
       mountBuiltInBankerBox();
       renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that role should show as a banker.</div>`);
     } catch (err) {
@@ -3365,7 +3447,7 @@
     try {
       await gmRequest("POST", "/api/banker/leaders/roles/remove", { role_name: roleName });
       await loadLeaderBankers();
-      await loadBankerStatus(currentTargetFactionId());
+      APP.bankers = [];
       mountBuiltInBankerBox();
       renderLeadersTab(`<div class="fb-success">Banker role removed.</div>`);
     } catch (err) {
@@ -3558,7 +3640,7 @@
 
     const status = $("#fb-built-status");
     const targetFactionId = selectedFactionFromPage();
-    const targetBankerId = $("#fb-target-banker")?.value || $("#fb-built-banker")?.value || "";
+    const targetBankerId = "";
 
     if (!GM_getValue(K_API_KEY, "")) {
       if (status) status.textContent = "Save your API key in settings first";
@@ -3618,7 +3700,7 @@
     const amount = Number(amountRaw);
     const note = "";
     const targetFactionId = $("#fb-built-faction")?.value || "";
-    const targetBankerId = $("#fb-built-banker")?.value || "";
+    const targetBankerId = "";
     const status = $("#fb-built-status");
 
     if (!GM_getValue(K_API_KEY, "")) {
@@ -3670,7 +3752,7 @@
     const amount = Number(amountRaw);
     const note = "";
     const targetFactionId = $("#fb-target-faction")?.value || "";
-    const targetBankerId = $("#fb-target-banker")?.value || "";
+    const targetBankerId = "";
 
     if (!targetFactionId) {
       renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
@@ -3981,7 +4063,7 @@
         APP.bankerStatusError = String(meErr.message || meErr).slice(0, 90);
       }
 
-      await loadBankerStatus(currentTargetFactionId());
+      APP.bankers = [];
       mountBuiltInBankerBox();
       return true;
     } catch (err) {
@@ -4077,7 +4159,7 @@
       const list = await gmRequest("GET", "/api/banker/requests");
       APP.requests = mergeLocalRequests(Array.isArray(list.items) ? list.items : []);
 
-      await loadBankerStatus(currentTargetFactionId());
+      APP.bankers = [];
 
       const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
       const pending = pendingItems.length;
