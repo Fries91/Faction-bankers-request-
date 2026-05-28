@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.0.6
+// @version      1.0.8
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.0.6-leaders-settings-polish";
+  const FB_BUILD = "1.0.8-header-coin-tabs";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -34,6 +34,7 @@
   const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
   const K_TARGET_FACTION = "fb_target_faction_v1";
   const K_PAY_PREFILL = "fb_pay_prefill_v1";
+  const K_SCROLL_TO_BANK = "fb_scroll_to_bank_box_v1";
   const FULL_BALANCE_NOTE = "__FULL_BALANCE_REQUEST__";
   const K_BALANCE_CAPTURE = "fb_balance_capture_pending_v1";
   const K_MANUAL_BALANCE_AMOUNT = "fb_manual_personal_balance_amount_v1";
@@ -167,20 +168,25 @@
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: 28px !important;
-        height: 26px !important;
-        margin-left: 6px !important;
-        border: 1px solid rgba(255,255,255,.12) !important;
-        border-radius: 9px !important;
+        width: 30px !important;
+        height: 30px !important;
+        min-width: 30px !important;
+        margin: 0 4px !important;
+        padding: 0 !important;
+        border: 0 !important;
+        border-radius: 6px !important;
         background: transparent !important;
         color: #ffd36a !important;
-        font-size: 17px !important;
+        font-size: 19px !important;
         line-height: 1 !important;
         cursor: pointer !important;
         user-select: none !important;
         position: relative !important;
-        z-index: 20 !important;
+        z-index: 40 !important;
         box-shadow: none !important;
+        vertical-align: middle !important;
+        -webkit-appearance: none !important;
+        appearance: none !important;
       }
 
       #fb-bank-coin-clean.fb-fixed-test {
@@ -216,8 +222,8 @@
 
       #fb-bank-coin-clean.fb-alert {
         opacity: 1 !important;
-        background: radial-gradient(circle, rgba(220,0,0,.58), rgba(130,0,0,.24) 62%, transparent 72%) !important;
-        border-radius: 50% !important;
+        background: rgba(170,0,0,.28) !important;
+        border-radius: 7px !important;
         box-shadow: 0 0 8px rgba(255,0,0,.68) !important;
         filter: drop-shadow(0 1px 2px rgba(0,0,0,.9)) saturate(1.1) brightness(1.02) !important;
       }
@@ -607,10 +613,10 @@
       }
 
       .fb-tabs {
-        display: flex;
-        gap: 6px;
-        padding: 8px 12px 0;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 7px;
+        padding: 10px 12px 0;
       }
 
       .fb-tab {
@@ -618,10 +624,13 @@
         background: rgba(255,255,255,.055);
         color: #ddd;
         border-radius: 999px;
-        padding: 6px 10px;
+        padding: 8px 8px;
         font-size: 12px;
         cursor: pointer;
         font-weight: 900;
+        min-height: 36px;
+        white-space: nowrap;
+        text-align: center;
       }
 
       .fb-tab.active {
@@ -984,16 +993,18 @@
         }
 
         .fb-tabs {
-          flex-wrap: nowrap;
-          overflow-x: auto;
-          padding: 6px 8px 0;
-          -webkit-overflow-scrolling: touch;
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 7px;
+          padding: 8px 8px 0;
+          overflow: visible;
         }
 
         .fb-tab {
-          flex: 0 0 auto;
-          padding: 5px 9px;
+          padding: 8px 6px;
           font-size: 11px;
+          min-height: 36px;
+          width: 100%;
         }
 
         #fb-body {
@@ -1277,17 +1288,47 @@
     return null;
   }
 
+  function scrollToFactionBankingBox() {
+    const box = document.querySelector("#fb-built-in-box");
+    if (!box) return false;
+
+    try {
+      box.scrollIntoView({ behavior: "smooth", block: "center" });
+      box.classList.add("fb-built-alert");
+      setTimeout(() => box.classList.remove("fb-built-alert"), 1600);
+    } catch {
+      box.scrollIntoView();
+    }
+    return true;
+  }
+
+  function goToFactionBankingPage() {
+    GM_setValue(K_SCROLL_TO_BANK, true);
+
+    const ownFaction = isOwnFactionPage();
+    if (!ownFaction) {
+      const base = location.hostname === "torn.com" ? "https://torn.com" : "https://www.torn.com";
+      window.location.href = `${base}/factions.php?step=your`;
+      return;
+    }
+
+    pageMount("header-coin-click");
+    if (!scrollToFactionBankingBox()) {
+      setTimeout(() => {
+        pageMount("header-coin-click-retry");
+        scrollToFactionBankingBox();
+      }, 700);
+    }
+  }
+
+  function maybeScrollToBankingBox() {
+    if (!GM_getValue(K_SCROLL_TO_BANK, false)) return;
+    if (!isOwnFactionPage()) return;
+    if (scrollToFactionBankingBox()) GM_setValue(K_SCROLL_TO_BANK, false);
+  }
+
   function openHeaderCoinBoard() {
-    openOverlay();
-
-    setTimeout(() => {
-      let tabName = "request";
-      if (!GM_getValue(K_API_KEY, "")) tabName = "settings";
-      else if (APP.me?.is_banker || APP.me?.is_admin) tabName = "banker";
-
-      const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
-      if (tab) tab.click();
-    }, 150);
+    goToFactionBankingPage();
   }
 
   function makeHeaderCoin() {
@@ -1588,6 +1629,7 @@
     $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
 
     setCoinAlert(APP.pendingCount || 0);
+    setTimeout(maybeScrollToBankingBox, 120);
   }
 
 
