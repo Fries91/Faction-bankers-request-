@@ -1014,7 +1014,7 @@ def send_bank_request_ping(item):
         f"Player: {item.get('requester_name')} [{item.get('requester_id')}]\n"
         f"Amount: {amount_text}\n"
         f"Faction: {item.get('faction_name')}\n"
-        f"Preferred Banker: {item.get('selected_banker_name') or 'Any available banker'}\n"
+        f"Notify: All faction bankers\n"
         f"Request ID: #{item.get('id')}"
     )
 
@@ -1781,7 +1781,8 @@ def create_request():
     amount = data.get("amount", 0)
     note = str(data.get("note") or "").strip()
     selected_faction_id = str(data.get("target_faction_id") or "").strip()
-    selected_banker_id = str(data.get("target_banker_id") or "").strip()
+    # v1.1.3: requests notify all faction bankers; ignore any stale preferred banker value from older userscripts.
+    selected_banker_id = ""
 
     try:
         amount = int(str(amount).replace(",", "").replace("$", "").strip())
