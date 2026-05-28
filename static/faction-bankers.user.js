@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.0.8
+// @version      1.0.9
 // @description  Faction vault request app with coin-only launcher and faction dropdown.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.0.8-header-coin-tabs";
+  const FB_BUILD = "1.0.9-travel-opens-request";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1321,13 +1321,123 @@
     }
   }
 
+  function openRequestOverlayFromHeader(reason = "header") {
+    // Used while flying/abroad: Torn faction page may be blocked/limited,
+    // so the header coin opens the request tab directly instead of navigating.
+    openOverlay();
+
+    setTimeout(() => {
+      const tab = document.querySelector('.fb-tab[data-tab="request"]');
+      if (tab) tab.click();
+      const subtitle = document.querySelector('#fb-subtitle');
+      if (subtitle && reason) subtitle.textContent = reason;
+    }, 140);
+  }
+
+  function profileLooksTravelingOrAbroad(data) {
+    if (!data || typeof data !== "object") return false;
+
+    const bits = [];
+    const status = data.status;
+    const travel = data.travel;
+    const locationObj = data.location;
+
+    if (status && typeof status === "object") {
+      bits.push(status.state, status.details, status.description, status.color);
+    } else if (status) {
+      bits.push(status);
+    }
+
+    if (travel && typeof travel === "object") {
+      bits.push(
+        travel.status, travel.state, travel.phase, travel.destination, travel.departure,
+        travel.method, travel.country, travel.city, travel.location
+      );
+    } else if (travel) {
+      bits.push(travel);
+    }
+
+    if (locationObj && typeof locationObj === "object") {
+      bits.push(locationObj.country, locationObj.city, locationObj.name);
+    } else if (locationObj) {
+      bits.push(locationObj);
+    }
+
+    const joined = bits.filter(Boolean).join(" ").toLowerCase();
+
+    // Prioritize states that mean the user should not be pushed to faction page.
+    if (/travel|travelling|flight|flying|returning|airborne|abroad|overseas/.test(joined)) return true;
+
+    // Some Torn responses only expose a non-Torn location while abroad.
+    // Treat common country/city location data as abroad unless it says Torn.
+    const loc = String((locationObj && (locationObj.country || locationObj.city || locationObj.name)) || "").toLowerCase();
+    if (loc && loc !== "torn" && !loc.includes("torn")) return true;
+
+    return false;
+  }
+
+  function tornProfileForCurrentUser() {
+    const key = GM_getValue(K_API_KEY, "");
+    if (!key) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url: `https://api.torn.com/user/?selections=profile&key=${encodeURIComponent(key)}`,
+        timeout: 12000,
+        onload: (res) => {
+          try {
+            const data = JSON.parse(res.responseText || "{}");
+            resolve(data && !data.error ? data : null);
+          } catch {
+            resolve(null);
+          }
+        },
+        onerror: () => resolve(null),
+        ontimeout: () => resolve(null),
+      });
+    });
+  }
+
+  function pageLooksTravelingOrAbroad() {
+    const href = String(location.href || "").toLowerCase();
+    const title = String(document.title || "").toLowerCase();
+    const bodyText = String(document.body?.innerText || "").toLowerCase().slice(0, 5000);
+
+    if (/travel|travelagency|abroad|loader\.php\?sid=travel/.test(href)) return true;
+    if (/travel|abroad|flight/.test(title)) return true;
+
+    // Only use a small text sample to avoid expensive page scanning on PDA.
+    if (/you are currently abroad|you are traveling|you are travelling|returning to torn|flying to|traveling to|travelling to/.test(bodyText)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  async function shouldHeaderCoinOpenRequestInsteadOfFaction() {
+    if (pageLooksTravelingOrAbroad()) return true;
+
+    const data = await tornProfileForCurrentUser();
+    return profileLooksTravelingOrAbroad(data);
+  }
+
   function maybeScrollToBankingBox() {
     if (!GM_getValue(K_SCROLL_TO_BANK, false)) return;
     if (!isOwnFactionPage()) return;
     if (scrollToFactionBankingBox()) GM_setValue(K_SCROLL_TO_BANK, false);
   }
 
-  function openHeaderCoinBoard() {
+  async function openHeaderCoinBoard() {
+    try {
+      if (await shouldHeaderCoinOpenRequestInsteadOfFaction()) {
+        openRequestOverlayFromHeader("Travel/abroad mode — request from here.");
+        return;
+      }
+    } catch {
+      // If the status check fails, keep the original normal behavior.
+    }
+
     goToFactionBankingPage();
   }
 
