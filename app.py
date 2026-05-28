@@ -1963,7 +1963,7 @@ def list_requests():
     if resp:
         return resp, code
 
-    # v1.2.7 visibility fix:
+    # v1.2.8 visibility fix:
     # - Own requests must always come back for My Requests.
     # - Bankers/admins see requests for their banker factions.
     # - Admin sees their own faction even if Render banker config is empty.
