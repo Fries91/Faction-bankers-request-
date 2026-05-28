@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.2.4-complete-ping-fix"
+APP_VERSION = "1.2.5-chat-fallback-notify-fix"
 
 
 @app.errorhandler(Exception)
