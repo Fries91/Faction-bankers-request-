@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.2.5-chat-fallback-notify-fix"
+APP_VERSION = "1.2.7-request-visibility-ping-fix"
 
 
 @app.errorhandler(Exception)
@@ -1229,6 +1229,7 @@ def row_to_item(row):
         "handled_by_name": row["handled_by_name"] or "",
         "handled_at": row["handled_at"] or "",
         "bank_note": row["bank_note"] or "",
+        "is_active": bool(row.get("is_active", True)),
         "selected_banker_id": row.get("selected_banker_id", "") or "",
         "selected_banker_name": row.get("selected_banker_name", "") or "",
     }
@@ -1396,7 +1397,7 @@ def home():
         {
             "ok": True,
             "app": "Faction Bankers",
-            "version": "1.2.6-chat-command-route",
+            "version": "1.2.7-request-visibility-ping-fix",
             "mode": "postgres",
             "note": "Active requests stay visible until completed; recently completed requests show who completed them to prevent double-pay.",
             "endpoints": [
@@ -1962,6 +1963,10 @@ def list_requests():
     if resp:
         return resp, code
 
+    # v1.2.7 visibility fix:
+    # - Own requests must always come back for My Requests.
+    # - Bankers/admins see requests for their banker factions.
+    # - Admin sees their own faction even if Render banker config is empty.
     if user.get("is_admin"):
         faction_ids = sorted(set(all_configured_faction_ids() or []) | {str(user.get("faction_id") or "")})
     elif user.get("is_banker"):
@@ -1970,6 +1975,7 @@ def list_requests():
         faction_ids = []
 
     faction_ids = [str(x).strip() for x in faction_ids if str(x).strip()]
+    own_player_id = str(user.get("player_id") or "").strip()
     recent_completed_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
 
     if not db_ok:
@@ -2001,7 +2007,7 @@ def list_requests():
                     ORDER BY created_ts DESC
                     LIMIT 75
                     """,
-                    (recent_completed_cutoff, faction_ids, user["player_id"]),
+                    (recent_completed_cutoff, faction_ids, own_player_id),
                 )
             else:
                 cur.execute(
@@ -2016,7 +2022,7 @@ def list_requests():
                     ORDER BY created_ts DESC
                     LIMIT 75
                     """,
-                    (user["player_id"], recent_completed_cutoff),
+                    (own_player_id, recent_completed_cutoff),
                 )
 
             rows = cur.fetchall()
@@ -2630,6 +2636,7 @@ def create_request_from_chat_command():
         "pushover_sent": bool(notify_debug.get("sent")),
         "notify_debug": notify_debug,
         "mode": "postgres",
+        "request_visible_hint": "Saved as pending; refresh My Requests/Banker Board",
     })
 
 
