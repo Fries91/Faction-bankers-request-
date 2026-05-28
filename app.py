@@ -2798,6 +2798,72 @@ def create_request_from_chat_command():
     })
 
 
+@app.get("/api/banker/requests-lite")
+def list_requests_lite():
+    """Simple fallback request list for PDA/Render hiccups."""
+    db_ok, db_msg = db_ready()
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    own_player_id = str(user.get("player_id") or "").strip()
+    own_faction_id = str(user.get("faction_id") or "").strip()
+    can_see_faction = bool(user.get("is_banker") or user.get("is_admin") or user.get("can_manage_leaders") or user.get("is_leader"))
+    recent_completed_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
+
+    if not db_ok:
+        items = []
+        for r in MEMORY_REQUESTS:
+            status = str(r.get("status") or "pending").lower()
+            active_or_recent = bool(r.get("is_active", True)) or (status == "complete" and float(r.get("created_ts") or 0) >= recent_completed_cutoff)
+            if not active_or_recent:
+                continue
+            if str(r.get("requester_id") or "") == own_player_id or (can_see_faction and str(r.get("faction_id") or "") == own_faction_id):
+                items.append(r)
+        items.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+        return jsonify({"ok": True, "items": trim_completed_history_items(items), "count": len(items), "mode": "memory-lite", "warning": db_msg})
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if can_see_faction and own_faction_id:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE (
+                        requester_id = %s
+                        OR faction_id = %s
+                      )
+                      AND (
+                        is_active = TRUE
+                        OR (status = 'complete' AND created_ts >= %s)
+                      )
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 100
+                    """,
+                    (own_player_id, own_faction_id, recent_completed_cutoff),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE requester_id = %s
+                      AND (
+                        is_active = TRUE
+                        OR (status = 'complete' AND created_ts >= %s)
+                      )
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 50
+                    """,
+                    (own_player_id, recent_completed_cutoff),
+                )
+            rows = cur.fetchall()
+
+    items = trim_completed_history_items([row_to_item(row) for row in rows])
+    return jsonify({"ok": True, "items": items, "count": len(items), "mode": "postgres-lite"})
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     try:
