@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.2.4
-// @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
+// @version      1.2.5
+// @description  Faction vault request board with reliable /banker chat command fallback and notifications.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -4569,6 +4569,7 @@
       if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
     }
 
+    FB_CHAT_LAST_TYPED_COMMAND = { text: String(text || "").trim(), ts: Date.now() };
     fbSetEditableText(el, "");
     try { el.blur?.(); } catch (_) {}
     fbSendBankerChatCommand(text);
@@ -4607,9 +4608,67 @@
     }, true);
   }
 
+
+  // v1.2.5 reliable chat fallback:
+  // PDA sometimes posts /banker as a normal message before our send-button hook sees it.
+  // We remember the command while the user types, then if the exact same command appears
+  // in the chat within a few seconds, we still create the request and ping bankers once.
+  let FB_CHAT_LAST_TYPED_COMMAND = { text: "", ts: 0 };
+  const FB_CHAT_FALLBACK_DONE = new Set();
+
+  function fbRememberTypedBankerCommandFrom(el) {
+    if (!el || !fbLikelyChatInput(el)) return;
+    const text = String(fbGetEditableText(el) || "").trim();
+    if (!text.toLowerCase().startsWith("/banker")) return;
+    FB_CHAT_LAST_TYPED_COMMAND = { text, ts: Date.now() };
+  }
+
+  function fbIsInsideOurBankerUi(el) {
+    try {
+      return !!(el && el.closest && el.closest('#fb-board, #fb-built-in-box, #fb-header-coin, #fb-pay-prefill-notice'));
+    } catch (_) { return false; }
+  }
+
+  function fbFindPostedBankerCommandText() {
+    const remembered = String(FB_CHAT_LAST_TYPED_COMMAND.text || "").trim();
+    if (!remembered || Date.now() - Number(FB_CHAT_LAST_TYPED_COMMAND.ts || 0) > 25000) return "";
+
+    // Look for exact command text in visible chat/message nodes. Exact-match keeps this
+    // from creating requests from other players' old /banker messages.
+    const candidates = Array.from(document.querySelectorAll('div, span, p, li, button'));
+    for (const el of candidates) {
+      if (!el || fbIsInsideOurBankerUi(el)) continue;
+      const tag = String(el.tagName || "").toLowerCase();
+      if (["input", "textarea", "select", "option"].includes(tag) || el.isContentEditable) continue;
+      const txt = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      if (txt === remembered) return remembered;
+    }
+    return "";
+  }
+
+  function installChatBankerCommandFallback() {
+    if (installChatBankerCommandFallback._installed) return;
+    installChatBankerCommandFallback._installed = true;
+
+    document.addEventListener('input', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
+    document.addEventListener('keyup', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
+
+    setInterval(() => {
+      const cmd = fbFindPostedBankerCommandText();
+      if (!cmd) return;
+      const key = cmd.toLowerCase();
+      if (FB_CHAT_FALLBACK_DONE.has(key)) return;
+      FB_CHAT_FALLBACK_DONE.add(key);
+      setTimeout(() => FB_CHAT_FALLBACK_DONE.delete(key), 60000);
+      showPayNotice("Caught /banker chat command. Sending bank request...");
+      fbSendBankerChatCommand(cmd);
+    }, 900);
+  }
+
   function startWhenReady() {
     if (!isTornPage()) return;
     installChatBankerCommand();
+    installChatBankerCommandFallback();
     boot();
   }
 
