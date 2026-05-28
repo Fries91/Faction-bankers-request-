@@ -1096,7 +1096,7 @@ def home():
         {
             "ok": True,
             "app": "Faction Bankers",
-            "version": "1.0.6-leaders-settings-polish",
+            "version": "1.0.7-request-list-coin-fix",
             "mode": "postgres",
             "note": "Active requests are stored until banker completes or denies them.",
             "endpoints": [
@@ -1609,6 +1609,84 @@ def remove_leader_banker():
     FACTION_ROLE_BANKER_CACHE.clear()
     BANKER_STATUS_CACHE.clear()
     return jsonify({"ok": True, "removed": banker_id, "mode": "postgres" if db_ok else "memory", "warning": "" if db_ok else db_msg})
+
+
+@app.get("/api/banker/requests")
+def list_requests():
+    """List active requests visible to the logged-in user.
+
+    v1.0.7 fix:
+    - Restores the GET /api/banker/requests route used by the header coin,
+      banker board, and PDA refresh. Without this, Render returned 405
+      "method not allowed" and other bankers could not see pending requests.
+    - Keeps faction separation: members see their own requests; bankers see
+      active requests for their own banker factions; admin can see configured
+      admin factions plus their own faction.
+    """
+    db_ok, db_msg = db_ready()
+
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    if user.get("is_admin"):
+        faction_ids = sorted(set(all_configured_faction_ids() or []) | {str(user.get("faction_id") or "")})
+    elif user.get("is_banker"):
+        faction_ids = sorted(set(user.get("banker_factions") or [user.get("faction_id")]))
+    else:
+        faction_ids = []
+
+    faction_ids = [str(x).strip() for x in faction_ids if str(x).strip()]
+
+    if not db_ok:
+        items = memory_visible_items(user)
+        items = sorted(items, key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+        return jsonify({
+            "ok": True,
+            "items": items,
+            "count": len(items),
+            "mode": "memory",
+            "warning": db_msg,
+        })
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if faction_ids:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE is_active = TRUE
+                      AND (
+                        faction_id = ANY(%s)
+                        OR requester_id = %s
+                      )
+                    ORDER BY created_ts DESC
+                    """,
+                    (faction_ids, user["player_id"]),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE requester_id = %s
+                      AND is_active = TRUE
+                    ORDER BY created_ts DESC
+                    """,
+                    (user["player_id"],),
+                )
+
+            rows = cur.fetchall()
+
+    items = [row_to_item(row) for row in rows]
+
+    return jsonify({
+        "ok": True,
+        "items": items,
+        "count": len(items),
+        "mode": "postgres",
+    })
 
 @app.get("/api/banker/requests/<int:req_id>")
 def get_request(req_id):
