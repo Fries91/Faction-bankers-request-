@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.2.7
-// @description  Faction vault request board with reliable /banker chat requests, request visibility, and banker coin notifications.
+// @version      1.2.9
+// @description  Faction vault banking using /banker chat commands, banker board, leader role setup, and header coin notifications.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -1200,6 +1200,9 @@
 
 
       /* v1.1.4 cleanup: keep board clean and stop the faction box from sitting behind the board */
+
+      /* v1.2.9 command-only: no faction-page request box. Requests are /banker chat commands only. */
+      #fb-built-in-box { display: none !important; }
       body.fb-board-open #fb-built-in-box {
         display: none !important;
       }
@@ -1555,16 +1558,19 @@
   }
 
   async function openHeaderCoinBoard() {
+    // v1.2.9: command-only mode. The coin is for banker acceptance and leader setup, not request forms.
     try {
-      if (await shouldHeaderCoinOpenRequestInsteadOfFaction()) {
-        openRequestOverlayFromHeader("Travel/abroad mode — request from here.");
-        return;
-      }
-    } catch {
-      // If the status check fails, keep the original normal behavior.
-    }
+      if (!APP.me && GM_getValue(K_API_KEY, "")) APP.me = await gmRequest("GET", "/api/banker/me");
+    } catch {}
 
-    goToFactionBankingPage();
+    openOverlay();
+    setTimeout(() => {
+      const tabName = (APP.me?.is_banker || APP.me?.is_admin)
+        ? "banker"
+        : ((APP.me?.can_manage_leaders || APP.me?.is_leader_role) ? "leaders" : "settings");
+      const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+      if (tab) tab.click();
+    }, 120);
   }
 
   function makeHeaderCoin() {
@@ -1813,102 +1819,9 @@
   }
 
   function mountBuiltInBankerBox() {
-    detectFactionBalanceFromPage();
-    const oldBox = $("#fb-built-in-box");
-
-    // Only show the quick request box on your own faction page.
-    // Keep it off profiles/other faction pages so it does not clutter the rest of Torn.
-    if (!isOwnFactionPage()) {
-      if (oldBox) oldBox.remove();
-      return;
-    }
-
-    const mountInfo = findFactionBuiltInMount();
-    const mount = mountInfo?.parent || mountInfo;
-    if (!mount || !document.body.contains(mount)) {
-      // PDA can briefly hide/rebuild the faction icon row while scrolling or refreshing.
-      // If our box is already mounted, keep it instead of removing it and making it disappear.
-      if (oldBox && document.body.contains(oldBox)) return;
-      return;
-    }
-
-    let box = oldBox;
-    const selectedFaction = APP.me?.faction_id || GM_getValue(K_TARGET_FACTION, "");
-    const activeEl = document.activeElement;
-    const userIsTyping = !!(box && activeEl && box.contains(activeEl) && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(activeEl.tagName));
-    const renderSig = JSON.stringify({
-      f: (APP.factions || []).map((x) => [String(x.faction_id || ""), String(x.faction_name || "")]),
-      sf: selectedFaction,
-      bal: String(APP.balanceAmount ?? APP.balanceText ?? ""),
-    });
-
-    if (!box) {
-      box = document.createElement("div");
-      box.id = "fb-built-in-box";
-      box.setAttribute("data-fb-built", "1");
-    } else if (box.dataset.sig === renderSig || userIsTyping) {
-      // PDA-safe: do not rebuild while the user is tapping/typing.
-      // Rebuilding the DOM during Torn/PDA mutations was causing freezes and blocked clicks.
-      if (mountInfo?.after && document.body.contains(mountInfo.after) && box.previousElementSibling !== mountInfo.after) {
-        mountInfo.after.insertAdjacentElement("afterend", box);
-      }
-      return;
-    }
-
-    box.dataset.sig = renderSig;
-    box.innerHTML = `
-      <div class="fb-built-head">
-        <div>
-          <b>🪙 Factional Banking</b>
-          <span id="fb-built-status">Enter amount — faction bankers get notified.</span>
-        </div>
-        <button id="fb-built-open" type="button">Board</button>
-      </div>
-
-      <div class="fb-built-grid">
-        <div class="fb-own-faction">Faction: <b>${esc(APP.me?.faction_name || factionLabelById(selectedFaction) || "Your faction")}</b></div>
-        ${balanceLineHtml()}
-        <div class="fb-row" style="gap:6px; margin:0;">
-          <button id="fb-built-open-balance" type="button">Sync Balance</button>
-          <button id="fb-built-refresh-balance" type="button">Refresh</button>
-          <button id="fb-built-manual-balance" type="button">Enter Manually</button>
-        </div>
-        <input id="fb-built-faction" type="hidden" value="${esc(selectedFaction)}">
-        <input id="fb-built-amount" inputmode="numeric" placeholder="Amount, example: 25000000">
-        <button id="fb-built-send" type="button">Send Request</button>
-        <button id="fb-built-full" type="button">Request Full Balance</button>
-      </div>
-    `;
-
-    // Put the request box under the faction icon controls and above the faction panels.
-    if (mountInfo?.before && document.body.contains(mountInfo.before)) {
-      if (box.parentElement !== mount || box.nextElementSibling !== mountInfo.before) {
-        mount.insertBefore(box, mountInfo.before);
-      }
-    } else if (mountInfo?.after && document.body.contains(mountInfo.after)) {
-      if (box.parentElement !== mount || box.previousElementSibling !== mountInfo.after) {
-        mountInfo.after.insertAdjacentElement("afterend", box);
-      }
-    } else if (box.parentElement !== mount) {
-      if (mountInfo?.prepend && mount.prepend) mount.prepend(box);
-      else mount.appendChild(box);
-    }
-
-    $("#fb-built-open")?.addEventListener("click", openBankerBoard);
-    $("#fb-built-open-balance")?.addEventListener("click", openBalancePageForCapture);
-    $("#fb-built-refresh-balance")?.addEventListener("click", async () => {
-      if (!detectFactionBalanceFromPage()) {
-        setFactionBalance(null, "", "Tap Sync Balance or Enter Manually");
-      }
-      await loadFactionBalance(true);
-      mountBuiltInBankerBox();
-    });
-    $("#fb-built-manual-balance")?.addEventListener("click", promptManualBalance);
-    $("#fb-built-send")?.addEventListener("click", submitBuiltInRequest);
-    $("#fb-built-full")?.addEventListener("click", submitFullBalanceRequest);
-
-    setCoinAlert(APP.pendingCount || 0);
-    setTimeout(maybeScrollToBankingBox, 120);
+    // v1.2.9 command-only mode: no faction-page request box.
+    const oldBox = document.querySelector("#fb-built-in-box");
+    if (oldBox) oldBox.remove();
   }
 
 
@@ -1950,8 +1863,7 @@
       </div>
 
       <div class="fb-tabs">
-        <button class="fb-tab active" data-tab="request" type="button">Request</button>
-        <button class="fb-tab" data-tab="my" type="button">My Requests</button>
+        <button class="fb-tab active" data-tab="commands" type="button">Commands</button>
         <button class="fb-tab" data-tab="banker" type="button">Banker</button>
         <button class="fb-tab" data-tab="leaders" type="button">Leaders</button>
         <button class="fb-tab" data-tab="settings" type="button">Settings</button>
@@ -2017,7 +1929,7 @@
 
   function activeTab() {
     const btn = $(".fb-tab.active");
-    return btn?.dataset?.tab || "request";
+    return btn?.dataset?.tab || "commands";
   }
 
   function setCoinAlert(count) {
@@ -2511,62 +2423,47 @@
       return;
     }
 
-    if (tab === "request") renderRequestTab();
+    if (tab === "commands" || tab === "request") renderCommandsTab();
     if (tab === "my") renderMyTab();
     if (tab === "banker") renderBankerTab();
     if (tab === "leaders") renderLeadersTab();
     if (tab === "settings") renderSettings();
   }
 
-  function renderRequestTab(msg = "") {
+  function renderCommandsTab(msg = "") {
     setBody(`
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
-
-      <div class="fb-box">
+      <div class="fb-box fb-command-guide">
         <div class="fb-row fb-space">
           <div>
-            <div class="fb-request-title">🪙 Request from the Vault</div>
-            <div class="fb-small">Logged in as ${esc(APP.me?.name || "Unknown")} ${APP.me?.faction_name ? `• ${esc(APP.me.faction_name)}` : ""}</div>
+            <div class="fb-request-title">🪙 /banker Chat Commands</div>
+            <div class="fb-small">Requests are now sent from faction chat. No request forms, no extra boxes.</div>
           </div>
-          <span class="fb-pill">Member</span>
+          <span class="fb-pill">Command Mode</span>
         </div>
-      </div>
-
-      <div class="fb-box">
-        <label class="fb-label">Faction</label>
-        <div class="fb-input" style="height:auto;">${esc(APP.me?.faction_name || "Your faction")}</div>
-        <input id="fb-target-faction" type="hidden" value="${esc(APP.me?.faction_id || currentTargetFactionId())}">
-        <div style="margin-top:8px;">${balanceLineHtml()}</div>
-        <div class="fb-row" style="gap:6px; margin-top:8px;">
-          <button id="fb-open-balance-page" class="fb-btn" type="button">Sync Balance</button>
-          <button id="fb-refresh-balance" class="fb-btn" type="button">Refresh</button>
-          <button id="fb-manual-balance" class="fb-btn blue" type="button">Enter Manually</button>
-        </div>
-
-        <label class="fb-label" style="margin-top:10px;">Amount requested</label>
-        <input id="fb-amount" class="fb-input" inputmode="numeric" placeholder="Example: 25000000">
-
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-full-request" class="fb-btn blue" type="button">Request Full Balance</button>
-        </div>
-
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-submit-request" class="fb-btn gold" type="button">Send Amount Request</button>
-          <button id="fb-refresh" class="fb-btn" type="button">Refresh</button>
-        </div>
-
-        <div class="fb-small" style="margin-top:8px;">
-          Bankers are controlled by your faction leader in the Leaders tab. Requests notify all configured faction bankers.
+        <div class="fb-small" style="margin-top:10px; line-height:1.55;">
+          <b>Request money:</b><br>
+          <code>/banker 25m</code><br>
+          <code>/banker 25000000</code><br>
+          <code>/banker 10m war meds</code><br>
+          <code>/banker full</code>
+          <br><br>
+          <b>Manage your own request:</b><br>
+          <code>/banker status</code> — check your latest request<br>
+          <code>/banker cancel</code> — cancel your latest pending request<br>
+          <code>/banker cancel 123</code> — cancel a specific request ID<br>
+          <code>/banker change 50m</code> — change your latest pending request<br>
+          <code>/banker change 123 50m war stack</code> — change a specific request
+          <br><br>
+          <b>Bankers:</b> use the Banker tab to open requests and mark them complete.<br>
+          <b>Leaders:</b> use the Leaders tab to choose banker roles and Pushover keys.
         </div>
       </div>
     `);
+  }
 
-    $("#fb-submit-request")?.addEventListener("click", submitRequest);
-    $("#fb-full-request")?.addEventListener("click", submitFullBalanceRequest);
-    $("#fb-open-balance-page")?.addEventListener("click", openBalancePageForCapture);
-    $("#fb-refresh-balance")?.addEventListener("click", async () => { await loadFactionBalance(true); renderRequestTab(); });
-    $("#fb-manual-balance")?.addEventListener("click", promptManualBalance);
-    $("#fb-refresh")?.addEventListener("click", () => refreshAll(true));
+  function renderRequestTab(msg = "") {
+    renderCommandsTab(msg);
   }
 
   function renderMyTab() {
@@ -4503,68 +4400,75 @@
     FB_CHAT_COMMAND_BUSY = true;
     FB_CHAT_LAST_SENT = { text, ts: now };
     setTimeout(() => { FB_CHAT_COMMAND_BUSY = false; }, 10000);
+
     const parts = text.split(/\s+/).filter(Boolean);
-    const cmd = String(parts.shift() || "").toLowerCase();
-    if (cmd !== "/banker") return false;
+    const cmd = String(parts[0] || "").toLowerCase();
+    const action = String(parts[1] || "help").toLowerCase();
+    if (cmd !== "/banker") { FB_CHAT_COMMAND_BUSY = false; return false; }
 
     if (!GM_getValue(K_API_KEY, "")) {
       showPayNotice("Save your limited Torn API key in Factional Banking settings first.");
-      openOverlay("settings");
+      openOverlay();
+      setTimeout(() => document.querySelector('.fb-tab[data-tab="settings"]')?.click(), 120);
+      FB_CHAT_COMMAND_BUSY = false;
       return true;
     }
 
-    const amountToken = String(parts.shift() || "").trim();
-    const note = parts.join(" ").trim();
-    let amount = 0;
-    let fullRequest = false;
+    if (["help", "commands", "?"].includes(action) || parts.length === 1) {
+      showPayNotice("Commands: /banker 25m, /banker full, /banker status, /banker cancel, /banker change 50m");
+      openOverlay();
+      setTimeout(() => document.querySelector('.fb-tab[data-tab="commands"]')?.click(), 120);
+      FB_CHAT_COMMAND_BUSY = false;
+      return true;
+    }
 
-    if (["full", "balance", "all", "max"].includes(amountToken.toLowerCase())) {
-      fullRequest = true;
+    // For full balance, try to attach the saved/synced balance. If unknown, backend still accepts amount 1 as a full-balance marker.
+    let amount = 0;
+    if (["full", "balance", "all", "max"].includes(action)) {
       await loadFactionBalance(true);
       const detected = Number(APP.balanceAmount || 0);
       amount = Number.isFinite(detected) && detected > 0 ? Math.floor(detected) : 1;
-    } else {
-      amount = fbParseBankerAmountToken(amountToken);
-    }
-
-    if (!amount || amount < 1) {
-      showPayNotice("Use /banker 25m, /banker 25000000, or /banker full");
-      return true;
+    } else if (!["cancel", "remove", "delete", "change", "edit", "update", "status", "check", "mine"].includes(action)) {
+      amount = fbParseBankerAmountToken(action);
     }
 
     try {
       if (!APP.me) APP.me = await gmRequest("GET", "/api/banker/me");
-      const targetFactionId = String(APP.me?.faction_id || selectedFactionFromPage() || "").trim();
-      if (!targetFactionId) {
-        showPayNotice("Could not detect your faction. Open Factional Banking settings and test login.");
-        return true;
-      }
-
-      showPayNotice(fullRequest ? "Sending full balance bank request..." : `Sending bank request for ${money(amount)}...`);
-      const requestNote = fullRequest
-        ? (amount > 1 ? `Full balance requested from chat command: ${money(amount)}${note ? ` • ${note}` : ""}` : FULL_BALANCE_NOTE)
-        : (note ? `Chat command: ${note}` : "Chat command request");
-
-      const res = await gmRequest("POST", "/api/banker/chat-command", {
-        command_text: text,
-        amount,
-        note: requestNote,
-      });
+      showPayNotice("🪙 Processing /banker command...");
+      const res = await gmRequest("POST", "/api/banker/chat-command", { command_text: text, amount });
 
       if (res && res.item) {
-        upsertRequestItem(res.item);
-        saveLocalRequest(res.item);
-        APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
-        if (APP.open && activeTab() === "my") renderMyRequestsTab();
+        if (res.action === "canceled") {
+          rememberClosedRequest(res.item.id);
+          clearLocalRequest(res.item.id);
+          APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(res.item.id));
+        } else {
+          upsertRequestItem(res.item);
+          saveLocalRequest(res.item);
+          APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
+        }
       }
-      if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
+
       await refreshAll(true);
       await refreshHeaderCoinBadge(true);
-      if (res && res.item) {
-        APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
-        if (APP.open && activeTab() === "my") renderMyRequestsTab();
+
+      const a = String(res?.action || "created");
+      if (a === "created") {
+        if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
+        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm." : `🪙 Bank request sent${amount > 1 ? `: ${money(amount)}` : ""}.`);
+      } else if (a === "canceled") {
+        showPayNotice("🪙 Bank request canceled.");
+      } else if (a === "changed") {
+        showPayNotice(`🪙 Bank request changed to ${money(res.item.amount)}.`);
+      } else if (a === "status") {
+        if (res.item) showPayNotice(`🪙 Latest request #${res.item.id}: ${res.item.status} • ${money(res.item.amount)}`);
+        else showPayNotice("🪙 No bank requests found.");
+      } else if (a === "help") {
+        showPayNotice(res.message || "Use /banker help for commands.");
+      } else {
+        showPayNotice("🪙 /banker command done.");
       }
-      showPayNotice((res && res.pushover_sent === false) ? `🪙 Request saved, but phone ping did not confirm. Check Leaders Pushover keys.` : (fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`));
+
       FB_CHAT_COMMAND_BUSY = false;
       return true;
     } catch (err) {
