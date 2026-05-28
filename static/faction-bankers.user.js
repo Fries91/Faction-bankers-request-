@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.1.7
+// @version      1.1.8
 // @description  Faction vault request board. Requests notify all faction bankers chosen by leaders.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.1.6-completed-history-limit-5";
+  const FB_BUILD = "1.1.8-safe-bank-prefill";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -943,31 +943,6 @@
         font-weight: 800;
       }
 
-
-
-      #fb-bank-toast {
-        position: fixed !important;
-        left: 50% !important;
-        bottom: 18px !important;
-        transform: translateX(-50%) !important;
-        z-index: 100002 !important;
-        max-width: min(420px, calc(100vw - 26px)) !important;
-        border: 1px solid rgba(246,195,74,.55) !important;
-        border-radius: 14px !important;
-        background: linear-gradient(180deg, rgba(22,18,10,.96), rgba(8,8,8,.96)) !important;
-        color: #fff3c4 !important;
-        padding: 10px 13px !important;
-        font-size: 12px !important;
-        font-weight: 900 !important;
-        box-shadow: 0 12px 32px rgba(0,0,0,.55), 0 0 18px rgba(246,195,74,.14) !important;
-        text-align: center !important;
-        pointer-events: none !important;
-      }
-
-      #fb-bank-toast.fb-err {
-        border-color: rgba(255,90,90,.65) !important;
-        color: #ffd0d0 !important;
-      }
       @media (max-width: 520px) {
         .fb-flow-grid { grid-template-columns: 1fr; }
       }
@@ -4275,157 +4250,6 @@
     }
   }
 
-
-  function showBankToast(message, isError = false) {
-    let toast = document.querySelector("#fb-bank-toast");
-    if (!toast) {
-      toast = document.createElement("div");
-      toast.id = "fb-bank-toast";
-      document.body.appendChild(toast);
-    }
-    toast.className = isError ? "fb-err" : "";
-    toast.textContent = String(message || "");
-    clearTimeout(showBankToast._t);
-    showBankToast._t = setTimeout(() => {
-      const t = document.querySelector("#fb-bank-toast");
-      if (t) t.remove();
-    }, 4200);
-  }
-
-  function parseBankerAmountToken(token) {
-    const raw = String(token || "").trim().toLowerCase().replace(/[$,]/g, "");
-    if (!raw) return 0;
-    const m = raw.match(/^(\d+(?:\.\d+)?)(k|m|b|mil|mill|million|bil|billion)?$/i);
-    if (!m) return 0;
-    let n = Number(m[1]);
-    if (!Number.isFinite(n) || n <= 0) return 0;
-    const suffix = String(m[2] || "").toLowerCase();
-    if (suffix === "k") n *= 1000;
-    if (["m", "mil", "mill", "million"].includes(suffix)) n *= 1000000;
-    if (["b", "bil", "billion"].includes(suffix)) n *= 1000000000;
-    return Math.floor(n);
-  }
-
-  function getEditableText(el) {
-    if (!el) return "";
-    if (el.isContentEditable) return String(el.innerText || el.textContent || "").trim();
-    return String(el.value || "").trim();
-  }
-
-  function setEditableText(el, value) {
-    if (!el) return;
-    if (el.isContentEditable) {
-      el.textContent = value;
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
-    } else {
-      el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-  }
-
-  function isLikelyChatInput(el) {
-    if (!el) return false;
-    const tag = String(el.tagName || "").toLowerCase();
-    const type = String(el.getAttribute("type") || "").toLowerCase();
-    const cls = String(el.className || "").toLowerCase();
-    const ph = String(el.getAttribute("placeholder") || "").toLowerCase();
-    const aria = String(el.getAttribute("aria-label") || "").toLowerCase();
-    const role = String(el.getAttribute("role") || "").toLowerCase();
-    const editable = !!el.isContentEditable || tag === "textarea" || (tag === "input" && ["", "text", "search"].includes(type));
-    if (!editable) return false;
-    const hint = `${cls} ${ph} ${aria} ${role}`;
-    return hint.includes("chat") || hint.includes("message") || hint.includes("send") || location.href.includes("/messages.php") || document.querySelector('[class*="chat" i], [id*="chat" i]');
-  }
-
-  async function sendBankerSlashRequest(commandText) {
-    const text = String(commandText || "").trim();
-    const parts = text.split(/\s+/).filter(Boolean);
-    const cmd = String(parts.shift() || "").toLowerCase();
-    if (cmd !== "/banker") return false;
-
-    if (!GM_getValue(K_API_KEY, "")) {
-      showBankToast("Save your limited Torn API key in Factional Banking settings first.", true);
-      openOverlay();
-      setTimeout(() => document.querySelector('.fb-tab[data-tab="settings"]')?.click(), 150);
-      return true;
-    }
-
-    const amountToken = String(parts.shift() || "").trim();
-    const note = parts.join(" ").trim();
-    let amount = 0;
-    let fullRequest = false;
-
-    if (["full", "balance", "all", "max"].includes(amountToken.toLowerCase())) {
-      fullRequest = true;
-      await loadFactionBalance(true);
-      const detected = Number(APP.balanceAmount || 0);
-      amount = Number.isFinite(detected) && detected > 0 ? Math.floor(detected) : 1;
-    } else {
-      amount = parseBankerAmountToken(amountToken);
-    }
-
-    if (!amount || amount < 1) {
-      showBankToast("Use /banker 25m, /banker 25000000, or /banker full", true);
-      return true;
-    }
-
-    try {
-      if (!APP.me) {
-        const me = await gmRequest("GET", "/api/banker/me");
-        APP.me = me;
-      }
-      const targetFactionId = String(APP.me?.faction_id || selectedFactionFromPage() || "").trim();
-      if (!targetFactionId) {
-        showBankToast("Could not detect your faction. Open Factional Banking settings and test login.", true);
-        return true;
-      }
-
-      showBankToast(fullRequest ? "Sending full balance bank request..." : `Sending bank request for ${money(amount)}...`);
-      const requestNote = fullRequest
-        ? (amount > 1 ? `Full balance requested from chat command: ${money(amount)}${note ? ` • ${note}` : ""}` : FULL_BALANCE_NOTE)
-        : (note ? `Chat command: ${note}` : "Chat command request");
-
-      const res = await gmRequest("POST", "/api/banker/requests", {
-        amount,
-        note: requestNote,
-        target_faction_id: targetFactionId,
-        target_banker_id: "",
-      });
-
-      if (res && res.item) {
-        upsertRequestItem(res.item);
-        saveLocalRequest(res.item);
-      }
-      if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
-      await refreshHeaderCoinBadge(true);
-      showBankToast(fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`);
-      return true;
-    } catch (err) {
-      showBankToast(`Bank request failed: ${String(err.message || err).slice(0, 90)}`, true);
-      return true;
-    }
-  }
-
-  function installChatBankerCommand() {
-    if (installChatBankerCommand._installed) return;
-    installChatBankerCommand._installed = true;
-
-    document.addEventListener("keydown", (ev) => {
-      if (ev.key !== "Enter" || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
-      const el = ev.target;
-      if (!isLikelyChatInput(el)) return;
-      const text = getEditableText(el);
-      if (!String(text || "").trim().toLowerCase().startsWith("/banker")) return;
-
-      ev.preventDefault();
-      ev.stopPropagation();
-      ev.stopImmediatePropagation();
-      setEditableText(el, "");
-      sendBankerSlashRequest(text);
-    }, true);
-  }
-
   function clearBankerUiOnWrongPage() {
     if (!isOwnFactionPage()) {
       const box = document.querySelector("#fb-built-in-box");
@@ -4449,7 +4273,6 @@
     ensureStyles();
     clearBankerUiOnWrongPage();
     mountCoin();
-    installChatBankerCommand();
 
     // Only create the overlay when the user taps Board/profile/header coin. Never auto-open it on normal pages.
     if (APP.open) ensureOverlay();
@@ -4479,7 +4302,6 @@
     ensureStyles();
     clearBankerUiOnWrongPage();
     mountCoin();
-    installChatBankerCommand();
 
     APP.booted = true;
 
@@ -4520,6 +4342,162 @@
   function startWhenReady() {
     if (!isTornPage()) return;
     boot();
+  }
+
+
+
+  // v1.1.8 safe bank prefill override.
+  // Older PDA/iPhone builds could get stuck repeatedly trying to click the player autocomplete.
+  // This version only selects the player a couple of times, then targets Torn's real $ field without locking the page.
+  let FB_PREFILL_LAST_PICK = 0;
+  let FB_PREFILL_LAST_AMOUNT_OK = "";
+
+  function fbVisibleRect(el) {
+    try {
+      const r = el.getBoundingClientRect();
+      if (!r || r.width < 20 || r.height < 10) return null;
+      if (r.bottom < 0 || r.top > window.innerHeight + 200) return null;
+      return r;
+    } catch { return null; }
+  }
+
+  function fbIsAutocompleteResult(el, data) {
+    if (!el || el.closest?.("#fb-built-in-box, #fb-overlay, #fb-pay-prefill-notice")) return false;
+    const r = fbVisibleRect(el);
+    if (!r) return false;
+    const txt = getCleanText(el).toLowerCase();
+    const name = String(data?.playerName || "").toLowerCase();
+    const id = String(data?.playerId || "");
+    if (!txt || txt.length > 160) return false;
+    if (id && !txt.includes(id)) return false;
+    if (name && !txt.includes(name)) return false;
+    if (["friends", "faction", "company", "all"].some((x) => txt.trim() === x)) return false;
+    return true;
+  }
+
+  function fbClickPlayerResultOnce(data) {
+    if (!data?.playerId) return false;
+    const now = Date.now();
+    if (now - FB_PREFILL_LAST_PICK < 1600) return false;
+    FB_PREFILL_LAST_PICK = now;
+
+    const candidates = Array.from(document.querySelectorAll("li, a, button, div, span"))
+      .filter((el) => fbIsAutocompleteResult(el, data))
+      .map((el) => {
+        const txt = getCleanText(el).toLowerCase();
+        const r = el.getBoundingClientRect();
+        let score = 0;
+        if (String(data.playerId) && txt.includes(String(data.playerId))) score += 200;
+        if (String(data.playerName || "").toLowerCase() && txt.includes(String(data.playerName || "").toLowerCase())) score += 120;
+        if (/\[[0-9]+\]/.test(txt)) score += 60;
+        if (el.tagName === "LI") score += 60;
+        if (el.tagName === "A" || el.tagName === "BUTTON") score += 35;
+        // Prefer row-sized items, not giant wrappers.
+        if (r.height >= 18 && r.height <= 70) score += 40;
+        score -= Math.max(0, (r.width * r.height - 42000) / 1000);
+        return { el, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const choice = candidates[0]?.el;
+    if (!choice) return false;
+    const ok = tapElementHard(choice);
+    try { document.activeElement?.blur?.(); } catch {}
+    try { document.body?.focus?.(); } catch {}
+    return ok;
+  }
+
+  function fbFindRealDollarAmountInput(playerInput) {
+    const own = "#fb-built-in-box, #fb-overlay, #fb-pay-prefill-notice";
+    const usable = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"))
+      .filter((el) => !el.closest?.(own))
+      .filter((el) => visibleInput(el))
+      .filter((el) => el !== playerInput)
+      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
+      .filter((el) => !looksLikePlayerInput(el));
+
+    if (!usable.length) return null;
+
+    const dollars = Array.from(document.querySelectorAll("div, span, label, b, strong, i"))
+      .filter((el) => !el.closest?.(own))
+      .filter((el) => /^\s*\$\s*$/.test(String(el.textContent || "")))
+      .map((el) => el.getBoundingClientRect());
+
+    const pr = playerInput?.getBoundingClientRect?.();
+    const scored = usable.map((el) => {
+      const r = el.getBoundingClientRect();
+      let score = 5000;
+      for (const d of dollars) {
+        const sameRow = Math.abs((r.top + r.height / 2) - (d.top + d.height / 2));
+        const rightGap = Math.abs(r.left - d.right);
+        score = Math.min(score, sameRow * 10 + rightGap);
+      }
+      if (pr) {
+        if (r.top > pr.bottom - 10 && r.top < pr.bottom + 210) score -= 900;
+        if (Math.abs(r.left - pr.left) < 120) score -= 150;
+      }
+      const sig = inputSignature(el);
+      if (sig.includes("amount") || sig.includes("money") || sig.includes("give")) score -= 350;
+      if (sig.includes("search") || sig.includes("player") || sig.includes("member")) score += 1000;
+      return { el, score };
+    }).sort((a, b) => a.score - b.score);
+
+    return scored[0]?.el || null;
+  }
+
+  function fbSafeFillAmount(data, playerInput) {
+    const cleanAmount = String(data?.amount || "").replace(/[^0-9]/g, "");
+    if (!cleanAmount) return false;
+    const amountInput = fbFindRealDollarAmountInput(playerInput);
+    if (!amountInput) return false;
+    const ok = setNativeValue(amountInput, cleanAmount);
+    try {
+      amountInput.dispatchEvent(new Event("input", { bubbles: true }));
+      amountInput.dispatchEvent(new Event("change", { bubbles: true }));
+      amountInput.blur();
+    } catch {}
+    const current = String(amountInput.value || amountInput.textContent || "").replace(/[^0-9]/g, "");
+    if (ok && current === cleanAmount) {
+      FB_PREFILL_LAST_AMOUNT_OK = String(data.requestId || "") + ":" + cleanAmount;
+      showPayNotice(`Bank prefill ready for ${data.playerName} [${data.playerId}] — $${Number(cleanAmount).toLocaleString()}. Manually press Give Money.`);
+      return true;
+    }
+    return ok;
+  }
+
+  function tryPrefillFactionBankForm() {
+    if (!isFactionPage()) return;
+    const data = getPayPrefill();
+    if (!data || !data.playerId) return;
+
+    clickTextButton(["controls", "bank", "give money", "vault"]);
+
+    const playerInput = bestInput("player");
+    if (playerInput) {
+      const wanted = `${data.playerName} [${data.playerId}]`;
+      const existing = String(playerInput.value || playerInput.textContent || "");
+      if (!existing.includes(String(data.playerId))) {
+        setNativeValue(playerInput, wanted);
+      }
+      // Try to accept Torn autocomplete once/twice only. Repeated clicks were causing PDA lockups.
+      fbClickPlayerResultOnce(data);
+      setTimeout(() => fbClickPlayerResultOnce(data), 900);
+      setTimeout(() => { try { playerInput.blur(); } catch {} }, 1200);
+    }
+
+    if (data.amount) {
+      const token = String(data.requestId || "") + ":" + String(data.amount).replace(/[^0-9]/g, "");
+      if (FB_PREFILL_LAST_AMOUNT_OK !== token) {
+        [500, 1300, 2600, 4200, 6500].forEach((delay) => {
+          setTimeout(() => {
+            const p = bestInput("player") || playerInput;
+            fbSafeFillAmount(data, p);
+          }, delay);
+        });
+      }
+    } else {
+      showPayNotice(`Bank prefill ready for ${data.playerName} [${data.playerId}] — Full Balance request. Manually enter amount and press Give Money.`);
+    }
   }
 
   if (document.readyState === "loading") {
