@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.2.5
-// @description  Faction vault request board with reliable /banker chat command fallback and notifications.
+// @version      1.2.6
+// @description  Faction vault request board with reliable /banker chat command backend route and notifications.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -4535,11 +4535,10 @@
         ? (amount > 1 ? `Full balance requested from chat command: ${money(amount)}${note ? ` • ${note}` : ""}` : FULL_BALANCE_NOTE)
         : (note ? `Chat command: ${note}` : "Chat command request");
 
-      const res = await gmRequest("POST", "/api/banker/requests", {
+      const res = await gmRequest("POST", "/api/banker/chat-command", {
+        command_text: text,
         amount,
         note: requestNote,
-        target_faction_id: targetFactionId,
-        target_banker_id: "",
       });
 
       if (res && res.item) {
@@ -4547,12 +4546,13 @@
         saveLocalRequest(res.item);
       }
       if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
+      await refreshAll(true);
       await refreshHeaderCoinBadge(true);
-      showPayNotice(fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`);
+      showPayNotice((res && res.pushover_sent === false) ? `🪙 Request saved, but phone ping did not confirm. Check Leaders Pushover keys.` : (fullRequest ? "🪙 Full balance request sent to faction bankers." : `🪙 Bank request sent: ${money(amount)}`));
       FB_CHAT_COMMAND_BUSY = false;
       return true;
     } catch (err) {
-      showPayNotice(`Bank request failed: ${String(err.message || err).slice(0, 90)}`);
+      showPayNotice(`Bank request failed: ${String(err.message || err).slice(0, 140)}`);
       FB_CHAT_COMMAND_BUSY = false;
       return true;
     }
