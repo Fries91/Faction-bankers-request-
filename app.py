@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.2.9-chat-command-only"
+APP_VERSION = "1.3.0-command-guard-visibility"
 
 
 @app.errorhandler(Exception)
