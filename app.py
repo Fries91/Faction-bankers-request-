@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.1.2-exact-status"
+APP_VERSION = "1.1.6-completed-history-limit-5"
 
 
 @app.errorhandler(Exception)
@@ -1061,6 +1061,78 @@ def row_to_item(row):
 
 
 
+
+
+def completed_history_limit():
+    try:
+        return max(0, int(os.getenv("COMPLETED_HISTORY_LIMIT", "5")))
+    except Exception:
+        return 5
+
+
+def trim_completed_history_items(items):
+    """Keep every active/pending request, but only the newest completed requests.
+
+    This prevents the banker board from getting crowded while still showing
+    the last few completed payouts so another banker does not double-pay.
+    """
+    limit = completed_history_limit()
+    active = []
+    completed = []
+    for item in items or []:
+        if str(item.get("status") or "").lower() == "complete":
+            completed.append(item)
+        else:
+            active.append(item)
+    completed.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+    kept = active + completed[:limit]
+    kept.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+    return kept
+
+
+def memory_prune_completed_history(faction_id):
+    """Remove older completed memory rows beyond the per-faction limit."""
+    limit = completed_history_limit()
+    fid = str(faction_id or "").strip()
+    if limit < 0:
+        return 0
+    completed = [r for r in MEMORY_REQUESTS if str(r.get("faction_id") or "") == fid and str(r.get("status") or "").lower() == "complete"]
+    completed.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+    keep_ids = {int(r.get("id") or 0) for r in completed[:limit]}
+    before = len(MEMORY_REQUESTS)
+    MEMORY_REQUESTS[:] = [r for r in MEMORY_REQUESTS if not (
+        str(r.get("faction_id") or "") == fid
+        and str(r.get("status") or "").lower() == "complete"
+        and int(r.get("id") or 0) not in keep_ids
+    )]
+    return before - len(MEMORY_REQUESTS)
+
+
+def prune_completed_history_db(cur, faction_id):
+    """Keep only the newest completed rows for this faction in Postgres."""
+    limit = completed_history_limit()
+    fid = str(faction_id or "").strip()
+    if not fid:
+        return 0
+    cur.execute(
+        """
+        DELETE FROM banker_requests
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (PARTITION BY faction_id ORDER BY created_ts DESC, id DESC) AS rn
+                FROM banker_requests
+                WHERE faction_id = %s
+                  AND status = 'complete'
+                  AND is_active = FALSE
+            ) old_completed
+            WHERE old_completed.rn > %s
+        )
+        """,
+        (fid, limit),
+    )
+    return cur.rowcount
+
 def db_ready():
     if not DATABASE_URL:
         return False, "DATABASE_URL missing; using memory fallback"
@@ -1073,13 +1145,27 @@ def db_ready():
 
 
 def memory_visible_items(user):
+    """Return active requests plus recently completed requests.
+
+    Completed requests stay visible to faction bankers for a short window so
+    other bankers can see who completed them and avoid double-paying.
+    """
+    recent_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
+
+    def visible_state(r):
+        if r.get("is_active", True):
+            return True
+        if str(r.get("status") or "").lower() == "complete" and float(r.get("created_ts") or 0) >= recent_cutoff:
+            return True
+        return False
+
     if user.get("is_admin"):
         faction_ids = set(all_configured_faction_ids() or [user.get("faction_id")])
-        return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
+        return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))])
     if user.get("is_banker"):
         faction_ids = set(user.get("banker_factions") or [user.get("faction_id")])
-        return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))]
-    return [r for r in MEMORY_REQUESTS if r.get("is_active", True) and r.get("requester_id") == user.get("player_id")]
+        return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))])
+    return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r) and r.get("requester_id") == user.get("player_id")])
 
 
 def memory_get_visible_request(req_id, user):
@@ -1138,7 +1224,7 @@ def home():
             "app": "Faction Bankers",
             "version": "1.0.7-request-list-coin-fix",
             "mode": "postgres",
-            "note": "Active requests are stored until banker completes or denies them.",
+            "note": "Active requests stay visible until completed; recently completed requests show who completed them to prevent double-pay.",
             "endpoints": [
                 "/api/health",
                 "/api/banker/me",
@@ -1653,7 +1739,7 @@ def remove_leader_banker():
 
 @app.get("/api/banker/requests")
 def list_requests():
-    """List active requests visible to the logged-in user.
+    """List active requests plus recent completed requests visible to the logged-in user.
 
     v1.0.7 fix:
     - Restores the GET /api/banker/requests route used by the header coin,
@@ -1677,6 +1763,7 @@ def list_requests():
         faction_ids = []
 
     faction_ids = [str(x).strip() for x in faction_ids if str(x).strip()]
+    recent_completed_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
 
     if not db_ok:
         items = memory_visible_items(user)
@@ -1696,14 +1783,18 @@ def list_requests():
                     """
                     SELECT *
                     FROM banker_requests
-                    WHERE is_active = TRUE
+                    WHERE (
+                        is_active = TRUE
+                        OR (status = 'complete' AND created_ts >= %s)
+                      )
                       AND (
                         faction_id = ANY(%s)
                         OR requester_id = %s
                       )
                     ORDER BY created_ts DESC
+                    LIMIT 75
                     """,
-                    (faction_ids, user["player_id"]),
+                    (recent_completed_cutoff, faction_ids, user["player_id"]),
                 )
             else:
                 cur.execute(
@@ -1711,15 +1802,19 @@ def list_requests():
                     SELECT *
                     FROM banker_requests
                     WHERE requester_id = %s
-                      AND is_active = TRUE
+                      AND (
+                        is_active = TRUE
+                        OR (status = 'complete' AND created_ts >= %s)
+                      )
                     ORDER BY created_ts DESC
+                    LIMIT 75
                     """,
-                    (user["player_id"],),
+                    (user["player_id"], recent_completed_cutoff),
                 )
 
             rows = cur.fetchall()
 
-    items = [row_to_item(row) for row in rows]
+    items = trim_completed_history_items([row_to_item(row) for row in rows])
 
     return jsonify({
         "ok": True,
@@ -1963,7 +2058,10 @@ def banker_action(req_id, action):
                 "your_banker_factions": user.get("banker_factions", []),
             }), 403
         item = memory_update_request(req_id, user, new_status, bank_note)
-        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "access": reason, "warning": db_msg})
+        pruned = 0
+        if new_status == "complete":
+            pruned = memory_prune_completed_history(item.get("faction_id"))
+        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "access": reason, "warning": db_msg, "completed_history_limit": completed_history_limit(), "pruned_completed": pruned})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -2043,6 +2141,9 @@ def banker_action(req_id, action):
                 ),
             )
             row = cur.fetchone()
+            pruned_completed = 0
+            if new_status == "complete" and row:
+                pruned_completed = prune_completed_history_db(cur, row.get("faction_id"))
         conn.commit()
 
     return jsonify({
@@ -2050,6 +2151,8 @@ def banker_action(req_id, action):
         "item": row_to_item(row),
         "removed_from_active": not is_active,
         "access": reason,
+        "completed_history_limit": completed_history_limit(),
+        "pruned_completed": pruned_completed,
     })
 
 @app.post("/api/banker/clear-completed")
