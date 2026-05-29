@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.6
-// @description  Faction vault banking with send-only /banker capture, banker coin badges, page balance sync, request board, and Torn-friendly settings/login.
+// @version      1.4.7
+// @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -2914,11 +2914,50 @@
     showPayNotice._timer = setTimeout(() => notice.remove(), 7000);
   }
 
+  function openBankingTabForPendingRequest() {
+    if (!isBankerUiUser()) return false;
+    openOverlay();
+    rebuildTabs("banker");
+    const tab = document.querySelector('.fb-tab[data-tab="banker"]');
+    if (tab) tab.click();
+    else renderBody("banker");
+    setTimeout(() => refreshAll(true).then(() => {
+      rebuildTabs("banker");
+      const again = document.querySelector('.fb-tab[data-tab="banker"]');
+      if (again) again.click();
+      else renderBody("banker");
+    }).catch(() => {}), 250);
+    return true;
+  }
+
   function bumpOwnBankerCoinAfterRequest() {
     if (!isBankerUiUser()) return;
     const pendingNow = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending").length;
-    setCoinAlert(Math.max(1, pendingNow));
-    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 500);
+    APP.pendingCount = Math.max(1, pendingNow);
+    setCoinAlert(APP.pendingCount);
+    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 300);
+    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 1800);
+  }
+
+  function afterRequestCreatedNotifyBankers(item, amount = 0) {
+    if (item) {
+      upsertRequestItem(item);
+      saveLocalRequest(item);
+      saveRecentCreatedRequest(item);
+    }
+
+    // User-facing confirmation. This appears for chat commands and button requests.
+    showBankersNotifiedBox(amount);
+
+    // If the requester is also one of the saved bankers/leaders, immediately
+    // light their own coin and jump them to Banking so they can verify the
+    // request landed on the board. Other bankers get the red coin through
+    // their fast badge polling, and Pushover is sent from the backend.
+    bumpOwnBankerCoinAfterRequest();
+    if (isBankerUiUser()) openBankingTabForPendingRequest();
+
+    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 600);
+    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2400);
   }
 
   function showBankersNotifiedBox(amount = 0) {
@@ -4014,15 +4053,10 @@
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
-      if (res && res.item) {
-        upsertRequestItem(res.item);
-        saveLocalRequest(res.item);
-      }
       if (sendDetectedAmount) {
         deductRequestedAmountFromLocalBalance(detectedFullBalance);
       }
-      showBankersNotifiedBox(detectedFullBalance);
-      bumpOwnBankerCoinAfterRequest();
+      afterRequestCreatedNotifyBankers(res?.item, detectedFullBalance);
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -4077,13 +4111,8 @@
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
-      if (res && res.item) {
-        upsertRequestItem(res.item);
-        saveLocalRequest(res.item);
-      }
       deductRequestedAmountFromLocalBalance(amount);
-      showBankersNotifiedBox(amount);
-      bumpOwnBankerCoinAfterRequest();
+      afterRequestCreatedNotifyBankers(res?.item, amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
       if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -4124,13 +4153,8 @@
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
-      if (res && res.item) {
-        upsertRequestItem(res.item);
-        saveLocalRequest(res.item);
-      }
       deductRequestedAmountFromLocalBalance(amount);
-      showBankersNotifiedBox(amount);
-      bumpOwnBankerCoinAfterRequest();
+      afterRequestCreatedNotifyBankers(res?.item, amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
       const pingMsg = res && res.pushover_sent === false
@@ -4502,7 +4526,7 @@
     const key = GM_getValue(K_API_KEY, "");
     if (!key || APP.headerRefreshing) return false;
     // Fast enough for banker coin pings, light enough for PDA/Render.
-    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 7000) return true;
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 4000) return true;
 
     APP.headerRefreshing = true;
     APP.lastHeaderBadgeLoad = Date.now();
@@ -4726,6 +4750,13 @@
       setTimeout(() => refreshHeaderCoinBadge(true), 24000);
     }
 
+    window.addEventListener("focus", () => {
+      if (GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(true).catch(() => {});
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(true).catch(() => {});
+    });
+
     // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
     mountTries = 0;
     const limitedRetry = setInterval(() => {
@@ -4741,7 +4772,7 @@
 
       pageMount("slow");
 
-      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 7000) {
+      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 4000) {
         refreshHeaderCoinBadge(false);
       }
       if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 15000) {
@@ -4750,7 +4781,7 @@
       if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
         refreshFactionBoxData(false);
       }
-    }, 10000);
+    }, 5000);
   }
 
 
@@ -4900,7 +4931,7 @@
           saveLocalRequest(res.item);
           saveRecentCreatedRequest(res.item);
           APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
-          if (APP.me?.is_banker || APP.me?.is_admin) setCoinAlert(APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending").length);
+          if (isBankerUiUser()) setCoinAlert(APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending").length);
           if (APP.open) renderBody(activeTab());
         }
       }
@@ -4913,15 +4944,8 @@
       const a = String(res?.action || "created");
       if (a === "created") {
         if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
-        showBankersNotifiedBox(amount);
-        // If the requester is also a banker/leader, light their own coin instantly.
-        // Other bankers will see the coin on their next fast badge poll.
-        if (isBankerUiUser()) {
-          const pendingNow = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending").length;
-          setCoinAlert(Math.max(1, pendingNow));
-        }
-        setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 500);
-        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm, but bankers can check the board." : `🪙 Confirmed: bank request sent${amount > 1 ? ` for ${money(amount)}` : ""}. Bankers alerted.`);
+        afterRequestCreatedNotifyBankers(res?.item, amount);
+        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved in Banking. Phone ping did not confirm, but bankers can check the red coin/request board." : `🪙 Confirmed: bank request sent${amount > 1 ? ` for ${money(amount)}` : ""}. Coin alert + banker board updated.`);
       } else if (a === "canceled") {
         showPayNotice("🪙 Bank request canceled.");
       } else if (a === "changed") {
