@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.4.7-chat-request-to-banking-alert"
+APP_VERSION = "1.4.8-server-side-coin-inbox"
 
 
 @app.errorhandler(Exception)
@@ -2813,6 +2813,111 @@ def create_request_from_chat_command():
         "request_visible_hint": "Saved as pending; refresh Banker Board",
     })
 
+
+
+@app.get("/api/banker/pending-count")
+def banker_pending_count():
+    """Fast server-side coin badge check.
+
+    This is intentionally independent from the full Banking board render. PDA/Torn
+    can keep an old local APP.me or miss one refresh, so the coin asks the backend:
+    "am I currently a saved manual banker/leader/admin for my faction, and how many
+    pending requests are waiting?"
+    """
+    db_ok, db_msg = db_ready()
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    own_player_id = str(user.get("player_id") or "").strip()
+    own_faction_id = str(user.get("faction_id") or "").strip()
+    own_faction_name = str(user.get("faction_name") or "").strip()
+    manual_ids = {str(x).strip() for x in manual_banker_ids_for_faction(own_faction_id) if str(x).strip()}
+
+    can_bank = bool(
+        user.get("is_admin")
+        or user.get("can_manage_leaders")
+        or user.get("is_leader_role")
+        or own_player_id in manual_ids
+    )
+
+    # Keep user object honest even if /api/banker/me was cached by PDA/userscript.
+    if own_player_id in manual_ids:
+        user["is_banker"] = True
+        user["banker_factions"] = list(dict.fromkeys((user.get("banker_factions") or []) + [own_faction_id]))
+
+    if not can_bank:
+        return jsonify({
+            "ok": True,
+            "can_bank": False,
+            "pending_count": 0,
+            "items": [],
+            "reason": "not_manual_banker_or_leader",
+            "manual_banker_ids_count": len(manual_ids),
+            "mode": "memory" if not db_ok else "postgres",
+        })
+
+    if not db_ok:
+        items = []
+        for r in MEMORY_REQUESTS:
+            if str(r.get("status") or "pending").lower() != "pending" or not r.get("is_active", True):
+                continue
+            same_faction = str(r.get("faction_id") or "") == own_faction_id or str(r.get("faction_name") or "") == own_faction_name
+            if user.get("is_admin") or same_faction:
+                items.append(r)
+        items.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
+        return jsonify({
+            "ok": True,
+            "can_bank": True,
+            "pending_count": len(items),
+            "items": items[:10],
+            "mode": "memory",
+            "warning": db_msg,
+            "faction_id": own_faction_id,
+            "manual_banker_ids_count": len(manual_ids),
+        })
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if user.get("is_admin"):
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE status = 'pending' AND is_active = TRUE
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 50
+                    """
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE status = 'pending'
+                      AND is_active = TRUE
+                      AND (
+                        faction_id = %s
+                        OR faction_name = %s
+                      )
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 50
+                    """,
+                    (own_faction_id, own_faction_name),
+                )
+            rows = cur.fetchall()
+
+    items = [row_to_item(row) for row in rows]
+    return jsonify({
+        "ok": True,
+        "can_bank": True,
+        "pending_count": len(items),
+        "items": items[:10],
+        "mode": "postgres",
+        "faction_id": own_faction_id,
+        "faction_name": own_faction_name,
+        "manual_banker_ids_count": len(manual_ids),
+    })
 
 @app.get("/api/banker/requests-lite")
 def list_requests_lite():
