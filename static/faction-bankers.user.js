@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.2
+// @version      1.5.3
 // @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.5.1-gm-fetch-network-fallback";
+  const FB_BUILD = "1.5.3-stale-cache-no-red-network";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -34,6 +34,7 @@
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
   const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
+  const K_REQUEST_CACHE = "fb_request_board_cache_v1";
   const K_TARGET_FACTION = "fb_target_faction_v1";
   const K_PAY_PREFILL = "fb_pay_prefill_v1";
   const K_SCROLL_TO_BANK = "fb_scroll_to_bank_box_v1";
@@ -4259,6 +4260,7 @@
         clearLocalRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
         if (res && res.item) APP.requests.unshift(res.item);
+        saveRequestCache(APP.requests);
       } else if (action === "deny") {
         rememberClosedRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
@@ -4267,6 +4269,7 @@
         clearLocalRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
         if (res && res.item) APP.requests.unshift(res.item);
+        saveRequestCache(APP.requests);
       }
 
       await refreshAll(true);
@@ -4424,6 +4427,34 @@
     GM_setValue(closedRequestKey(), JSON.stringify(Array.from(new Set(nextLocal)).slice(0, 120)));
     GM_setValue(closedRequestGlobalKey(), JSON.stringify(Array.from(new Set(nextGlobal)).slice(0, 120)));
     clearLocalRequest(id);
+  }
+
+  function requestCacheKey() {
+    const fid = String(APP.me?.faction_id || APP.bankerFactionId || currentTargetFactionId() || "global").trim() || "global";
+    return `${K_REQUEST_CACHE}:${fid}`;
+  }
+
+  function saveRequestCache(items) {
+    try {
+      const clean = (Array.isArray(items) ? items : [])
+        .filter((r) => r && r.id)
+        .slice(0, 30);
+      GM_setValue(requestCacheKey(), JSON.stringify({ ts: Date.now(), items: clean }));
+    } catch (_) {}
+  }
+
+  function loadRequestCache() {
+    try {
+      const raw = GM_getValue(requestCacheKey(), "");
+      if (!raw) return { ts: 0, items: [] };
+      const parsed = JSON.parse(raw);
+      return {
+        ts: Number(parsed?.ts || 0),
+        items: Array.isArray(parsed?.items) ? parsed.items : [],
+      };
+    } catch (_) {
+      return { ts: 0, items: [] };
+    }
   }
 
   function forgetClosedRequest(id) {
@@ -4625,6 +4656,7 @@
 
       if (inboxItems.length) {
         APP.requests = mergeLocalRequests(inboxItems.concat(Array.isArray(APP.requests) ? APP.requests : []));
+        saveRequestCache(APP.requests);
       }
 
       const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
@@ -4692,6 +4724,7 @@
 
       const list = await fbGetRequestListSafe();
       APP.requests = mergeLocalRequests(Array.isArray(list.items) ? list.items : []);
+      saveRequestCache(APP.requests);
 
       APP.bankers = [];
 
@@ -4713,32 +4746,24 @@
       mountCoin();
 
       const subtitle = $("#fb-subtitle");
+      const msg = String(err.message || err);
       if (subtitle) {
-        const msg = String(err.message || err);
-        subtitle.textContent = msg.toLowerCase().includes("too many") ? "Last refresh skipped: Torn rate limit cooldown" : `Last refresh failed: ${msg.slice(0, 95)}`;
+        subtitle.textContent = msg.toLowerCase().includes("too many")
+          ? "Showing saved board — Torn cooldown"
+          : "Showing saved board — refresh missed once";
       }
 
-      // Do not wipe the current screen after a successful request.
-      // Render can briefly miss one API call while waking/redeploying; keeping the last good board is better on PDA.
-      if (APP.me) {
-        if (APP.open) {
-          const body = $("#fb-body");
-          if (body && !body.querySelector("#fb-soft-network-error")) {
-            body.insertAdjacentHTML("afterbegin", `
-              <div id="fb-soft-network-error" class="fb-box">
-                <div class="fb-error">Refresh paused by Torn/Render once. Your request may still be saved.</div>
-                <div class="fb-row" style="margin-top:8px;">
-                  <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
-                </div>
-              </div>
-            `);
-            $("#fb-retry-network")?.addEventListener("click", () => {
-              const box = $("#fb-soft-network-error");
-              if (box) box.remove();
-              refreshAll(true);
-            });
-          }
-        }
+      // PDA can miss one cross-domain request even when Render is fine.
+      // Do NOT wipe the board, do NOT clear the coin, and do NOT show the scary red box if we have cached data.
+      const cached = loadRequestCache();
+      if ((!APP.requests || !APP.requests.length) && cached.items.length) {
+        APP.requests = mergeLocalRequests(cached.items);
+      }
+      const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
+      if (pendingItems.length) setCoinAlert(pendingItems.length);
+
+      if (APP.me || (APP.requests && APP.requests.length)) {
+        if (APP.open) renderBody(activeTab());
         return false;
       }
 
@@ -5027,6 +5052,7 @@
           saveLocalRequest(res.item);
           saveRecentCreatedRequest(res.item);
           APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
+          saveRequestCache(APP.requests);
           if (isBankerUiUser()) setCoinAlert(APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase())).length);
           if (APP.open) renderBody(activeTab());
         }
