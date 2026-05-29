@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.3.0-command-guard-visibility"
+APP_VERSION = "1.3.5-coin-badge-balance-commands"
 
 
 @app.errorhandler(Exception)
@@ -1335,9 +1335,8 @@ def memory_visible_items(user):
         return False
 
     if user.get("is_admin"):
-        faction_ids = set(all_configured_faction_ids() or [user.get("faction_id")])
-        return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))])
-    if user.get("is_banker"):
+        return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r)])
+    if user.get("is_banker") or user.get("can_manage_leaders") or user.get("is_leader_role"):
         faction_ids = set(user.get("banker_factions") or [user.get("faction_id")])
         return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r) and (r.get("faction_id") in faction_ids or r.get("requester_id") == user.get("player_id"))])
     return trim_completed_history_items([r for r in MEMORY_REQUESTS if visible_state(r) and r.get("requester_id") == user.get("player_id")])
@@ -1943,19 +1942,10 @@ def remove_leader_banker():
 def list_requests():
     """List active requests plus recent completed requests visible to the logged-in user.
 
-    v1.2.0 fix:
-    - Removed accidental second fetchall() that emptied the results.
-      That bug made Pushover work, but coin/banker boards showed 0 pending.
-
-    
-
-    v1.0.7 fix:
-    - Restores the GET /api/banker/requests route used by the header coin,
-      banker board, and PDA refresh. Without this, Render returned 405
-      "method not allowed" and other bankers could not see pending requests.
-    - Keeps faction separation: members see their own requests; bankers see
-      active requests for their own banker factions; admin can see configured
-      admin factions plus their own faction.
+    v1.3.4:
+    - Uses faction_id OR faction_name matching to avoid ID/name mismatch.
+    - Always includes the logged-in user's own requests.
+    - If a banker/admin gets an empty list, performs a same-faction fallback.
     """
     db_ok, db_msg = db_ready()
 
@@ -1963,20 +1953,20 @@ def list_requests():
     if resp:
         return resp, code
 
-    # v1.2.8 visibility fix:
-    # - Own requests must always come back for My Requests.
-    # - Bankers/admins see requests for their banker factions.
-    # - Admin sees their own faction even if Render banker config is empty.
+    own_player_id = str(user.get("player_id") or "").strip()
+    own_faction_id = str(user.get("faction_id") or "").strip()
+    own_faction_name = str(user.get("faction_name") or "").strip()
+    recent_completed_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
+
+    can_see_faction_board = bool(user.get("is_banker") or user.get("is_admin") or user.get("can_manage_leaders") or user.get("is_leader_role"))
+
     if user.get("is_admin"):
-        faction_ids = sorted(set(all_configured_faction_ids() or []) | {str(user.get("faction_id") or "")})
-    elif user.get("is_banker"):
-        faction_ids = sorted(set(user.get("banker_factions") or [user.get("faction_id")]))
+        faction_ids = sorted(set(all_configured_faction_ids() or []) | {own_faction_id})
+    elif can_see_faction_board:
+        faction_ids = sorted(set(user.get("banker_factions") or [own_faction_id]))
     else:
         faction_ids = []
-
     faction_ids = [str(x).strip() for x in faction_ids if str(x).strip()]
-    own_player_id = str(user.get("player_id") or "").strip()
-    recent_completed_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
 
     if not db_ok:
         items = memory_visible_items(user)
@@ -1991,7 +1981,26 @@ def list_requests():
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            if faction_ids:
+            if user.get("is_admin"):
+                # Admin safety: show every active request, plus recent completed ones.
+                # This fixes cases where the phone ping fires but the board/coin misses a request
+                # because a faction id/name changed or was not in the old configured list.
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE (
+                        is_active = TRUE
+                        OR (status = 'complete' AND created_ts >= %s)
+                        OR requester_id = %s
+                      )
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 150
+                    """,
+                    (recent_completed_cutoff, own_player_id),
+                )
+                rows = cur.fetchall()
+            elif can_see_faction_board:
                 cur.execute(
                     """
                     SELECT *
@@ -2001,14 +2010,38 @@ def list_requests():
                         OR (status = 'complete' AND created_ts >= %s)
                       )
                       AND (
-                        faction_id = ANY(%s)
-                        OR requester_id = %s
+                        requester_id = %s
+                        OR faction_id = %s
+                        OR faction_name = %s
+                        OR (%s <> '' AND faction_id = ANY(%s))
                       )
-                    ORDER BY created_ts DESC
-                    LIMIT 75
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 100
                     """,
-                    (recent_completed_cutoff, faction_ids, own_player_id),
+                    (recent_completed_cutoff, own_player_id, own_faction_id, own_faction_name, bool(faction_ids), faction_ids or [""]),
                 )
+                rows = cur.fetchall()
+
+                # Last-resort same-faction fallback for role/config mismatch.
+                if not rows and own_faction_id:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM banker_requests
+                        WHERE (
+                            is_active = TRUE
+                            OR (status = 'complete' AND created_ts >= %s)
+                          )
+                          AND (
+                            requester_id = %s
+                            OR faction_id = %s
+                          )
+                        ORDER BY created_ts DESC, id DESC
+                        LIMIT 100
+                        """,
+                        (recent_completed_cutoff, own_player_id, own_faction_id),
+                    )
+                    rows = cur.fetchall()
             else:
                 cur.execute(
                     """
@@ -2019,21 +2052,25 @@ def list_requests():
                         is_active = TRUE
                         OR (status = 'complete' AND created_ts >= %s)
                       )
-                    ORDER BY created_ts DESC
+                    ORDER BY created_ts DESC, id DESC
                     LIMIT 75
                     """,
                     (own_player_id, recent_completed_cutoff),
                 )
-
-            rows = cur.fetchall()
+                rows = cur.fetchall()
 
     items = trim_completed_history_items([row_to_item(row) for row in rows])
-
     return jsonify({
         "ok": True,
         "items": items,
         "count": len(items),
         "mode": "postgres",
+        "visibility": {
+            "own_player_id": own_player_id,
+            "own_faction_id": own_faction_id,
+            "own_faction_name": own_faction_name,
+            "banker_factions": faction_ids,
+        },
     })
 
 @app.get("/api/banker/requests/<int:req_id>")
@@ -2044,7 +2081,7 @@ def get_request(req_id):
     if resp:
         return resp, code
 
-    if not user.get("is_banker"):
+    if not (user.get("is_banker") or user.get("is_admin") or user.get("can_manage_leaders") or user.get("is_leader_role")):
         return jsonify({"ok": False, "error": "Banker access required"}), 403
 
     allowed_factions = sorted(set((all_configured_faction_ids() if user.get("is_admin") else []) + (user.get("banker_factions", []) or [user.get("faction_id")])) )
@@ -2059,16 +2096,27 @@ def get_request(req_id):
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM banker_requests
-                WHERE id = %s
-                  AND faction_id = ANY(%s)
-                  AND is_active = TRUE
-                """,
-                (req_id, allowed_factions),
-            )
+            if user.get("is_admin"):
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE id = %s
+                      AND is_active = TRUE
+                    """,
+                    (req_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE id = %s
+                      AND faction_id = ANY(%s)
+                      AND is_active = TRUE
+                    """,
+                    (req_id, allowed_factions),
+                )
             row = cur.fetchone()
 
     if not row:
@@ -2298,6 +2346,8 @@ def banker_action(req_id, action):
             return True, "banker_faction"
         if user.get("is_banker") and req_faction and user_faction and req_faction == user_faction:
             return True, "same_faction_banker"
+        if (user.get("can_manage_leaders") or user.get("is_leader_role")) and req_faction and user_faction and req_faction == user_faction:
+            return True, "same_faction_leader"
         if user_id in set(manual_banker_ids_for_faction(req_faction)):
             return True, "manual_banker"
         if user_id in set(dynamic_banker_ids_for_faction(get_key(), req_faction)):
@@ -2808,6 +2858,7 @@ def list_requests_lite():
 
     own_player_id = str(user.get("player_id") or "").strip()
     own_faction_id = str(user.get("faction_id") or "").strip()
+    own_faction_name = str(user.get("faction_name") or "").strip()
     can_see_faction = bool(user.get("is_banker") or user.get("is_admin") or user.get("can_manage_leaders") or user.get("is_leader"))
     recent_completed_cutoff = time.time() - float(os.getenv("RECENT_COMPLETED_SECONDS", "86400"))
 
@@ -2818,14 +2869,30 @@ def list_requests_lite():
             active_or_recent = bool(r.get("is_active", True)) or (status == "complete" and float(r.get("created_ts") or 0) >= recent_completed_cutoff)
             if not active_or_recent:
                 continue
-            if str(r.get("requester_id") or "") == own_player_id or (can_see_faction and str(r.get("faction_id") or "") == own_faction_id):
+            same_faction = str(r.get("faction_id") or "") == own_faction_id or str(r.get("faction_name") or "") == own_faction_name
+            if str(r.get("requester_id") or "") == own_player_id or (can_see_faction and same_faction):
                 items.append(r)
         items.sort(key=lambda r: float(r.get("created_ts") or 0), reverse=True)
         return jsonify({"ok": True, "items": trim_completed_history_items(items), "count": len(items), "mode": "memory-lite", "warning": db_msg})
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            if can_see_faction and own_faction_id:
+            if user.get("is_admin"):
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM banker_requests
+                    WHERE (
+                        is_active = TRUE
+                        OR (status = 'complete' AND created_ts >= %s)
+                        OR requester_id = %s
+                      )
+                    ORDER BY created_ts DESC, id DESC
+                    LIMIT 150
+                    """,
+                    (recent_completed_cutoff, own_player_id),
+                )
+            elif can_see_faction and (own_faction_id or own_faction_name):
                 cur.execute(
                     """
                     SELECT *
@@ -2833,6 +2900,7 @@ def list_requests_lite():
                     WHERE (
                         requester_id = %s
                         OR faction_id = %s
+                        OR faction_name = %s
                       )
                       AND (
                         is_active = TRUE
@@ -2841,7 +2909,7 @@ def list_requests_lite():
                     ORDER BY created_ts DESC, id DESC
                     LIMIT 100
                     """,
-                    (own_player_id, own_faction_id, recent_completed_cutoff),
+                    (own_player_id, own_faction_id, own_faction_name, recent_completed_cutoff),
                 )
             else:
                 cur.execute(
@@ -2862,6 +2930,7 @@ def list_requests_lite():
 
     items = trim_completed_history_items([row_to_item(row) for row in rows])
     return jsonify({"ok": True, "items": items, "count": len(items), "mode": "postgres-lite"})
+
 
 
 if __name__ == "__main__":
