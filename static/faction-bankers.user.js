@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.0
+// @version      1.5.1
 // @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.5.0-anti-rate-limit-coin-cache";
+  const FB_BUILD = "1.5.1-gm-fetch-network-fallback";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -126,11 +126,65 @@
     return location.href.includes("profiles.php") || location.href.includes("/profiles.php");
   }
 
+  async function fetchFallbackRequest(method, path, body) {
+    const url = BANKER_API_BASE.replace(/\/$/, "") + path;
+    const res = await fetch(url, {
+      method,
+      mode: "cors",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Torn-Key": GM_getValue(K_API_KEY, ""),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const raw = await res.text();
+    let data = {};
+    try {
+      data = JSON.parse(raw || "{}");
+    } catch {
+      const clean = String(raw || "")
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 180);
+      data = { ok: false, error: clean || "Render returned a non-JSON response." };
+    }
+
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
   function gmRequest(method, path, body) {
+    const url = BANKER_API_BASE.replace(/\/$/, "") + path;
+
+    // PDA sometimes throws GM_xmlhttpRequest "Network error" even when normal
+    // browser fetch can reach Render. Try GM first, then fetch before failing.
+    if (typeof GM_xmlhttpRequest !== "function") {
+      return fetchFallbackRequest(method, path, body);
+    }
+
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const failViaFetch = (primaryMessage) => {
+        if (settled) return;
+        fetchFallbackRequest(method, path, body)
+          .then((data) => {
+            settled = true;
+            resolve(data);
+          })
+          .catch((fetchErr) => {
+            settled = true;
+            reject(new Error(`${primaryMessage}; fetch fallback failed: ${String(fetchErr?.message || fetchErr || "unknown").slice(0, 120)}`));
+          });
+      };
+
       GM_xmlhttpRequest({
         method,
-        url: BANKER_API_BASE.replace(/\/$/, "") + path,
+        url,
         headers: {
           "Content-Type": "application/json",
           "X-Torn-Key": GM_getValue(K_API_KEY, ""),
@@ -138,6 +192,7 @@
         data: body ? JSON.stringify(body) : undefined,
         timeout: 45000,
         onload: (res) => {
+          if (settled) return;
           let data = {};
           try {
             data = JSON.parse(res.responseText || "{}");
@@ -153,14 +208,15 @@
             data = { ok: false, error: (res.status >= 500 ? "Render backend 500. Replace/redeploy app.py or check DATABASE_URL. Details: " : "") + (clean || "Render returned a non-JSON error. Check app.py deploy logs.") };
           }
 
+          settled = true;
           if (res.status >= 200 && res.status < 300) {
             resolve(data);
           } else {
             reject(new Error(data.error || `HTTP ${res.status}`));
           }
         },
-        onerror: () => reject(new Error("Network error")),
-        ontimeout: () => reject(new Error("Request timed out")),
+        onerror: () => failViaFetch("GM network error"),
+        ontimeout: () => failViaFetch("GM request timed out"),
       });
     });
   }
@@ -4651,7 +4707,7 @@
       const subtitle = $("#fb-subtitle");
       if (subtitle) {
         const msg = String(err.message || err);
-        subtitle.textContent = msg.toLowerCase().includes("too many") ? "Last refresh skipped: Torn rate limit cooldown" : `Last refresh failed: ${msg.slice(0, 80)}`;
+        subtitle.textContent = msg.toLowerCase().includes("too many") ? "Last refresh skipped: Torn rate limit cooldown" : `Last refresh failed: ${msg.slice(0, 95)}`;
       }
 
       // Do not wipe the current screen after a successful request.
@@ -4970,7 +5026,7 @@
 
       // Do not let a slow/stale Render list erase the just-created request.
       // Refresh shortly after, but keep local backup merged if Render is late.
-      setTimeout(() => refreshAll(true).catch(() => { if (APP.open) renderBody(activeTab()); }), 1800);
+      setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 1800);
       setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2200);
       setTimeout(() => gmRequest("GET", "/api/banker/pending-count").then((inbox) => {
         if (inbox && APP.me) {
