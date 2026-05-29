@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.4.4-coin-badge-opens-banking"
+APP_VERSION = "1.4.5-manual-bankers-only"
 
 
 @app.errorhandler(Exception)
@@ -79,7 +79,7 @@ def load_faction_bankers():
 
     # Dynamic/public mode: do NOT invent hard-coded factions.
     # If FACTION_BANKERS is omitted, every user simply works from their own Torn faction.
-    # Leaders can add banker roles/manual bankers from the Leaders tab.
+    # Leaders add specific banker names/IDs from the Leaders tab. Roles are not used for banker access.
     return {}
 
 
@@ -483,19 +483,12 @@ def torn_get_role_bankers(key, faction_id):
     return unique
 
 def dynamic_banker_ids_for_faction(key, faction_id):
-    manual = manual_banker_ids_for_faction(faction_id)
-    role = [str(x.get("id")) for x in torn_get_role_bankers(key, faction_id) if x.get("id")]
-    return list(dict.fromkeys(manual + role))
+    # v1.4.5: banker access is manual only. Leaders/co-leaders add exact Torn IDs.
+    return list(dict.fromkeys(manual_banker_ids_for_faction(faction_id)))
 
 def dynamic_banker_name_for_id(key, faction_id, banker_id):
     bid = str(banker_id or "").strip()
-    manual_name = manual_banker_name_for_id(faction_id, bid)
-    if manual_name:
-        return manual_name
-    for item in torn_get_role_bankers(key, faction_id):
-        if str(item.get("id")) == bid:
-            return str(item.get("name") or bid).strip()
-    return banker_name_from_config(faction_id, bid)
+    return manual_banker_name_for_id(faction_id, bid) or banker_name_from_config(faction_id, bid)
 
 
 def all_configured_faction_ids():
@@ -905,17 +898,20 @@ def torn_get_user(key):
     if not faction_id:
         return None, "You must be in a faction to use Faction Bankers"
 
-    configured_banker_factions = banker_factions_for_player(player_id)
-    role_banker_ids = set(dynamic_banker_ids_for_faction(key, faction_id))
+    # v1.4.5 manual-bankers-only:
+    # Leaders/co-leaders add exact banker Torn names + IDs for their own faction.
+    # Saved role names no longer grant banker board/coin access, because role detection
+    # was unreliable on PDA/Torn API responses.
+    configured_banker_factions = []
     manual_banker_ids = set(manual_banker_ids_for_faction(faction_id))
     own_faction_role = torn_get_member_role_for_user(key, faction_id, player_id)
     leader_role = is_leader_like_role(own_faction_role)
-    legacy_banker = player_id in BANKER_IDS or player_id == ADMIN_PLAYER_ID
-    dynamic_role_banker = player_id in role_banker_ids
+    legacy_banker = player_id == ADMIN_PLAYER_ID
+    dynamic_role_banker = False
     manual_banker = player_id in manual_banker_ids
 
-    # In dynamic/manual mode, a banker handles their own faction only. Admin can see all configured groups plus own faction.
-    banker_factions = sorted(set(configured_banker_factions + ([faction_id] if (legacy_banker or dynamic_role_banker or manual_banker) else [])))
+    # A banker handles their own faction only. Admin can see their own faction plus all boards.
+    banker_factions = sorted(set([faction_id] if (legacy_banker or manual_banker) else []))
 
     user = {
         "player_id": player_id,
@@ -1103,11 +1099,10 @@ def notification_target_keys_for_request(item):
     """Return a de-duplicated list of Pushover keys for this request.
 
     Priority:
-    1. Pushover keys saved in this faction's Leaders tab.
-    2. Pushover keys saved to banker roles selected by the leader.
-    3. Fries91/global Render keys only for Wrath / configured Fries91 factions.
+    1. Pushover keys saved on the manual banker entries in this faction's Leaders tab.
+    2. Fries91/global Render keys only for Wrath / configured Fries91 factions.
 
-    This keeps other factions private, while making Wrath reliably ping Fries91.
+    Roles are intentionally not used for banker access or phone pings in v1.4.5.
     """
     keys = []
     seen = set()
@@ -1119,9 +1114,6 @@ def notification_target_keys_for_request(item):
             keys.append(k)
 
     for k in manual_pushover_keys_for_request(item):
-        add_key(k)
-
-    for k in role_pushover_keys_for_faction((item or {}).get("faction_id")):
         add_key(k)
 
     # v1.2.4: make Wrath phone pings reliable.  If this is Wrath/49384,
@@ -1614,8 +1606,8 @@ def banker_status():
     requested_faction_id = str(request.args.get("faction_id") or "").strip() or str(user.get("faction_id") or "").strip()
     faction_name = user.get("faction_name") or faction_name_for_id(requested_faction_id) or requested_faction_id or "Faction"
 
-    # Prefer leaders-tab manual bankers. Then role-detected bankers. Then legacy config.
-    # Do not globally add Fries91 for other factions unless configured in FRIES91_NOTIFY_FACTION_IDS.
+    # v1.4.5: Manual banker list only. No role detection and no FACTION_BANKERS fallback.
+    # Each faction leader/co-leader adds exact banker Torn ID + name in the Leaders tab.
     manual_bankers = []
     role_bankers = []
     banker_ids = []
@@ -1627,25 +1619,10 @@ def banker_status():
         warnings.append(f"manual banker lookup failed: {e}")
         manual_bankers = []
 
-    if manual_bankers:
-        banker_ids = [str(x.get("id") or x.get("banker_id")) for x in manual_bankers if x.get("id") or x.get("banker_id")]
-    else:
-        try:
-            role_bankers = torn_get_role_bankers(key, requested_faction_id)
-        except Exception as e:
-            warnings.append(f"role banker lookup failed: {e}")
-            role_bankers = []
-        if role_bankers:
-            banker_ids = [str(x.get("id")) for x in role_bankers if x.get("id")]
-        elif requested_faction_id in FACTION_BANKERS:
-            banker_ids = bankers_for_faction(requested_faction_id)
-        elif should_ping_global_pushover_for_faction(requested_faction_id):
-            banker_ids = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
-        else:
-            banker_ids = []
+    banker_ids = [str(x.get("id") or x.get("banker_id")) for x in manual_bankers if x.get("id") or x.get("banker_id")]
 
     manual_by_id = {str(x.get("id") or x.get("banker_id")): x for x in manual_bankers_for_faction(requested_faction_id)}
-    role_by_id = {str(x.get("id")): x for x in role_bankers if x.get("id")}
+    role_by_id = {}
 
     seen = set()
     items = []
@@ -1692,8 +1669,9 @@ def banker_status():
         "faction_name": faction_name,
         "items": items,
         "count": len(items),
-        "role_names": banker_role_names_for_faction(requested_faction_id),
+        "role_names": [],
         "manual_count": len(manual_bankers),
+        "manual_only": True,
         "global_fries_ping_enabled": should_ping_global_pushover_for_faction(requested_faction_id),
         "warnings": warnings,
         "time": now_iso(),
@@ -1720,13 +1698,11 @@ def get_leader_bankers():
             }
             for x in manual_bankers_for_faction(fid)
         ],
-        "role_names": banker_role_names_for_faction(fid),
-        "role_items": [
-            {"role_name": r.get("role_name"), "has_pushover": bool(r.get("pushover_key")), "source": r.get("source", "leaders")}
-            for r in banker_role_records_for_faction(fid)
-        ],
-        "role_key_count": len(role_pushover_keys_for_faction(fid)),
-        "default_role_names": sorted(BANKER_ROLE_NAMES),
+        "role_names": [],
+        "role_items": [],
+        "role_key_count": 0,
+        "default_role_names": [],
+        "manual_only": True,
         "can_manage": True,
         "manager_role": user.get("faction_role", ""),
         "manager_name": user.get("name", ""),
@@ -2341,9 +2317,7 @@ def banker_action(req_id, action):
             return True, "same_faction_leader"
         if user_id in set(manual_banker_ids_for_faction(req_faction)):
             return True, "manual_banker"
-        if user_id in set(dynamic_banker_ids_for_faction(get_key(), req_faction)):
-            return True, "role_banker"
-        return False, "not_banker_for_request"
+        return False, "not_manual_banker_for_request"
 
     if not db_ok:
         # Memory fallback still checks access now, instead of failing silently.
@@ -2542,8 +2516,9 @@ def debug_notification_targets():
         "target_key_count": len(notification_target_keys_for_request(fake)),
         "target_keys_masked": [mask_key(k) for k in notification_target_keys_for_request(fake)],
         "manual_key_count": len(manual_pushover_keys_for_request(fake)),
-        "role_key_count": len(role_pushover_keys_for_faction(user.get("faction_id"))),
-        "role_items": [{"role_name": r.get("role_name"), "has_pushover": bool(r.get("pushover_key")), "source": r.get("source", "leaders")} for r in banker_role_records_for_faction(user.get("faction_id"))],
+        "role_key_count": 0,
+        "role_items": [],
+        "manual_only": True,
         "global_allowed_for_this_faction": should_ping_global_pushover_for_item(fake),
         "global_key_count": len(configured_pushover_keys()),
         "fries91_notify_faction_ids": sorted(fries91_notify_faction_ids()),
