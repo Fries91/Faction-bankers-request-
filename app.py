@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.5.1-gm-fetch-network-fallback"
+APP_VERSION = "1.5.3-stale-cache-no-red-network"
 
 
 @app.errorhandler(Exception)
