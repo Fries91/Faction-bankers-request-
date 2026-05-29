@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.9
+// @version      1.5.0
 // @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.4.9-sticky-open-until-complete";
+  const FB_BUILD = "1.5.0-anti-rate-limit-coin-cache";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -64,6 +64,9 @@
     balanceSource: "",
     balanceUpdatedAt: 0,
     pendingCount: 0,
+    lastInbox: null,
+    lastInboxTs: 0,
+    lastHeaderError: "",
     busy: false,
     open: false,
     lastLoad: 0,
@@ -4530,20 +4533,19 @@
   async function refreshHeaderCoinBadge(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key || APP.headerRefreshing) return false;
-    // Fast enough for banker coin pings, light enough for PDA/Render.
-    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 3000) return true;
+    // PDA-safe: do not hammer Torn/Render. The backend also caches the Torn user.
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 18000) return true;
 
     APP.headerRefreshing = true;
     APP.lastHeaderBadgeLoad = Date.now();
 
     try {
-      const me = APP.me || await gmRequest("GET", "/api/banker/me");
-      APP.me = me;
-
-      // v1.4.8: ask the backend directly for the banker inbox count.
-      // This fixes cases where the request saves but PDA/local APP.me cache does not
-      // realize the player is a saved manual banker yet, so the coin never lights.
+      // v1.5.0: coin badge uses the light server-side inbox only.
+      // Do not call /me + full request list every few seconds or Torn can return "Too many requests".
       const inbox = await gmRequest("GET", "/api/banker/pending-count");
+      APP.lastInbox = inbox;
+      APP.lastInboxTs = Date.now();
+      if (!APP.me && inbox?.me) APP.me = inbox.me;
       if (inbox && APP.me) {
         APP.me._coin_can_bank = !!inbox.can_bank;
         if (inbox.can_bank) APP.me.is_banker = true;
@@ -4561,16 +4563,15 @@
         APP.requests = mergeLocalRequests(inboxItems.concat(Array.isArray(APP.requests) ? APP.requests : []));
       }
 
-      const list = await fbGetRequestListSafe().catch(() => null);
-      if (list && Array.isArray(list.items)) APP.requests = mergeLocalRequests(list.items.concat(inboxItems));
-
       const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
       setCoinAlert(Math.max(serverPending, pendingItems.length));
-      notifyBankerForNewPending(pendingItems.length ? pendingItems : inboxItems);
+      notifyBankerForNewPending(inboxItems.length ? inboxItems : pendingItems);
       return true;
     } catch (err) {
+      APP.lastHeaderError = String(err.message || err);
       const coin = $("#fb-bank-coin-clean");
-      if (coin) coin.title = `Factional Banking — refresh missed Render once: ${String(err.message || err).slice(0, 80)}`;
+      if (coin) coin.title = `Factional Banking — refresh missed once: ${APP.lastHeaderError.slice(0, 80)}`;
+      // Keep the existing red badge if we had one. Do not wipe/open state just because Torn rate-limited one poll.
       return false;
     } finally {
       APP.headerRefreshing = false;
@@ -4649,7 +4650,8 @@
 
       const subtitle = $("#fb-subtitle");
       if (subtitle) {
-        subtitle.textContent = `Last refresh failed: ${String(err.message || err).slice(0, 80)}`;
+        const msg = String(err.message || err);
+        subtitle.textContent = msg.toLowerCase().includes("too many") ? "Last refresh skipped: Torn rate limit cooldown" : `Last refresh failed: ${msg.slice(0, 80)}`;
       }
 
       // Do not wipe the current screen after a successful request.
@@ -4660,7 +4662,7 @@
           if (body && !body.querySelector("#fb-soft-network-error")) {
             body.insertAdjacentHTML("afterbegin", `
               <div id="fb-soft-network-error" class="fb-box">
-                <div class="fb-error">Refresh missed Render once. Your request may still be saved.</div>
+                <div class="fb-error">Refresh paused by Torn/Render once. Your request may still be saved.</div>
                 <div class="fb-row" style="margin-top:8px;">
                   <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
                 </div>
@@ -4775,17 +4777,16 @@
 
     pageMount("boot");
     if (GM_getValue(K_API_KEY, "")) {
-      setTimeout(() => refreshHeaderCoinBadge(true), 2200);
-      setTimeout(() => refreshHeaderCoinBadge(true), 7000);
-      setTimeout(() => refreshHeaderCoinBadge(true), 15000);
-      setTimeout(() => refreshHeaderCoinBadge(true), 24000);
+      setTimeout(() => refreshHeaderCoinBadge(true), 3000);
+      setTimeout(() => refreshHeaderCoinBadge(false), 25000);
+      setTimeout(() => refreshHeaderCoinBadge(false), 60000);
     }
 
     window.addEventListener("focus", () => {
-      if (GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(true).catch(() => {});
+      if (GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(false).catch(() => {});
     });
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(true).catch(() => {});
+      if (!document.hidden && GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(false).catch(() => {});
     });
 
     // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
@@ -4803,16 +4804,16 @@
 
       pageMount("slow");
 
-      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 4000) {
+      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 18000) {
         refreshHeaderCoinBadge(false);
       }
-      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 15000) {
+      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 30000) {
         refreshAll(false);
       }
       if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
         refreshFactionBoxData(false);
       }
-    }, 5000);
+    }, 12000);
   }
 
 
