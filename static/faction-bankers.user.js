@@ -2709,7 +2709,7 @@
             You are not listed as a banker for this app.
           </div>
           <div class="fb-small" style="margin-top:8px;">
-            Banker access is controlled by your faction banker roles/manual bankers in the Leaders tab.
+            Banker access is controlled by roles your faction leader/co-leader saved in the Leaders tab, plus optional manual overrides.
           </div>
         </div>
       `);
@@ -3572,7 +3572,7 @@
       await loadLeaderBankers();
       APP.bankers = [];
       mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`);
+      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that saved role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`);
     } catch (err) {
       renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -3597,13 +3597,13 @@
   }
 
   function renderLeadersTab(msg = "") {
-    const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_banker;
+    const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
 
     if (!canManage) {
       setBody(`
         <div class="fb-box fb-hero-card">
           <div class="fb-request-title">Leaders</div>
-          <div class="fb-error" style="margin-top:6px;">Leader/banker access is required to manage bankers.</div>
+          <div class="fb-error" style="margin-top:6px;">Leader/co-leader access is required to manage banker roles.</div>
           <div class="fb-small" style="margin-top:8px;">This tab is for the leader team of your own faction only.</div>
         </div>
       `);
@@ -3642,7 +3642,7 @@
           </div>
         </div>
       `;
-    }).join("") || `<div class="fb-box"><div class="fb-muted">No custom banker roles saved yet. Defaults are: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Leader, Co-leader")}</div></div>`;
+    }).join("") || `<div class="fb-box"><div class="fb-muted">No banker roles saved yet. A faction leader/co-leader must add the exact Torn role names for this faction before role-based banker access works. Suggestions: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Finance, Vault Keeper")}</div></div>`;
 
     setBody(`
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
@@ -3652,12 +3652,12 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">👑 Leaders • ${esc(factionName)}</div>
-            <div class="fb-small">This setup only affects your own faction. Other factions get their own Leaders tab and their own roles.</div>
+            <div class="fb-small">This setup only affects your own faction. Other factions cannot see or use these roles.</div>
           </div>
           <span class="fb-pill approved">${esc(yourRole)}</span>
         </div>
         <div class="fb-flow-grid" style="margin-top:10px;">
-          <div class="fb-flow-card"><b>1. Add roles</b><span>Type the exact Torn faction role that means “can bank” for your faction.</span></div>
+          <div class="fb-flow-card"><b>1. Add roles</b><span>Type the exact Torn faction role that means “can bank” for your faction only.</span></div>
           <div class="fb-flow-card"><b>2. Optional pings</b><span>Add role Pushover keys or specific banker keys for direct phone alerts.</span></div>
         </div>
       </div>
@@ -3748,7 +3748,7 @@
           <li>It does not auto-pay, auto-click Torn buttons, or move money by itself.</li>
           <li>Bankers still manually review requests and manually complete payouts in Torn.</li>
           <li>Members are responsible for making accurate requests with <code>/banker amount</code>.</li>
-          <li>Faction leaders control their own banker roles and Pushover role keys in the Leaders tab.</li>
+          <li>Faction leaders/co-leaders control their own banker roles and Pushover role keys in the Leaders tab.</li>
           <li>Completed requests are shown so bankers can avoid double-paying.</li>
         </ul>
       </div>
