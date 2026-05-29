@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.4.5-manual-bankers-only"
+APP_VERSION = "1.4.6-leader-input-no-wipe"
 
 
 @app.errorhandler(Exception)
