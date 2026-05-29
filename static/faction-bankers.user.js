@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.3.6
+// @version      1.3.9
 // @description  Faction vault banking with strict /banker chat commands, page balance sync, live remaining amount, banker board, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.3.6-page-balance-live-left";
+  const FB_BUILD = "1.3.9-sticky-balance-cache";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -39,6 +39,10 @@
   const K_BALANCE_CAPTURE = "fb_balance_capture_pending_v1";
   const K_MANUAL_BALANCE_AMOUNT = "fb_manual_personal_balance_amount_v1";
   const K_MANUAL_BALANCE_TEXT = "fb_manual_personal_balance_text_v1";
+  const K_LAST_BALANCE_AMOUNT = "fb_last_personal_balance_amount_v3";
+  const K_LAST_BALANCE_TEXT = "fb_last_personal_balance_text_v3";
+  const K_LAST_BALANCE_SOURCE = "fb_last_personal_balance_source_v3";
+  const K_LAST_BALANCE_TS = "fb_last_personal_balance_ts_v3";
 
   // Dynamic role mode: no hard-coded faction list.
   // The backend uses the logged-in player's own faction and finds bankers by faction role.
@@ -2195,14 +2199,21 @@
   function setManualBalance(amount) {
     const n = parseBalanceInput(amount);
     if (n === null) return false;
+    const now = Date.now();
+    const txt = money(n);
     GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(n));
-    GM_setValue(K_MANUAL_BALANCE_TEXT, money(n));
-    APP.balanceAmount = n;
-    APP.balanceText = money(n);
-    APP.balanceSource = "manual";
-    APP.balanceUpdatedAt = Date.now();
+    GM_setValue(K_MANUAL_BALANCE_TEXT, txt);
+    GM_setValue(K_LAST_BALANCE_AMOUNT, String(n));
+    GM_setValue(K_LAST_BALANCE_TEXT, txt);
+    GM_setValue(K_LAST_BALANCE_SOURCE, "manual");
+    GM_setValue(K_LAST_BALANCE_TS, String(now));
+    // Legacy keys kept so older installed builds do not lose the saved balance while updating.
     GM_setValue("fb_last_personal_balance_amount_v2", String(n));
-    GM_setValue("fb_last_personal_balance_text_v2", money(n));
+    GM_setValue("fb_last_personal_balance_text_v2", txt);
+    APP.balanceAmount = n;
+    APP.balanceText = txt;
+    APP.balanceSource = "manual";
+    APP.balanceUpdatedAt = now;
     return true;
   }
 
@@ -2224,10 +2235,41 @@
     if (Number.isFinite(manual) && manual >= 0 && manualText) {
       APP.balanceAmount = Math.floor(manual);
       APP.balanceText = manualText;
-      APP.balanceSource = "manual";
+      APP.balanceSource = "manual saved";
+      APP.balanceUpdatedAt = Number(GM_getValue(K_LAST_BALANCE_TS, "")) || APP.balanceUpdatedAt || 0;
       return true;
     }
     return false;
+  }
+
+  function loadLastKnownBalanceCache() {
+    const last = Number(GM_getValue(K_LAST_BALANCE_AMOUNT, GM_getValue("fb_last_personal_balance_amount_v2", "")));
+    const lastText = GM_getValue(K_LAST_BALANCE_TEXT, GM_getValue("fb_last_personal_balance_text_v2", ""));
+    if (Number.isFinite(last) && last >= 0 && lastText) {
+      APP.balanceAmount = Math.floor(last);
+      APP.balanceText = lastText;
+      APP.balanceSource = GM_getValue(K_LAST_BALANCE_SOURCE, "last saved") || "last saved";
+      APP.balanceUpdatedAt = Number(GM_getValue(K_LAST_BALANCE_TS, "")) || APP.balanceUpdatedAt || 0;
+      return true;
+    }
+    return loadManualBalanceCache();
+  }
+
+  function saveStickyBalance(amount, text, source) {
+    const n = Number(amount);
+    if (!Number.isFinite(n) || n < 0) return false;
+    const now = Date.now();
+    const txt = text || money(n);
+    GM_setValue(K_LAST_BALANCE_AMOUNT, String(Math.floor(n)));
+    GM_setValue(K_LAST_BALANCE_TEXT, txt);
+    GM_setValue(K_LAST_BALANCE_SOURCE, source || "last saved");
+    GM_setValue(K_LAST_BALANCE_TS, String(now));
+    // Also refresh the older/manual cache so an old saved $0 can never overwrite a newly detected Torn balance.
+    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(Math.floor(n)));
+    GM_setValue(K_MANUAL_BALANCE_TEXT, txt);
+    GM_setValue("fb_last_personal_balance_amount_v2", String(Math.floor(n)));
+    GM_setValue("fb_last_personal_balance_text_v2", txt);
+    return true;
   }
 
   function setFactionBalance(amount, source = "", fallbackText = "Balance unavailable") {
@@ -2236,21 +2278,11 @@
       APP.balanceText = money(APP.balanceAmount);
       APP.balanceSource = source || "detected";
       APP.balanceUpdatedAt = Date.now();
-      GM_setValue("fb_last_personal_balance_amount_v2", String(APP.balanceAmount));
-      GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
+      saveStickyBalance(APP.balanceAmount, APP.balanceText, APP.balanceSource);
       return true;
     }
 
-    if (loadManualBalanceCache()) return true;
-
-    const cached = Number(GM_getValue("fb_last_personal_balance_amount_v2", ""));
-    const cachedText = GM_getValue("fb_last_personal_balance_text_v2", "");
-    if (Number.isFinite(cached) && cached >= 0 && cachedText) {
-      APP.balanceAmount = Math.floor(cached);
-      APP.balanceText = cachedText;
-      APP.balanceSource = "last verified";
-      return true;
-    }
+    if (loadLastKnownBalanceCache()) return true;
 
     APP.balanceAmount = null;
     APP.balanceText = fallbackText || "Balance unavailable";
@@ -2273,10 +2305,7 @@
     APP.balanceUpdatedAt = Date.now();
 
     // Save it locally so the box keeps showing the reduced balance after PDA refreshes.
-    GM_setValue("fb_last_personal_balance_amount_v2", String(next));
-    GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
-    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(next));
-    GM_setValue(K_MANUAL_BALANCE_TEXT, APP.balanceText);
+    saveStickyBalance(next, APP.balanceText, APP.balanceSource);
 
     return true;
   }
@@ -2359,7 +2388,7 @@
     // Page text is the source of truth for personal faction-bank balance.
     // The API may expose vault/funds/member data, which is not always the user's exact bank balance.
     if (detectFactionBalanceFromPage()) return true;
-    if (loadManualBalanceCache()) return true;
+    if (loadLastKnownBalanceCache()) return true;
 
     if (!GM_getValue(K_API_KEY, "")) {
       setFactionBalance(null, "", "Save key to check balance");
@@ -4536,6 +4565,8 @@
     ensureStyles();
     clearBankerUiOnWrongPage();
     mountCoin();
+    // Show the saved balance immediately, even if Render/Torn refresh fails or the user is not on faction controls.
+    loadLastKnownBalanceCache();
 
     APP.booted = true;
 
