@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.1
-// @description  Faction vault banking with click-to-send /banker capture, page balance sync, live remaining amount, banker board, and Torn-friendly settings/login.
+// @version      1.4.4
+// @description  Faction vault banking with send-only /banker capture, banker coin badges, page balance sync, request board, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.4.1-click-send-capture";
+  const FB_BUILD = "1.4.4-coin-badge-opens-banking";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -1662,6 +1662,13 @@
     if (scrollToFactionBankingBox()) GM_setValue(K_SCROLL_TO_BANK, false);
   }
 
+  function preferredCoinOpenTab() {
+    // When a banker/leader has a pending request, the coin must jump straight
+    // to Banking so they see the request board immediately.
+    if (isBankerUiUser() && Number(APP.pendingCount || 0) > 0) return "banker";
+    return defaultTabForMe();
+  }
+
   async function openHeaderCoinBoard() {
     // Coin is visible to everyone. New users land on Settings/Login.
     try {
@@ -1678,11 +1685,21 @@
 
     openOverlay();
     setTimeout(() => {
-      const tabName = defaultTabForMe();
+      const tabName = preferredCoinOpenTab();
       rebuildTabs(tabName);
       const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
       if (tab) tab.click();
       else renderBody(tabName);
+
+      // Force one fresh pull after opening, then keep Banking selected if
+      // pending requests exist. This avoids opening to a stale/no-request view.
+      refreshAll(true).then(() => {
+        const again = preferredCoinOpenTab();
+        rebuildTabs(again);
+        const next = document.querySelector(`.fb-tab[data-tab="${again}"]`);
+        if (next) next.click();
+        else renderBody(again);
+      }).catch(() => {});
     }, 120);
   }
 
@@ -2015,8 +2032,14 @@
 
     setTimeout(() => {
       const tabName = GM_getValue(K_API_KEY, "") ? "banker" : "settings";
+      rebuildTabs(tabName);
       const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
       if (tab) tab.click();
+      else renderBody(tabName);
+      refreshAll(true).then(() => {
+        const next = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
+        if (next) next.click();
+      }).catch(() => {});
     }, 150);
   }
 
@@ -2889,6 +2912,13 @@
     notice.textContent = text;
     clearTimeout(showPayNotice._timer);
     showPayNotice._timer = setTimeout(() => notice.remove(), 7000);
+  }
+
+  function bumpOwnBankerCoinAfterRequest() {
+    if (!isBankerUiUser()) return;
+    const pendingNow = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending").length;
+    setCoinAlert(Math.max(1, pendingNow));
+    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 500);
   }
 
   function showBankersNotifiedBox(amount = 0) {
@@ -4007,6 +4037,7 @@
         deductRequestedAmountFromLocalBalance(detectedFullBalance);
       }
       showBankersNotifiedBox(detectedFullBalance);
+      bumpOwnBankerCoinAfterRequest();
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -4067,6 +4098,7 @@
       }
       deductRequestedAmountFromLocalBalance(amount);
       showBankersNotifiedBox(amount);
+      bumpOwnBankerCoinAfterRequest();
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
       if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -4113,6 +4145,7 @@
       }
       deductRequestedAmountFromLocalBalance(amount);
       showBankersNotifiedBox(amount);
+      bumpOwnBankerCoinAfterRequest();
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
       const pingMsg = res && res.pushover_sent === false
@@ -4483,7 +4516,8 @@
   async function refreshHeaderCoinBadge(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key || APP.headerRefreshing) return false;
-    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 20000) return true;
+    // Fast enough for banker coin pings, light enough for PDA/Render.
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 7000) return true;
 
     APP.headerRefreshing = true;
     APP.lastHeaderBadgeLoad = Date.now();
@@ -4699,6 +4733,7 @@
       setTimeout(() => refreshHeaderCoinBadge(true), 2200);
       setTimeout(() => refreshHeaderCoinBadge(true), 7000);
       setTimeout(() => refreshHeaderCoinBadge(true), 15000);
+      setTimeout(() => refreshHeaderCoinBadge(true), 24000);
     }
 
     // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
@@ -4716,16 +4751,16 @@
 
       pageMount("slow");
 
-      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 20000) {
+      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 7000) {
         refreshHeaderCoinBadge(false);
       }
-      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 30000) {
+      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 15000) {
         refreshAll(false);
       }
       if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
         refreshFactionBoxData(false);
       }
-    }, 30000);
+    }, 10000);
   }
 
 
@@ -4802,6 +4837,7 @@
 
   let FB_CHAT_COMMAND_BUSY = false;
   let FB_CHAT_LAST_SENT = { text: "", ts: 0 };
+  let FB_CHAT_LAST_SEND_ATTEMPT_TS = 0;
 
   async function fbSendBankerChatCommand(commandText) {
     const text = String(commandText || "").trim();
@@ -4888,6 +4924,13 @@
       if (a === "created") {
         if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
         showBankersNotifiedBox(amount);
+        // If the requester is also a banker/leader, light their own coin instantly.
+        // Other bankers will see the coin on their next fast badge poll.
+        if (isBankerUiUser()) {
+          const pendingNow = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending").length;
+          setCoinAlert(Math.max(1, pendingNow));
+        }
+        setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 500);
         showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm, but bankers can check the board." : `🪙 Confirmed: bank request sent${amount > 1 ? ` for ${money(amount)}` : ""}. Bankers alerted.`);
       } else if (a === "canceled") {
         showPayNotice("🪙 Bank request canceled.");
@@ -4936,6 +4979,7 @@
 
     document.addEventListener("keydown", (ev) => {
       if (ev.key !== "Enter" || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+      FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now();
       fbInterceptBankerCommandInput(ev.target, ev);
     }, true);
 
@@ -5030,6 +5074,7 @@
         // Click-to-send capture: when the player taps the Torn chat send arrow,
         // stop the chat message and turn it into a bank request instead.
         if (!fbIsActualChatSendTap(ev, t, el)) return;
+        FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now();
         fbRememberTypedBankerCommandFrom(el);
         fbInterceptBankerCommandInput(el, ev);
         return;
@@ -5038,6 +5083,7 @@
       // Some PDA builds clear or detach the input before our event gets to it.
       // Use the last remembered /banker command so the tap still becomes a request.
       if (fbIsRememberedChatSendTap(ev, t)) {
+        FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now();
         if (ev) {
           ev.preventDefault();
           ev.stopPropagation();
@@ -5059,11 +5105,11 @@
 
     document.addEventListener("submit", (ev) => {
       const el = fbFindBankerCommandInput();
-      if (el) fbInterceptBankerCommandInput(el, ev);
+      if (el) { FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now(); fbInterceptBankerCommandInput(el, ev); }
     }, true);
   }
 
-  // v1.2.5 reliable chat fallback:
+  // v1.4.3 send-only reliable chat fallback:
   // PDA sometimes posts /banker as a normal message before our send-button hook sees it.
   // We remember the command while the user types, then if the exact same command appears
   // in the chat within a few seconds, we still create the request and ping bankers once.
@@ -5138,6 +5184,9 @@
     // hook catches it, still create the backend request once and hide that command
     // locally. This only runs for an exact command the current user typed recently.
     const runFallbackCheck = () => {
+      // Do NOT create a request just because the user is still typing /banker.
+      // Fallback only runs after an actual send attempt (send arrow / Enter / form submit).
+      if (!FB_CHAT_LAST_SEND_ATTEMPT_TS || Date.now() - FB_CHAT_LAST_SEND_ATTEMPT_TS > 9000) return;
       const posted = fbFindPostedBankerCommandText();
       if (!posted) return;
       const key = posted.toLowerCase() + ":" + String(FB_CHAT_LAST_TYPED_COMMAND.ts || "");
