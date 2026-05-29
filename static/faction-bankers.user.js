@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.8
+// @version      1.4.9
 // @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.4.8-server-side-coin-inbox";
+  const FB_BUILD = "1.4.9-sticky-open-until-complete";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -2150,7 +2150,7 @@
 
       if (canBank && n > 0) {
         coin.classList.add("fb-alert");
-        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to approve and send`;
+        coin.title = `${n} open faction bank request${n === 1 ? "" : "s"} — tap to review in Banking`;
       } else {
         coin.classList.remove("fb-alert");
         coin.title = hasKey ? "Factional Banking" : "Factional Banking setup/login";
@@ -2854,13 +2854,13 @@
       return;
     }
 
-    const pending = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
-    const others = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() !== "pending");
+    const pending = APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
+    const others = APP.requests.filter((r) => !["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
 
     const cards = [
       pending.length
-        ? `<div class="fb-box"><strong style="color:#ffd36a;">Pending Requests</strong></div>${pending.map(requestCard).join("")}`
-        : `<div class="fb-box"><div class="fb-muted">No pending requests.</div></div>`,
+        ? `<div class="fb-box"><strong style="color:#ffd36a;">Open Requests</strong><div class="fb-small">Pending/approved requests stay here and keep the coin lit until a banker marks complete.</div></div>${pending.map(requestCard).join("")}`
+        : `<div class="fb-box"><div class="fb-muted">No open requests.</div></div>`,
       others.length
         ? `<div class="fb-box"><strong>Recently Completed / Last 5</strong><div class="fb-small">Shows the newest 5 completed payouts so nobody double-pays.</div></div>${others.slice(0, 5).map(requestCard).join("")}`
         : "",
@@ -2871,7 +2871,7 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">Banker Board</div>
-            <div class="fb-small">${pending.length} pending request${pending.length === 1 ? "" : "s"}</div>
+            <div class="fb-small">${pending.length} open request${pending.length === 1 ? "" : "s"} — stays until completed</div>
           </div>
           <button id="fb-refresh-banker" class="fb-btn" type="button">Refresh</button>
         </div>
@@ -3678,7 +3678,7 @@
       `;
     }
 
-    if (isBanker && status === "pending") {
+    if (isBanker && ["pending", "approved"].includes(status)) {
       actions = `
         <div class="fb-row" style="margin-top:10px;">
           <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
@@ -4185,16 +4185,21 @@
       const isCompleteAction = ["paid", "complete", "mark_paid", "mark_complete"].includes(String(action || "").toLowerCase());
       const label = isCompleteAction ? "completed" : action === "deny" ? "denied" : "approved";
 
-      // Important: completed requests should NOT be hidden locally. Bankers need
-      // to see who completed it so nobody double-pays. Deny/cancel can still hide.
+      // Open requests should stay visible and keep the coin lit until a banker marks Complete.
+      // Complete remains visible in Recent Completed/Last 5 with the banker name. Deny clears it.
       if (isCompleteAction) {
         forgetClosedRequest(id);
         clearLocalRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
         if (res && res.item) APP.requests.unshift(res.item);
-      } else {
+      } else if (action === "deny") {
         rememberClosedRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+      } else {
+        forgetClosedRequest(id);
+        clearLocalRequest(id);
+        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
+        if (res && res.item) APP.requests.unshift(res.item);
       }
 
       await refreshAll(true);
@@ -4373,7 +4378,7 @@
     const closed = new Set(getClosedRequestIds());
     const list = (Array.isArray(items) ? items.slice() : []).filter((r) => {
       const status = String(r?.status || "pending").toLowerCase();
-      if (status === "complete") return true;
+      if (["pending", "approved", "complete"].includes(status)) return true;
       return !closed.has(String(r?.id));
     });
     const ids = new Set(list.map((r) => String(r.id)));
@@ -4559,7 +4564,7 @@
       const list = await fbGetRequestListSafe().catch(() => null);
       if (list && Array.isArray(list.items)) APP.requests = mergeLocalRequests(list.items.concat(inboxItems));
 
-      const pendingItems = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
       setCoinAlert(Math.max(serverPending, pendingItems.length));
       notifyBankerForNewPending(pendingItems.length ? pendingItems : inboxItems);
       return true;
@@ -4625,7 +4630,7 @@
 
       APP.bankers = [];
 
-      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      const pendingItems = APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
       const pending = pendingItems.length;
 
       setCoinAlert(pending);
@@ -4957,7 +4962,7 @@
           saveLocalRequest(res.item);
           saveRecentCreatedRequest(res.item);
           APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
-          if (isBankerUiUser()) setCoinAlert(APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending").length);
+          if (isBankerUiUser()) setCoinAlert(APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase())).length);
           if (APP.open) renderBody(activeTab());
         }
       }
