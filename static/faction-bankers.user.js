@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.3.9
-// @description  Faction vault banking with strict /banker chat commands, page balance sync, live remaining amount, banker board, and Torn-friendly settings/login.
+// @version      1.4.1
+// @description  Faction vault banking with click-to-send /banker capture, page balance sync, live remaining amount, banker board, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.3.9-sticky-balance-cache";
+  const FB_BUILD = "1.4.1-click-send-capture";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -732,6 +732,92 @@
         color: #ddd;
         line-height: 1.35;
         white-space: pre-wrap;
+      }
+
+
+      #fb-bankers-notified-wrap {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 100003 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        padding: 14px !important;
+        background: rgba(0,0,0,.46) !important;
+        font-family: Arial, Helvetica, sans-serif !important;
+      }
+
+      #fb-bankers-notified-card {
+        width: min(420px, calc(100vw - 28px)) !important;
+        border: 1px solid rgba(255,211,106,.58) !important;
+        border-radius: 16px !important;
+        background:
+          radial-gradient(circle at top left, rgba(255,211,106,.20), transparent 42%),
+          linear-gradient(180deg, rgba(25,22,14,.98), rgba(6,6,6,.98)) !important;
+        color: #eee !important;
+        box-shadow: 0 18px 55px rgba(0,0,0,.75), 0 0 18px rgba(255,211,106,.18) !important;
+        overflow: hidden !important;
+      }
+
+      .fb-notified-head {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 10px !important;
+        padding: 12px 13px !important;
+        border-bottom: 1px solid rgba(255,255,255,.11) !important;
+        background: rgba(0,0,0,.22) !important;
+      }
+
+      .fb-notified-head strong {
+        color: #ffd36a !important;
+        font-size: 15px !important;
+        font-weight: 900 !important;
+      }
+
+      #fb-bankers-notified-close {
+        border: 1px solid rgba(255,255,255,.18) !important;
+        background: rgba(255,255,255,.07) !important;
+        color: #fff !important;
+        border-radius: 10px !important;
+        padding: 7px 10px !important;
+        font-weight: 900 !important;
+        cursor: pointer !important;
+        font-size: 13px !important;
+      }
+
+      .fb-notified-body {
+        padding: 14px !important;
+        font-size: 13px !important;
+        line-height: 1.45 !important;
+        color: #f1f1f1 !important;
+      }
+
+      .fb-notified-body b {
+        color: #ffd36a !important;
+      }
+
+      .fb-notified-small {
+        margin-top: 8px !important;
+        color: #aaa !important;
+        font-size: 11px !important;
+      }
+
+      .fb-notified-actions {
+        display: flex !important;
+        justify-content: flex-end !important;
+        gap: 8px !important;
+        padding: 0 14px 14px !important;
+      }
+
+      #fb-bankers-notified-ok {
+        border: 1px solid rgba(255,211,106,.52) !important;
+        background: rgba(255,211,106,.16) !important;
+        color: #ffd36a !important;
+        border-radius: 10px !important;
+        padding: 9px 13px !important;
+        font-weight: 900 !important;
+        cursor: pointer !important;
       }
 
       .fb-pay-notice {
@@ -2805,6 +2891,37 @@
     showPayNotice._timer = setTimeout(() => notice.remove(), 7000);
   }
 
+  function showBankersNotifiedBox(amount = 0) {
+    document.querySelector("#fb-bankers-notified-wrap")?.remove();
+    const wrap = document.createElement("div");
+    wrap.id = "fb-bankers-notified-wrap";
+    const amountLine = Number(amount || 0) > 1 ? `<div class="fb-notified-small">Request amount: <b>${money(amount)}</b></div>` : "";
+    wrap.innerHTML = `
+      <div id="fb-bankers-notified-card" role="dialog" aria-modal="true" aria-label="Bankers notified">
+        <div class="fb-notified-head">
+          <strong>🪙 Bankers notified</strong>
+          <button id="fb-bankers-notified-close" type="button">✕</button>
+        </div>
+        <div class="fb-notified-body">
+          <b>Your request has been sent.</b><br>
+          Bankers have been notified and will be with you as soon as they can.
+          ${amountLine}
+        </div>
+        <div class="fb-notified-actions">
+          <button id="fb-bankers-notified-ok" type="button">Close</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+
+    const close = () => wrap.remove();
+    wrap.addEventListener("click", (ev) => {
+      if (ev.target === wrap) close();
+    });
+    wrap.querySelector("#fb-bankers-notified-close")?.addEventListener("click", close);
+    wrap.querySelector("#fb-bankers-notified-ok")?.addEventListener("click", close);
+  }
+
   function savePayPrefill(r) {
     if (!r) return false;
     const payload = {
@@ -3889,6 +4006,7 @@
       if (sendDetectedAmount) {
         deductRequestedAmountFromLocalBalance(detectedFullBalance);
       }
+      showBankersNotifiedBox(detectedFullBalance);
 
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -3948,6 +4066,7 @@
         saveLocalRequest(res.item);
       }
       deductRequestedAmountFromLocalBalance(amount);
+      showBankersNotifiedBox(amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       $("#fb-built-amount").value = "";
       if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
@@ -3993,6 +4112,7 @@
         saveLocalRequest(res.item);
       }
       deductRequestedAmountFromLocalBalance(amount);
+      showBankersNotifiedBox(amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
       const pingMsg = res && res.pushover_sent === false
@@ -4767,6 +4887,7 @@
       const a = String(res?.action || "created");
       if (a === "created") {
         if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
+        showBankersNotifiedBox(amount);
         showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm, but bankers can check the board." : `🪙 Confirmed: bank request sent${amount > 1 ? ` for ${money(amount)}` : ""}. Bankers alerted.`);
       } else if (a === "canceled") {
         showPayNotice("🪙 Bank request canceled.");
@@ -4820,9 +4941,10 @@
 
     function fbIsActualChatSendTap(ev, target, inputEl) {
       if (!target || !inputEl || fbIsInsideOurBankerUi(target)) return false;
+      if (target === inputEl || (target.closest && target.closest('textarea, input, [contenteditable="true"]') === inputEl)) return false;
 
       const targetText = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()}`;
-      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a');
+      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a, svg, path, i, span, div');
       const btnText = `${String(btn?.textContent || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
 
       // Text-labeled send buttons are okay. Do not match generic words like "message".
@@ -4832,46 +4954,107 @@
       try { r1 = inputEl.getBoundingClientRect(); } catch (_) { return false; }
       if (!r1 || !r1.width || !r1.height) return false;
 
-      // PDA send arrow: pointer is directly to the right of the chat input on the same row.
+      // PDA send arrow: the user taps the arrow/control on the same row as the chat input.
+      // Some PDA themes draw the arrow over the input border, so accept slightly inside the right edge too.
       const touch = ev?.changedTouches?.[0] || ev?.touches?.[0] || null;
       const x = Number(ev?.clientX || touch?.clientX || 0);
       const y = Number(ev?.clientY || touch?.clientY || 0);
       if (x && y) {
-        const rowY = y >= (r1.top - 22) && y <= (r1.bottom + 22);
-        const rightOfInput = x >= (r1.right + 2) && x <= (r1.right + 150);
-        if (rowY && rightOfInput) return true;
+        const rowY = y >= (r1.top - 36) && y <= (r1.bottom + 36);
+        const rightSendZone = x >= (r1.right - 28) && x <= Math.min(window.innerWidth + 8, r1.right + 230);
+        const farRightOfInput = x >= (r1.left + r1.width * 0.72);
+        if (rowY && rightSendZone && farRightOfInput) return true;
       }
 
-      // Fallback for wrapped icon/button geometry.
+      // Fallback for wrapped icon/button geometry. This catches SVG/path arrows in PDA chat.
       const clickEl = btn || target;
       try {
         const r2 = clickEl.getBoundingClientRect();
         const inputMidY = r1.top + r1.height / 2;
         const btnMidY = r2.top + r2.height / 2;
-        const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(55, r1.height * 1.15);
-        const smallish = r2.width <= 120 && r2.height <= 120;
-        const toRight = r2.left >= (r1.right - 2) && r2.left <= (r1.right + 150);
-        return !!(closeY && smallish && toRight);
+        const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(76, r1.height * 1.45);
+        const smallish = r2.width <= 180 && r2.height <= 180;
+        const onSendSide = r2.left >= (r1.right - 42) && r2.left <= (r1.right + 230);
+        const tag = String(target.tagName || "").toLowerCase();
+        const iconLike = ["svg", "path", "i", "span", "button"].includes(tag) || /arrow|send|submit|icon/.test(targetText + " " + btnText);
+        return !!(closeY && smallish && onSendSide && iconLike);
       } catch (_) {
         return false;
       }
     }
 
+    function fbIsRememberedChatSendTap(ev, target) {
+      const remembered = String(FB_CHAT_LAST_TYPED_COMMAND?.text || "").trim();
+      if (!remembered || !fbIsCompleteBankerCommandText(remembered)) return false;
+      if (Date.now() - Number(FB_CHAT_LAST_TYPED_COMMAND.ts || 0) > 45000) return false;
+      if (!target || fbIsInsideOurBankerUi(target)) return false;
+
+      const targetText = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()}`;
+      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a, svg, path, i, span, div');
+      const btnText = `${String(btn?.textContent || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
+      if (/\b(send|submit|sendmessage|send-message)\b/.test(targetText + " " + btnText)) return true;
+
+      const touch = ev?.changedTouches?.[0] || ev?.touches?.[0] || null;
+      const x = Number(ev?.clientX || touch?.clientX || 0);
+      const y = Number(ev?.clientY || touch?.clientY || 0);
+      const rect = FB_CHAT_LAST_TYPED_COMMAND.rect || null;
+      if (x && y && rect) {
+        const rowY = y >= (rect.top - 34) && y <= (rect.bottom + 34);
+        const rightOfInput = x >= (rect.right - 8) && x <= (rect.right + 190);
+        if (rowY && rightOfInput) return true;
+      }
+
+      // PDA chat send arrow is often the last visible control in the chat popup.
+      // If the command was typed in the last few seconds and the user taps a small
+      // control on the same row/right side, treat it as send even if Torn's classes changed.
+      try {
+        const r = (target.closest?.('button, [role="button"], a, span, div') || target).getBoundingClientRect();
+        if (rect && r) {
+          const inputMidY = rect.top + rect.height / 2;
+          const tapMidY = r.top + r.height / 2;
+          const closeY = Math.abs(inputMidY - tapMidY) <= 70;
+          const rightSide = r.left >= rect.right - 18 && r.left <= rect.right + 210;
+          const smallish = r.width <= 150 && r.height <= 150;
+          if (closeY && rightSide && smallish) return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+
     const pointerHandler = (ev) => {
       const t = ev.target;
-      if (t && t.closest && t.closest('#fb-board, #fb-built-in-box, #fb-header-coin, #fb-pay-prefill-notice')) return;
+      if (t && t.closest && t.closest('#fb-board, #fb-built-in-box, #fb-overlay, #fb-header-coin, #fb-pay-prefill-notice')) return;
       const el = fbFindBankerCommandInput();
-      if (!el) return;
 
-      // Only the chat send button/arrow sends. Tapping the coin, chat history,
-      // suggestions, or the input itself never sends.
-      if (!fbIsActualChatSendTap(ev, t, el)) return;
-      fbInterceptBankerCommandInput(el, ev);
+      if (el) {
+        // Click-to-send capture: when the player taps the Torn chat send arrow,
+        // stop the chat message and turn it into a bank request instead.
+        if (!fbIsActualChatSendTap(ev, t, el)) return;
+        fbRememberTypedBankerCommandFrom(el);
+        fbInterceptBankerCommandInput(el, ev);
+        return;
+      }
+
+      // Some PDA builds clear or detach the input before our event gets to it.
+      // Use the last remembered /banker command so the tap still becomes a request.
+      if (fbIsRememberedChatSendTap(ev, t)) {
+        if (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+        }
+        const remembered = String(FB_CHAT_LAST_TYPED_COMMAND.text || "").trim();
+        try { fbSetEditableText(FB_CHAT_LAST_TYPED_COMMAND.el, ""); } catch (_) {}
+        fbSendBankerChatCommand(remembered);
+      }
     };
 
     document.addEventListener("pointerdown", pointerHandler, true);
+    document.addEventListener("pointerup", pointerHandler, true);
     document.addEventListener("touchstart", pointerHandler, true);
+    document.addEventListener("touchend", pointerHandler, true);
     document.addEventListener("mousedown", pointerHandler, true);
+    document.addEventListener("mouseup", pointerHandler, true);
     document.addEventListener("click", pointerHandler, true);
 
     document.addEventListener("submit", (ev) => {
@@ -4884,14 +5067,19 @@
   // PDA sometimes posts /banker as a normal message before our send-button hook sees it.
   // We remember the command while the user types, then if the exact same command appears
   // in the chat within a few seconds, we still create the request and ping bankers once.
-  let FB_CHAT_LAST_TYPED_COMMAND = { text: "", ts: 0 };
+  let FB_CHAT_LAST_TYPED_COMMAND = { text: "", ts: 0, el: null, rect: null };
   const FB_CHAT_FALLBACK_DONE = new Set();
 
   function fbRememberTypedBankerCommandFrom(el) {
     if (!el || !fbLikelyChatInput(el)) return;
     const text = String(fbGetEditableText(el) || "").trim();
     if (!fbIsCompleteBankerCommandText(text)) return;
-    FB_CHAT_LAST_TYPED_COMMAND = { text, ts: Date.now() };
+    let rect = null;
+    try {
+      const r = el.getBoundingClientRect();
+      if (r && r.width && r.height) rect = { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+    } catch (_) {}
+    FB_CHAT_LAST_TYPED_COMMAND = { text, ts: Date.now(), el, rect };
   }
 
   function fbIsInsideOurBankerUi(el) {
@@ -4917,19 +5105,59 @@
     return "";
   }
 
+  function fbHidePostedBankerCommandText(commandText) {
+    const cmd = String(commandText || "").replace(/\s+/g, " ").trim();
+    if (!cmd) return;
+    const candidates = Array.from(document.querySelectorAll('div, span, p, li'));
+    for (const el of candidates) {
+      if (!el || fbIsInsideOurBankerUi(el)) continue;
+      const tag = String(el.tagName || "").toLowerCase();
+      if (["input", "textarea", "select", "option"].includes(tag) || el.isContentEditable) continue;
+      const txt = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      if (txt !== cmd) continue;
+      // Hide just the command bubble/text locally so the faction does not keep seeing it on this device.
+      const bubble = el.closest?.('[class*="message" i], [class*="msg" i], [class*="bubble" i], li, p, div') || el;
+      try {
+        bubble.style.display = "none";
+        bubble.setAttribute("data-fb-hidden-banker-command", "1");
+      } catch (_) {
+        try { el.style.display = "none"; } catch (__) {}
+      }
+    }
+  }
+
   function installChatBankerCommandFallback() {
     if (installChatBankerCommandFallback._installed) return;
     installChatBankerCommandFallback._installed = true;
 
     document.addEventListener('input', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
     document.addEventListener('keyup', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
+    document.addEventListener('beforeinput', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
 
-    // v1.3.2: disabled post-to-chat fallback.
-    // The old fallback could fire from a visible /banker draft/message and ping before
-    // the user intentionally pressed send. Commands now only run on Enter or the real
-    // chat send button, and the script tries to prevent the command from posting.
-    // This intentionally does nothing.
-    return;
+    // Safety net: if Torn/PDA posts the /banker command before our send-button
+    // hook catches it, still create the backend request once and hide that command
+    // locally. This only runs for an exact command the current user typed recently.
+    const runFallbackCheck = () => {
+      const posted = fbFindPostedBankerCommandText();
+      if (!posted) return;
+      const key = posted.toLowerCase() + ":" + String(FB_CHAT_LAST_TYPED_COMMAND.ts || "");
+      if (FB_CHAT_FALLBACK_DONE.has(key)) return;
+      FB_CHAT_FALLBACK_DONE.add(key);
+      fbHidePostedBankerCommandText(posted);
+      fbSendBankerChatCommand(posted);
+      setTimeout(() => fbHidePostedBankerCommandText(posted), 800);
+      setTimeout(() => fbHidePostedBankerCommandText(posted), 2200);
+    };
+
+    let fallbackTimer = 0;
+    const scheduleFallbackCheck = () => {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = setTimeout(runFallbackCheck, 350);
+    };
+
+    const mo = new MutationObserver(scheduleFallbackCheck);
+    try { mo.observe(document.body || document.documentElement, { childList: true, subtree: true, characterData: true }); } catch (_) {}
+    setInterval(runFallbackCheck, 1500);
   }
 
   function startWhenReady() {
