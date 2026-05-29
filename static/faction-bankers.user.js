@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.1
+// @version      1.5.2
 // @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -13,6 +13,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      faction-bankers-request.onrender.com
+// @connect      https://faction-bankers-request.onrender.com/*
+// @connect      *.onrender.com
 // @connect      api.torn.com
 // @connect      *
 // ==/UserScript==
@@ -127,18 +129,24 @@
   }
 
   async function fetchFallbackRequest(method, path, body) {
-    const url = BANKER_API_BASE.replace(/\/$/, "") + path;
-    const res = await fetch(url, {
+    // PDA/WebView fallback: avoid custom headers and application/json preflight.
+    // Put the Torn key on the query string and send POST body as text/plain JSON.
+    const key = GM_getValue(K_API_KEY, "");
+    const joiner = path.includes("?") ? "&" : "?";
+    const safePath = key ? `${path}${joiner}key=${encodeURIComponent(key)}&pda_fallback=1` : `${path}${joiner}pda_fallback=1`;
+    const url = BANKER_API_BASE.replace(/\/$/, "") + safePath;
+    const opts = {
       method,
       mode: "cors",
       cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Torn-Key": GM_getValue(K_API_KEY, ""),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+      headers: {},
+    };
+    if (body) {
+      opts.headers["Content-Type"] = "text/plain;charset=UTF-8";
+      opts.body = JSON.stringify(body);
+    }
 
+    const res = await fetch(url, opts);
     const raw = await res.text();
     let data = {};
     try {
