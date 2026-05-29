@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.4.8-server-side-coin-inbox"
+APP_VERSION = "1.4.9-sticky-open-until-complete"
 
 
 @app.errorhandler(Exception)
@@ -2296,7 +2296,7 @@ def banker_action(req_id, action):
     if len(bank_note) > 500:
         bank_note = bank_note[:500]
 
-    is_active = new_status not in {"approved", "complete", "denied"}
+    is_active = new_status not in {"complete", "denied"}
 
     def can_handle_request(req_item):
         req_faction = str(req_item.get("faction_id") or "").strip()
@@ -2860,7 +2860,7 @@ def banker_pending_count():
     if not db_ok:
         items = []
         for r in MEMORY_REQUESTS:
-            if str(r.get("status") or "pending").lower() != "pending" or not r.get("is_active", True):
+            if str(r.get("status") or "pending").lower() not in {"pending", "approved"} or not r.get("is_active", True):
                 continue
             same_faction = str(r.get("faction_id") or "") == own_faction_id or str(r.get("faction_name") or "") == own_faction_name
             if user.get("is_admin") or same_faction:
@@ -2884,7 +2884,7 @@ def banker_pending_count():
                     """
                     SELECT *
                     FROM banker_requests
-                    WHERE status = 'pending' AND is_active = TRUE
+                    WHERE status IN ('pending', 'approved') AND is_active = TRUE
                     ORDER BY created_ts DESC, id DESC
                     LIMIT 50
                     """
@@ -2894,7 +2894,7 @@ def banker_pending_count():
                     """
                     SELECT *
                     FROM banker_requests
-                    WHERE status = 'pending'
+                    WHERE status IN ('pending', 'approved')
                       AND is_active = TRUE
                       AND (
                         faction_id = %s
