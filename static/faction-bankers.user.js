@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.7
+// @version      1.4.8
 // @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.4.6-leader-input-no-wipe";
+  const FB_BUILD = "1.4.8-server-side-coin-inbox";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -2057,7 +2057,7 @@
   }
 
   function isBankerUiUser() {
-    return !!(APP.me?.is_banker || APP.me?.is_admin || isLeaderUiUser());
+    return !!(APP.me?.is_banker || APP.me?.is_admin || APP.me?._coin_can_bank || isLeaderUiUser());
   }
 
   function allowedTabsForMe() {
@@ -2139,7 +2139,7 @@
     const setupBtn = $("#fb-setup-button");
     const n = Number(count || 0);
     const hasKey = !!GM_getValue(K_API_KEY, "");
-    const canBank = !!(APP.me?.is_banker || APP.me?.is_admin || APP.me?.can_manage_leaders || APP.me?.is_leader_role);
+    const canBank = !!(APP.me?.is_banker || APP.me?.is_admin || APP.me?._coin_can_bank || APP.me?.can_manage_leaders || APP.me?.is_leader_role);
     APP.pendingCount = n;
 
     if (coin) {
@@ -4526,7 +4526,7 @@
     const key = GM_getValue(K_API_KEY, "");
     if (!key || APP.headerRefreshing) return false;
     // Fast enough for banker coin pings, light enough for PDA/Render.
-    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 4000) return true;
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 3000) return true;
 
     APP.headerRefreshing = true;
     APP.lastHeaderBadgeLoad = Date.now();
@@ -4535,18 +4535,33 @@
       const me = APP.me || await gmRequest("GET", "/api/banker/me");
       APP.me = me;
 
-      if (!(me?.is_banker || me?.is_admin || me?.can_manage_leaders || me?.is_leader_role)) {
+      // v1.4.8: ask the backend directly for the banker inbox count.
+      // This fixes cases where the request saves but PDA/local APP.me cache does not
+      // realize the player is a saved manual banker yet, so the coin never lights.
+      const inbox = await gmRequest("GET", "/api/banker/pending-count");
+      if (inbox && APP.me) {
+        APP.me._coin_can_bank = !!inbox.can_bank;
+        if (inbox.can_bank) APP.me.is_banker = true;
+      }
+
+      const serverPending = Number(inbox?.pending_count || 0);
+      const inboxItems = Array.isArray(inbox?.items) ? inbox.items : [];
+
+      if (!inbox?.can_bank) {
         setCoinAlert(0);
         return true;
       }
 
-      const list = await fbGetRequestListSafe();
-      const items = Array.isArray(list.items) ? list.items : [];
-      APP.requests = mergeLocalRequests(items);
+      if (inboxItems.length) {
+        APP.requests = mergeLocalRequests(inboxItems.concat(Array.isArray(APP.requests) ? APP.requests : []));
+      }
 
-      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
-      setCoinAlert(pendingItems.length);
-      notifyBankerForNewPending(pendingItems);
+      const list = await fbGetRequestListSafe().catch(() => null);
+      if (list && Array.isArray(list.items)) APP.requests = mergeLocalRequests(list.items.concat(inboxItems));
+
+      const pendingItems = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      setCoinAlert(Math.max(serverPending, pendingItems.length));
+      notifyBankerForNewPending(pendingItems.length ? pendingItems : inboxItems);
       return true;
     } catch (err) {
       const coin = $("#fb-bank-coin-clean");
@@ -4586,6 +4601,17 @@
 
       const me = await gmRequest("GET", "/api/banker/me");
       APP.me = me;
+      try {
+        const inbox = await gmRequest("GET", "/api/banker/pending-count");
+        if (inbox && APP.me) {
+          APP.me._coin_can_bank = !!inbox.can_bank;
+          if (inbox.can_bank) APP.me.is_banker = true;
+          if (Array.isArray(inbox.items) && inbox.items.length) {
+            APP.requests = mergeLocalRequests(inbox.items.concat(Array.isArray(APP.requests) ? APP.requests : []));
+          }
+          if (Number(inbox.pending_count || 0) > 0) setCoinAlert(Number(inbox.pending_count || 0));
+        }
+      } catch (_) {}
       if (APP.open) rebuildTabs(activeTab());
 
       await loadFactionBalance(false);
@@ -4940,6 +4966,15 @@
       // Refresh shortly after, but keep local backup merged if Render is late.
       setTimeout(() => refreshAll(true).catch(() => { if (APP.open) renderBody(activeTab()); }), 1800);
       setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2200);
+      setTimeout(() => gmRequest("GET", "/api/banker/pending-count").then((inbox) => {
+        if (inbox && APP.me) {
+          APP.me._coin_can_bank = !!inbox.can_bank;
+          if (inbox.can_bank) APP.me.is_banker = true;
+          if (Array.isArray(inbox.items) && inbox.items.length) APP.requests = mergeLocalRequests(inbox.items.concat(Array.isArray(APP.requests) ? APP.requests : []));
+          if (Number(inbox.pending_count || 0) > 0) setCoinAlert(Number(inbox.pending_count || 0));
+          if (inbox.can_bank && APP.open) openBankingTabForPendingRequest();
+        }
+      }).catch(() => {}), 900);
 
       const a = String(res?.action || "created");
       if (a === "created") {
