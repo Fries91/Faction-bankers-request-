@@ -868,6 +868,28 @@ def get_key():
     return key
 
 
+
+
+def get_json_body():
+    """Accept normal JSON plus PDA fallback text/plain JSON bodies.
+
+    Some PDA/WebView builds fail CORS preflight on application/json fetch.
+    The userscript fallback can send text/plain JSON, so parse raw text too.
+    """
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        return data
+    raw = (request.get_data(as_text=True) or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return {}
+
+
 def torn_get_user(key):
     if not key:
         return None, "Missing Torn API key"
@@ -1751,7 +1773,7 @@ def add_leader_banker_role():
     if not can_manage_leaders(user):
         return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     role_name = str(data.get("role_name") or "").strip()
     pushover_key = clean_pushover_key(data.get("pushover_key") or "")
     if not role_name:
@@ -1819,7 +1841,7 @@ def remove_leader_banker_role():
     if not can_manage_leaders(user):
         return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     role_name = str(data.get("role_name") or "").strip()
     pushover_key = clean_pushover_key(data.get("pushover_key") or "")
     if not role_name:
@@ -1853,7 +1875,7 @@ def add_leader_banker():
     if not can_manage_leaders(user):
         return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     banker_id = str(data.get("banker_id") or "").replace("[", "").replace("]", "").strip()
     banker_name = str(data.get("banker_name") or banker_id).strip()
     pushover_key = clean_pushover_key(data.get("pushover_key") or "")
@@ -1915,7 +1937,7 @@ def remove_leader_banker():
         return resp, code
     if not can_manage_leaders(user):
         return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     banker_id = str(data.get("banker_id") or "").strip()
     if not banker_id:
         return jsonify({"ok": False, "error": "Missing banker ID"}), 400
@@ -2134,7 +2156,7 @@ def create_request():
     if resp:
         return resp, code
 
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
 
     amount = data.get("amount", 0)
     note = str(data.get("note") or "").strip()
@@ -2245,7 +2267,7 @@ def cancel_own_request(req_id):
     if resp:
         return resp, code
 
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     bank_note = str(data.get("note") or "Canceled by requester").strip()[:500]
 
     if not db_ok:
@@ -2326,7 +2348,7 @@ def banker_action(req_id, action):
         return jsonify({"ok": False, "error": "Invalid action"}), 400
 
     new_status = status_map[action]
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     bank_note = str(data.get("note") or "").strip()
     if len(bank_note) > 500:
         bank_note = bank_note[:500]
@@ -2603,7 +2625,7 @@ def create_request_from_chat_command():
     if resp:
         return resp, code
 
-    data = request.get_json(silent=True) or {}
+    data = get_json_body()
     command_text = str(data.get("command_text") or data.get("command") or "").strip()
     if not command_text.lower().startswith("/banker"):
         return jsonify({"ok": False, "error": "Use /banker 25m, /banker full, /banker cancel, /banker change, or /banker status"}), 400
