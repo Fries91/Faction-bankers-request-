@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.5
+// @version      1.4.6
 // @description  Faction vault banking with send-only /banker capture, banker coin badges, page balance sync, request board, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.4.5-manual-bankers-only";
+  const FB_BUILD = "1.4.6-leader-input-no-wipe";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -3708,7 +3708,7 @@
       await loadLeaderBankers();
       APP.bankers = [];
       mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker saved.${res.test_ping_sent ? " Test phone ping sent." : ""}</div>`);
+      renderLeadersTab(`<div class="fb-success">Banker saved.${res.test_ping_sent ? " Test phone ping sent." : ""}</div>`, false);
     } catch (err) {
       renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -3772,8 +3772,29 @@
     }
   }
 
-  function renderLeadersTab(msg = "") {
+  function getLeaderBankerDraft() {
+    return {
+      bankerId: String($("#fb-leader-banker-id")?.value || "").replace(/[^0-9]/g, "").trim(),
+      bankerName: String($("#fb-leader-banker-name")?.value || "").trim(),
+      pushoverKey: String($("#fb-leader-pushover")?.value || "").trim(),
+    };
+  }
+
+  function isLeaderBankerDraftActive() {
+    if (!APP.open || activeTab() !== "leaders") return false;
+    const active = document.activeElement;
+    if (active && active.closest && active.closest("#fb-body") && (
+      active.matches("#fb-leader-banker-id") ||
+      active.matches("#fb-leader-banker-name") ||
+      active.matches("#fb-leader-pushover")
+    )) return true;
+    const d = getLeaderBankerDraft();
+    return !!(d.bankerId || d.bankerName || d.pushoverKey);
+  }
+
+  function renderLeadersTab(msg = "", preserveDraft = true) {
     const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
+    const draft = preserveDraft ? getLeaderBankerDraft() : { bankerId: "", bankerName: "", pushoverKey: "" };
 
     if (!canManage) {
       setBody(`
@@ -3823,11 +3844,11 @@
         <div class="fb-request-title">Add faction banker</div>
         <div class="fb-small" style="margin-top:5px;">Roles are disabled. Bankers must be added here by name and Torn ID for this faction only.</div>
         <label class="fb-label" style="margin-top:10px;">Banker Torn ID</label>
-        <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030">
+        <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030" value="${esc(draft.bankerId)}">
         <label class="fb-label" style="margin-top:10px;">Banker name</label>
-        <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91">
+        <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91" value="${esc(draft.bankerName)}">
         <label class="fb-label" style="margin-top:10px;">Pushover User Key optional</label>
-        <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their Pushover User Key for phone pings">
+        <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their Pushover User Key for phone pings" value="${esc(draft.pushoverKey)}">
         <div class="fb-small" style="margin-top:5px;">When a request is sent, saved bankers can see it in Banking. Saved Pushover keys get phone pings.</div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-add" class="fb-btn gold" type="button">Add Banker</button>
@@ -4560,7 +4581,12 @@
       setCoinAlert(pending);
       notifyBankerForNewPending(pendingItems);
 
-      if (APP.open) renderBody(activeTab());
+      if (APP.open) {
+        // Do not wipe leader banker inputs while a leader is typing. PDA refreshes can otherwise rebuild the tab mid-entry.
+        if (!(activeTab() === "leaders" && isLeaderBankerDraftActive())) {
+          renderBody(activeTab());
+        }
+      }
       return true;
     } catch (err) {
       APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
