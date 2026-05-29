@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.4.9-sticky-open-until-complete"
+APP_VERSION = "1.5.0-anti-rate-limit-coin-cache"
 
 
 @app.errorhandler(Exception)
@@ -28,6 +28,12 @@ def json_error_handler(e):
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 TORN_API_BASE = os.getenv("TORN_API_BASE", "https://api.torn.com").rstrip("/")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+
+# Cache the logged-in Torn user briefly so the coin badge does not hammer Torn API.
+# Without this, PDA focus/open/polling can trip Torn's "Too many requests" error.
+USER_CACHE = {}  # api-key suffix/full hash-ish -> {ts,user}
+USER_CACHE_TTL = int(os.getenv("USER_CACHE_TTL", "35"))
+USER_CACHE_STALE_TTL = int(os.getenv("USER_CACHE_STALE_TTL", "300"))
 
 ADMIN_PLAYER_ID = str(os.getenv("ADMIN_PLAYER_ID", "3679030")).strip()
 BANKER_IDS = {
@@ -866,20 +872,41 @@ def torn_get_user(key):
     if not key:
         return None, "Missing Torn API key"
 
+    cache_key = str(key).strip()
+    cached = USER_CACHE.get(cache_key)
+    now = time.time()
+    if cached and now - float(cached.get("ts") or 0) < USER_CACHE_TTL:
+        return dict(cached.get("user") or {}), None
+
     url = f"{TORN_API_BASE}/user/?selections=profile&key={key}"
 
     try:
         r = requests.get(url, timeout=REQUEST_TIMEOUT)
         data = r.json()
     except Exception as e:
+        if cached and now - float(cached.get("ts") or 0) < USER_CACHE_STALE_TTL:
+            user = dict(cached.get("user") or {})
+            user["_cache_warning"] = f"Using cached user after Torn request failed: {e}"
+            return user, None
         return None, f"Torn API request failed: {e}"
 
     if not isinstance(data, dict):
+        if cached and now - float(cached.get("ts") or 0) < USER_CACHE_STALE_TTL:
+            user = dict(cached.get("user") or {})
+            user["_cache_warning"] = "Using cached user after bad Torn API response"
+            return user, None
         return None, "Bad Torn API response"
 
     if data.get("error"):
         err = data.get("error") or {}
-        return None, err.get("error", "Torn API error")
+        msg = err.get("error", "Torn API error")
+        # Torn rate limits can happen if PDA opens/focuses repeatedly. Keep the app working
+        # by serving the latest cached identity/faction for a few minutes.
+        if cached and now - float(cached.get("ts") or 0) < USER_CACHE_STALE_TTL:
+            user = dict(cached.get("user") or {})
+            user["_cache_warning"] = f"Using cached user after Torn API error: {msg}"
+            return user, None
+        return None, msg
 
     player_id = str(data.get("player_id") or data.get("id") or "").strip()
     name = str(data.get("name") or "Unknown").strip()
@@ -925,6 +952,14 @@ def torn_get_user(key):
         "banker_factions": banker_factions,
     }
     user["can_manage_leaders"] = bool(user["is_admin"] or leader_role)
+
+    USER_CACHE[cache_key] = {"ts": time.time(), "user": dict(user)}
+    # Keep cache from growing forever on public installs.
+    if len(USER_CACHE) > 500:
+        cutoff = time.time() - USER_CACHE_STALE_TTL
+        for k in list(USER_CACHE.keys()):
+            if float(USER_CACHE.get(k, {}).get("ts") or 0) < cutoff:
+                USER_CACHE.pop(k, None)
 
     return user, None
 
