@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.5.0-anti-rate-limit-coin-cache"
+APP_VERSION = "1.5.1-gm-fetch-network-fallback"
 
 
 @app.errorhandler(Exception)
@@ -1413,7 +1413,7 @@ def home():
         {
             "ok": True,
             "app": "Faction Bankers",
-            "version": "1.2.7-request-visibility-ping-fix",
+            "version": APP_VERSION,
             "mode": "postgres",
             "note": "Active requests stay visible until completed; recently completed requests show who completed them to prevent double-pay.",
             "endpoints": [
