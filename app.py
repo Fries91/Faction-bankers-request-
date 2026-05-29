@@ -77,16 +77,10 @@ def load_faction_bankers():
             # Keep the app alive even if the env var is temporarily malformed.
             pass
 
-    # PDA-safe fallback if FACTION_BANKERS is missing or malformed.
-    # This keeps the status list working instead of returning "Selected faction is not configured"
-    # while Render env vars are being adjusted. Fries91/Admin is included by default.
-    fallback_bankers = sorted(BANKER_IDS or {ADMIN_PLAYER_ID})
-    return {
-        "49384": {"name": "Wrath", "bankers": fallback_bankers},
-        "52040": {"name": "Sloth", "bankers": fallback_bankers},
-        "8315": {"name": "Greed", "bankers": fallback_bankers},
-        "20554": {"name": "Pride", "bankers": fallback_bankers},
-    }
+    # Dynamic/public mode: do NOT invent hard-coded factions.
+    # If FACTION_BANKERS is omitted, every user simply works from their own Torn faction.
+    # Leaders can add banker roles/manual bankers from the Leaders tab.
+    return {}
 
 
 FACTION_BANKERS = load_faction_bankers()
@@ -237,11 +231,10 @@ def manual_pushover_keys_for_request(item):
 def can_manage_leaders(user):
     if not user:
         return False
-    if user.get("is_admin"):
-        return True
-    # Each faction manages its own Leaders tab. Leaders/co-leaders can always manage.
-    # Bankers can also manage so a trusted finance team can maintain the banker list/roles.
-    return bool(user.get("can_manage_leaders") or user.get("is_leader_role") or user.get("is_banker"))
+    # Only the faction leader team (or the app owner/admin) can choose which
+    # faction roles count as bankers. Bankers can view/complete requests,
+    # but they cannot change banker role setup unless they are also leader/co-leader.
+    return bool(user.get("is_admin") or user.get("is_leader_role") or user.get("can_manage_leaders"))
 
 
 def clean_role_name(value):
@@ -250,8 +243,9 @@ def clean_role_name(value):
 def banker_role_names_for_faction(faction_id):
     """Return role names that should count as bankers for this faction.
 
-    Leaders can add these in the Leaders tab. If none are saved, the Render
-    BANKER_ROLE_NAMES env var is used as the default.
+    Strict dynamic mode: only roles saved by that faction's leader team count.
+    The Render BANKER_ROLE_NAMES value is only used as UI suggestions/default text,
+    never as automatic banker access.
     """
     fid = str(faction_id or "").strip()
     roles = []
@@ -284,9 +278,8 @@ def banker_role_names_for_faction(faction_id):
         except Exception as e:
             print("Faction banker role DB lookup failed; using memory/env:", e)
 
-    if not roles:
-        roles = sorted(BANKER_ROLE_NAMES)
-
+    # No fallback roles here. A leader/co-leader must add the exact role(s)
+    # for their own faction in the Leaders tab before role-based bankers work.
     return roles
 
 
@@ -342,11 +335,8 @@ def banker_role_records_for_faction(faction_id):
         except Exception as e:
             print("Faction banker role record DB lookup failed; using memory/env:", e)
 
-    # If no custom roles exist, show defaults without phone keys.
-    if not records:
-        for role in sorted(BANKER_ROLE_NAMES):
-            records.append({"role_name": role, "pushover_key": "", "has_pushover": False, "source": "default"})
-
+    # No default records are returned. Role-based banker access is faction-specific
+    # and must be created by that faction's leader team.
     return records
 
 
@@ -364,7 +354,7 @@ def is_banker_role(value, faction_id=None):
     role = clean_role_name(value)
     if not role:
         return False
-    allowed = banker_role_names_for_faction(faction_id) if faction_id else BANKER_ROLE_NAMES
+    allowed = banker_role_names_for_faction(faction_id) if faction_id else []
     return role in {clean_role_name(x) for x in allowed}
 
 def member_position(member):
@@ -938,7 +928,7 @@ def torn_get_user(key):
         "is_banker": bool(banker_factions) or legacy_banker or dynamic_role_banker or manual_banker,
         "banker_factions": banker_factions,
     }
-    user["can_manage_leaders"] = bool(user["is_admin"] or leader_role or user["is_banker"])
+    user["can_manage_leaders"] = bool(user["is_admin"] or leader_role)
 
     return user, None
 
@@ -1715,7 +1705,7 @@ def get_leader_bankers():
     if resp:
         return resp, code
     if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+        return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
     fid = user.get("faction_id")
     return jsonify({
         "ok": True,
@@ -1748,7 +1738,7 @@ def add_leader_banker_role():
     if resp:
         return resp, code
     if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+        return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
 
     data = request.get_json(silent=True) or {}
     role_name = str(data.get("role_name") or "").strip()
@@ -1816,7 +1806,7 @@ def remove_leader_banker_role():
     if resp:
         return resp, code
     if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+        return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
 
     data = request.get_json(silent=True) or {}
     role_name = str(data.get("role_name") or "").strip()
@@ -1850,7 +1840,7 @@ def add_leader_banker():
     if resp:
         return resp, code
     if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+        return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
 
     data = request.get_json(silent=True) or {}
     banker_id = str(data.get("banker_id") or "").replace("[", "").replace("]", "").strip()
@@ -1913,7 +1903,7 @@ def remove_leader_banker():
     if resp:
         return resp, code
     if not can_manage_leaders(user):
-        return jsonify({"ok": False, "error": "Leader/banker access required"}), 403
+        return jsonify({"ok": False, "error": "Leader/co-leader access required"}), 403
     data = request.get_json(silent=True) or {}
     banker_id = str(data.get("banker_id") or "").strip()
     if not banker_id:
@@ -1942,7 +1932,8 @@ def remove_leader_banker():
 def list_requests():
     """List active requests plus recent completed requests visible to the logged-in user.
 
-    v1.3.4:
+    v1.3.7:
+    - Dynamic any-faction mode; FACTION_BANKERS is not required.
     - Uses faction_id OR faction_name matching to avoid ID/name mismatch.
     - Always includes the logged-in user's own requests.
     - If a banker/admin gets an empty list, performs a same-faction fallback.
@@ -2151,8 +2142,8 @@ def create_request():
     if len(note) > 500:
         note = note[:500]
 
-    # Dynamic mode: requests always go to the user's own faction.
-    # This removes all hard-coded faction groups and lets any faction use the same app.
+    # Dynamic/public mode: requests always go to the user's own faction.
+    # FACTION_BANKERS is optional fallback only; it is NOT required for normal use.
     target_faction_id = user["faction_id"]
     target_faction_name = user["faction_name"]
 
