@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.3.5
-// @description  Faction vault banking with strict /banker chat commands, balance sync, banker board, leader role setup, and Torn-friendly settings/login.
+// @version      1.3.6
+// @description  Faction vault banking with strict /banker chat commands, page balance sync, live remaining amount, banker board, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.3.5-coin-badge-balance-commands";
+  const FB_BUILD = "1.3.6-page-balance-live-left";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -2285,10 +2285,20 @@
     if (!isOwnFactionPage()) return false;
 
     const allText = String(document.body?.innerText || document.body?.textContent || "").replace(/\s+/g, " ");
+    // Torn faction controls/deposit page commonly shows:
+    // "You have $78,967 and a balance of $1,400,000".
+    // The first number is cash on hand. The SECOND number is the member's faction-bank balance.
+    const depositBalanceLine = allText.match(/\byou\s+have\s+\$\s*[0-9][0-9,]*\s+and\s+a\s+balance\s+of\s+\$\s*([0-9][0-9,]*)/i);
+    if (depositBalanceLine) {
+      const n = Number(String(depositBalanceLine[1] || "").replace(/,/g, ""));
+      if (Number.isFinite(n) && n >= 0) return setFactionBalance(n, "Torn deposit page");
+    }
+
     const exactPatterns = [
       /[A-Za-z0-9_\-]+(?:\'s|’s)\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
       /your\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
       /your\s+(?:faction\s+)?balance\s*(?:is|:)\s*\$\s*([0-9][0-9,]*)/i,
+      /\bmember\s+balance\s*(?:is|:)\s*\$\s*([0-9][0-9,]*)/i,
     ];
     for (const re of exactPatterns) {
       const m = allText.match(re);
@@ -2326,13 +2336,18 @@
       if (/\byour\s+(faction\s+)?balance\b/i.test(text)) score += 140;
       if (/\bmy\s+(faction\s+)?balance\b/i.test(text)) score += 110;
       if (/\bbalance\s*[:\-]?\s*\$/i.test(text)) score += 80;
+      if (/\band\s+a\s+balance\s+of\s*\$/i.test(text)) score += 190;
       if (/\$[\d,]+\s*\b(balance)\b/i.test(text)) score += 50;
       if (lower.includes("member balance")) score += 90;
       if (lower.includes("bank balance")) score += 35;
       if (score < 80) continue;
 
-      const amount = parseMoneyAmount(text);
-      if (amount === null) continue;
+      // On Torn deposit controls, use the balance number, not the user's cash-on-hand number.
+      const depositMatch = text.match(/\byou\s+have\s+\$\s*[0-9][0-9,]*\s+and\s+a\s+balance\s+of\s+\$\s*([0-9][0-9,]*)/i);
+      const amount = depositMatch
+        ? Number(String(depositMatch[1] || "").replace(/,/g, ""))
+        : parseMoneyAmount(text);
+      if (amount === null || !Number.isFinite(Number(amount))) continue;
       if (!best || score > best.score) best = { amount, score, text };
     }
 
@@ -3819,13 +3834,22 @@
     const detectedFullBalance = Number(APP.balanceAmount || 0);
     const sendDetectedAmount = Number.isFinite(detectedFullBalance) && detectedFullBalance > 0;
 
+    if (!sendDetectedAmount) {
+      const msg = "I could not read your balance yet. Open Faction → Controls → Deposit, then tap Balance → Refresh Here, or enter it manually.";
+      if (status) status.textContent = msg;
+      openOverlay();
+      setTimeout(() => document.querySelector('.fb-tab[data-tab="balance"]')?.click(), 120);
+      alert(msg);
+      return;
+    }
+
     APP.busy = true;
-    if (status) status.textContent = sendDetectedAmount ? `Sending full balance request for ${money(detectedFullBalance)}...` : "Sending full balance request...";
+    if (status) status.textContent = `Sending full balance request for ${money(detectedFullBalance)}...`;
 
     try {
       const res = await gmRequest("POST", "/api/banker/requests", {
-        amount: sendDetectedAmount ? detectedFullBalance : 1,
-        note: sendDetectedAmount ? `Full balance requested: ${money(detectedFullBalance)}` : FULL_BALANCE_NOTE,
+        amount: detectedFullBalance,
+        note: `Full balance requested: ${money(detectedFullBalance)}`,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
       });
@@ -4482,6 +4506,14 @@
     if (isOwnFactionPage()) {
       mountBuiltInBankerBox();
       startBalanceCaptureLoop();
+      // Also read the Torn balance directly when the user is already on
+      // Faction → Controls → Deposit. This makes the Balance tab fill without forcing a new page open.
+      setTimeout(() => {
+        if (detectFactionBalanceFromPage()) mountBuiltInBankerBox();
+      }, 900);
+      setTimeout(() => {
+        if (detectFactionBalanceFromPage()) mountBuiltInBankerBox();
+      }, 2400);
 
       // PDA-safe: only load factions/me/banker status for the quick box.
       // Do not call /api/banker/requests here because that uses the database and caused 500s.
@@ -4655,7 +4687,7 @@
       return true;
     }
 
-    // For full balance, try to attach the saved/synced balance. If unknown, backend still accepts amount 1 as a full-balance marker.
+    // For full balance, only send when a real synced/manual balance exists. Never send a fake $1 marker.
     let amount = 0;
     if (["full", "balance", "all", "max"].includes(action)) {
       await loadFactionBalance(true);
@@ -4663,13 +4695,14 @@
       if (Number.isFinite(detected) && detected > 0) {
         amount = Math.floor(detected);
       } else {
-        alert("I could not read your balance yet. Open the 🪙 Balance tab and tap Sync Balance or Enter Manually first.");
+        alert("I could not read your balance yet. Open Faction → Controls → Deposit, then tap Balance → Refresh Here, or enter it manually.");
         openOverlay();
         setTimeout(() => {
           const tab = document.querySelector('.fb-tab[data-tab="balance"]');
           if (tab) tab.click();
         }, 120);
-        return;
+        FB_CHAT_COMMAND_BUSY = false;
+        return true;
       }
     } else if (!["cancel", "remove", "delete", "change", "edit", "update", "status", "check", "mine"].includes(action)) {
       amount = fbParseBankerAmountToken(action);
