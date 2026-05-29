@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.4.4
+// @version      1.4.5
 // @description  Faction vault banking with send-only /banker capture, banker coin badges, page balance sync, request board, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.4.4-coin-badge-opens-banking";
+  const FB_BUILD = "1.4.5-manual-bankers-only";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -44,8 +44,8 @@
   const K_LAST_BALANCE_SOURCE = "fb_last_personal_balance_source_v3";
   const K_LAST_BALANCE_TS = "fb_last_personal_balance_ts_v3";
 
-  // Dynamic role mode: no hard-coded faction list.
-  // The backend uses the logged-in player's own faction and finds bankers by faction role.
+  // Manual banker mode: no hard-coded faction list and no role detection.
+  // Each leader/co-leader adds exact banker Torn names + IDs for their own faction.
   const DEFAULT_FACTIONS = [];
 
   const APP = {
@@ -2709,7 +2709,7 @@
 
         <div class="fb-small" style="margin-top:10px; line-height:1.45;">
           <b>Bankers:</b> open the Banking tab to see pending requests and mark them complete.<br>
-          <b>Leaders:</b> open Leaders to choose banker roles and Pushover keys.
+          <b>Leaders:</b> open Leaders to add banker names, Torn IDs, and optional Pushover keys.
         </div>
       </div>
     `);
@@ -2847,7 +2847,7 @@
             You are not listed as a banker for this app.
           </div>
           <div class="fb-small" style="margin-top:8px;">
-            Banker access is controlled by roles your faction leader/co-leader saved in the Leaders tab, plus optional manual overrides.
+            Banker access is controlled by exact banker Torn IDs saved by your faction leader/co-leader in the Leaders tab.
           </div>
         </div>
       `);
@@ -3779,7 +3779,7 @@
       setBody(`
         <div class="fb-box fb-hero-card">
           <div class="fb-request-title">Leaders</div>
-          <div class="fb-error" style="margin-top:6px;">Leader/co-leader access is required to manage banker roles.</div>
+          <div class="fb-error" style="margin-top:6px;">Leader/co-leader access is required to manage faction bankers.</div>
           <div class="fb-small" style="margin-top:8px;">This tab is for the leader team of your own faction only.</div>
         </div>
       `);
@@ -3787,7 +3787,7 @@
     }
 
     const factionName = APP.me?.faction_name || "Your faction";
-    const yourRole = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "Role not detected");
+    const yourRole = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "Leader team");
 
     const rows = (APP.manualBankers || []).map((b) => `
       <div class="fb-box">
@@ -3799,26 +3799,7 @@
           <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove</button>
         </div>
       </div>
-    `).join("") || `<div class="fb-box"><div class="fb-muted">No specific banker overrides yet. Add one only if role detection misses someone.</div></div>`;
-
-    const roleList = (APP.leaderRoleItems && APP.leaderRoleItems.length)
-      ? APP.leaderRoleItems
-      : (APP.leaderRoleNames || []).map((role) => ({ role_name: role, has_pushover: false, source: "leaders" }));
-
-    const roleRows = roleList.map((roleObj) => {
-      const role = roleObj.role_name || roleObj.name || roleObj;
-      return `
-        <div class="fb-box">
-          <div class="fb-row fb-space">
-            <div>
-              <div class="fb-request-title">${esc(role)}</div>
-              <div class="fb-small">Anyone in ${esc(factionName)} with this role counts as a banker.${roleObj.has_pushover ? " • role phone ping enabled" : " • no role phone ping key"}</div>
-            </div>
-            <button class="fb-btn red" data-leader-role-remove="${esc(role)}" type="button">Remove</button>
-          </div>
-        </div>
-      `;
-    }).join("") || `<div class="fb-box"><div class="fb-muted">No banker roles saved yet. A faction leader/co-leader must add the exact Torn role names for this faction before role-based banker access works. Suggestions: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Finance, Vault Keeper")}</div></div>`;
+    `).join("") || `<div class="fb-box"><div class="fb-muted">No bankers saved yet. Add each banker by Torn ID and name so their coin lights up and they can see requests.</div></div>`;
 
     setBody(`
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
@@ -3828,60 +3809,43 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">👑 Leaders • ${esc(factionName)}</div>
-            <div class="fb-small">This setup only affects your own faction. Other factions cannot see or use these roles.</div>
+            <div class="fb-small">Manual banker mode: this setup only affects your own faction.</div>
           </div>
           <span class="fb-pill approved">${esc(yourRole)}</span>
         </div>
         <div class="fb-flow-grid" style="margin-top:10px;">
-          <div class="fb-flow-card"><b>1. Add roles</b><span>Type the exact Torn faction role that means “can bank” for your faction only.</span></div>
-          <div class="fb-flow-card"><b>2. Optional pings</b><span>Add role Pushover keys or specific banker keys for direct phone alerts.</span></div>
+          <div class="fb-flow-card"><b>1. Add banker</b><span>Enter the exact Torn ID and display name for each banker.</span></div>
+          <div class="fb-flow-card"><b>2. Coin lights up</b><span>Saved bankers get coin badges and can see the Banking request board.</span></div>
         </div>
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">Banker role names</div>
-        <div class="fb-small" style="margin-top:5px;">Examples: Banker, Treasurer, Finance, Vault Keeper, Money Manager, Co-Leader.</div>
-        <label class="fb-label" style="margin-top:10px;">Faction role name</label>
-        <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Treasurer">
-        <label class="fb-label" style="margin-top:10px;">Optional Pushover key for this role</label>
-        <input id="fb-leader-role-pushover" class="fb-input" placeholder="Paste a Pushover key to ping this role/team phone">
-        <div class="fb-small" style="margin-top:5px;">When a request is sent, all saved banker keys plus role keys for this faction get notified.</div>
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
-          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
-        </div>
-      </div>
-      ${roleRows}
-
-      <div class="fb-box">
-        <div class="fb-request-title">Specific banker override</div>
-        <div class="fb-small" style="margin-top:5px;">Use this only if a banker does not show by role. Optional Pushover key lets that banker get phone pings directly.</div>
+        <div class="fb-request-title">Add faction banker</div>
+        <div class="fb-small" style="margin-top:5px;">Roles are disabled. Bankers must be added here by name and Torn ID for this faction only.</div>
         <label class="fb-label" style="margin-top:10px;">Banker Torn ID</label>
         <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030">
         <label class="fb-label" style="margin-top:10px;">Banker name</label>
         <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91">
         <label class="fb-label" style="margin-top:10px;">Pushover User Key optional</label>
         <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their Pushover User Key for phone pings">
+        <div class="fb-small" style="margin-top:5px;">When a request is sent, saved bankers can see it in Banking. Saved Pushover keys get phone pings.</div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-add" class="fb-btn gold" type="button">Add Banker</button>
+          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
         </div>
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">Specific banker overrides</div>
-        <div class="fb-mini-note">These are manual banker entries for ${esc(factionName)} only.</div>
+        <div class="fb-request-title">Saved faction bankers</div>
+        <div class="fb-mini-note">Only these manual banker entries for ${esc(factionName)} get banker-board access. Leaders/co-leaders can still manage the list.</div>
       </div>
       ${rows}
     `);
 
-    $("#fb-leader-role-add")?.addEventListener("click", addLeaderRoleName);
     $("#fb-leader-add")?.addEventListener("click", addLeaderBanker);
     $("#fb-leader-refresh")?.addEventListener("click", async () => {
       await loadLeaderBankers();
       renderLeadersTab();
-    });
-    $$('[data-leader-role-remove]').forEach((btn) => {
-      btn.addEventListener("click", () => removeLeaderRoleName(btn.dataset.leaderRoleRemove));
     });
     $$('[data-leader-remove]').forEach((btn) => {
       btn.addEventListener("click", () => removeLeaderBanker(btn.dataset.leaderRemove));
@@ -3924,7 +3888,7 @@
           <li>It does not auto-pay, auto-click Torn buttons, or move money by itself.</li>
           <li>Bankers still manually review requests and manually complete payouts in Torn.</li>
           <li>Members are responsible for making accurate requests with <code>/banker amount</code>.</li>
-          <li>Faction leaders/co-leaders control their own banker roles and Pushover role keys in the Leaders tab.</li>
+          <li>Faction leaders/co-leaders control their own banker list and optional Pushover keys in the Leaders tab.</li>
           <li>Completed requests are shown so bankers can avoid double-paying.</li>
         </ul>
       </div>
@@ -3932,7 +3896,7 @@
       <div class="fb-box">
         <div class="fb-request-title">How this follows Torn-friendly API use</div>
         <ul class="fb-legal-list">
-          <li>Uses Torn API data for verification and read-only checks such as your Torn ID, name, faction, and role.</li>
+          <li>Uses Torn API data for verification and read-only checks such as your Torn ID, name, faction, and leader/co-leader access.</li>
           <li>Uses the smallest useful key type: a limited API key.</li>
           <li>Does not ask for your Torn password.</li>
           <li>Does not automate gameplay actions or payments.</li>
