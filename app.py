@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.4.6-leader-input-no-wipe"
+APP_VERSION = "1.4.7-chat-request-to-banking-alert"
 
 
 @app.errorhandler(Exception)
@@ -999,12 +999,12 @@ def pushover_configured():
 def fries91_notify_faction_ids():
     """Factions where global Fries91/Render Pushover keys should be pinged.
 
-    Default is Wrath/7DS*: Wrath (49384). Other factions only ping their own
+    Default is no global faction pings. Factions ping their own
     manually saved banker Pushover keys from the Leaders tab.
     Override with FRIES91_NOTIFY_FACTION_IDS or GLOBAL_PUSHOVER_FACTION_IDS.
     Use "*" only if you intentionally want Fries pinged for every faction.
     """
-    raw = (os.getenv("FRIES91_NOTIFY_FACTION_IDS", "") or os.getenv("GLOBAL_PUSHOVER_FACTION_IDS", "") or "49384")
+    raw = (os.getenv("FRIES91_NOTIFY_FACTION_IDS", "") or os.getenv("GLOBAL_PUSHOVER_FACTION_IDS", "") or "")
     return {x.strip() for x in str(raw).replace("\n", ",").split(",") if x.strip()}
 
 
