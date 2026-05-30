@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.6.1-role-bankers-no-leader-premium"
+APP_VERSION = "1.6.2-premium-install-role-persist"
 
 
 @app.errorhandler(Exception)
@@ -29,13 +29,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 TORN_API_BASE = os.getenv("TORN_API_BASE", "https://api.torn.com").rstrip("/")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
 
-# Premium ping-to-phone signup app. Set this in Render env to your payment/signup app.
-# Example: PING_TO_PHONE_APP_URL=https://your-ping-app.onrender.com
+# Premium ping-to-phone app/install links.
+# The button in Banking opens the install URL directly, so bankers can install the premium userscript.
 PING_TO_PHONE_APP_URL = (
     os.getenv("PING_TO_PHONE_APP_URL", "").strip()
     or os.getenv("PREMIUM_PING_URL", "").strip()
     or os.getenv("PUSH_TO_PHONE_APP_URL", "").strip()
     or "https://torn-banking-push.onrender.com"
+)
+PING_TO_PHONE_INSTALL_URL = (
+    os.getenv("PING_TO_PHONE_INSTALL_URL", "").strip()
+    or os.getenv("PREMIUM_PING_INSTALL_URL", "").strip()
+    or "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js"
 )
 
 # Cache the logged-in Torn user briefly so the coin badge does not hammer Torn API.
@@ -1786,6 +1791,7 @@ def banker_premium_ping_info():
     return jsonify({
         "ok": True,
         "signup_url": PING_TO_PHONE_APP_URL,
+        "install_url": PING_TO_PHONE_INSTALL_URL,
         "player_id": pid,
         "player_name": user.get("name"),
         "faction_id": fid,
@@ -1793,7 +1799,7 @@ def banker_premium_ping_info():
         "is_saved_banker": bool(saved or role_banker),
         "has_pushover": bool(saved and clean_pushover_key(saved.get("pushover_key"))),
         "can_manage_leaders": can_manage_leaders(user),
-        "note": "Leader must add your faction role as a banker role. Then paste your activated phone ping key here to receive phone pings.",
+        "note": "Leader-saved banker roles and banker phone keys are stored in Postgres and survive script/app updates. The premium button opens the premium userscript installer.",
     })
 
 
