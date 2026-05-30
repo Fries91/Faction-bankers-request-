@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.6.5
+// @version      1.6.6
 // @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.6.5-pushover-only-owner-faction";
+  const FB_BUILD = "1.6.6-pushover-browser-open";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -2968,13 +2968,13 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">📲 Pushover Phone Alerts</div>
-            <div class="fb-small">Open Pushover to set up phone alerts. Your faction can use the owner Pushover setup only when allowed; other factions must use their own Pushover key/group.</div>
+            <div class="fb-small">Open Pushover to subscribe or set up phone alerts. Your faction can use the owner Pushover setup only when allowed; other factions must use their own Pushover key/group.</div>
           </div>
         </div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-banker-pushover-app" class="fb-btn blue" type="button">🔔 Pushover Setup</button>
         </div>
-        <div class="fb-mini-note">Status: <span id="fb-banker-pushover-status">${APP.myPushoverPingHasKey ? "Pushover key saved" : "No Pushover key saved yet"}</span>. This opens Pushover only. Save your Pushover user/group key in Settings after setup.</div>
+        <div class="fb-mini-note">Status: <span id="fb-banker-pushover-status">${APP.myPushoverPingHasKey ? "Pushover key saved" : "No Pushover key saved yet"}</span>. Opens your exact Pushover setup/subscription page. Save the Pushover user/group key in Settings after setup.</div>
       </div>
 
       ${cards}
@@ -3959,29 +3959,26 @@
   }
 
   function pushoverPingAppUrl(info = null) {
-    const base = String((info && (info.signup_url || info.app_url)) || APP.pushoverPingAppUrl || "https://pushover.net/").trim();
-    try {
-      const u = new URL(base);
-      if (APP.me?.player_id) u.searchParams.set("torn_id", APP.me.player_id);
-      if (APP.me?.name) u.searchParams.set("name", APP.me.name);
-      if (APP.me?.faction_id) u.searchParams.set("faction_id", APP.me.faction_id);
-      if (APP.me?.faction_name) u.searchParams.set("faction_name", APP.me.faction_name);
-      u.searchParams.set("return", BANKER_API_BASE.replace(/\/$/, "") + "/static/faction-bankers.user.js");
-      return u.toString();
-    } catch {
-      return base;
-    }
+    // Use the exact Pushover setup/subscription URL only.
+    // Do not append Torn/player query params here: TornPDA can mistake
+    // a modified Pushover URL for a remote userscript-load screen.
+    return String((info && (info.signup_url || info.app_url)) || APP.pushoverPingAppUrl || "https://pushover.net/").trim();
   }
 
   function pushoverPingInstallUrl(info = null) {
-    return String((info && info.install_url) || APP.pushoverPingUrl || "https://pushover.net/").trim();
+    // Pushover is a website/app setup link, not a userscript installer.
+    // Keep this the same as the app/setup URL so PDA opens a normal web page.
+    return String((info && (info.install_url || info.signup_url || info.app_url)) || APP.pushoverPingUrl || APP.pushoverPingAppUrl || "https://pushover.net/").trim();
   }
 
   async function openUrlSafe(url) {
+    const safe = String(url || "https://pushover.net/").trim();
     try {
-      window.open(url, "_blank", "noopener,noreferrer");
+      // In TornPDA, window.open can route through the remote-script loader.
+      // Direct location navigation opens the Pushover page normally.
+      window.location.assign(safe);
     } catch {
-      location.href = url;
+      try { window.top.location.href = safe; } catch (_) { location.href = safe; }
     }
   }
 
