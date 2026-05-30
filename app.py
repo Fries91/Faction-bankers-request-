@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.5.9-premium-icon-banker-page"
+APP_VERSION = "1.6.1-role-bankers-no-leader-premium"
 
 
 @app.errorhandler(Exception)
@@ -35,7 +35,7 @@ PING_TO_PHONE_APP_URL = (
     os.getenv("PING_TO_PHONE_APP_URL", "").strip()
     or os.getenv("PREMIUM_PING_URL", "").strip()
     or os.getenv("PUSH_TO_PHONE_APP_URL", "").strip()
-    or "https://faction-bankers-request.onrender.com/premium-ping"
+    or "https://torn-banking-push.onrender.com"
 )
 
 # Cache the logged-in Torn user briefly so the coin badge does not hammer Torn API.
@@ -498,12 +498,19 @@ def torn_get_role_bankers(key, faction_id):
     return unique
 
 def dynamic_banker_ids_for_faction(key, faction_id):
-    # v1.4.5: banker access is manual only. Leaders/co-leaders add exact Torn IDs.
-    return list(dict.fromkeys(manual_banker_ids_for_faction(faction_id)))
+    manual = manual_banker_ids_for_faction(faction_id)
+    role = [str(x.get("id")) for x in torn_get_role_bankers(key, faction_id) if x.get("id")]
+    return list(dict.fromkeys(manual + role))
 
 def dynamic_banker_name_for_id(key, faction_id, banker_id):
     bid = str(banker_id or "").strip()
-    return manual_banker_name_for_id(faction_id, bid) or banker_name_from_config(faction_id, bid)
+    manual_name = manual_banker_name_for_id(faction_id, bid)
+    if manual_name:
+        return manual_name
+    for item in torn_get_role_bankers(key, faction_id):
+        if str(item.get("id")) == bid:
+            return str(item.get("name") or bid).strip()
+    return banker_name_from_config(faction_id, bid)
 
 
 def all_configured_faction_ids():
@@ -956,20 +963,20 @@ def torn_get_user(key):
     if not faction_id:
         return None, "You must be in a faction to use Faction Bankers"
 
-    # v1.4.5 manual-bankers-only:
-    # Leaders/co-leaders add exact banker Torn names + IDs for their own faction.
-    # Saved role names no longer grant banker board/coin access, because role detection
-    # was unreliable on PDA/Torn API responses.
+    # Role-bankers mode:
+    # Leaders/co-leaders add exact faction role names. Anyone in that faction role
+    # gets banker board/coin access for their own faction. Manual banker entries
+    # are still kept as an optional phone-ping key store/override.
     configured_banker_factions = []
     manual_banker_ids = set(manual_banker_ids_for_faction(faction_id))
     own_faction_role = torn_get_member_role_for_user(key, faction_id, player_id)
     leader_role = is_leader_like_role(own_faction_role)
     legacy_banker = player_id == ADMIN_PLAYER_ID
-    dynamic_role_banker = False
+    dynamic_role_banker = is_banker_role(own_faction_role, faction_id)
     manual_banker = player_id in manual_banker_ids
 
     # A banker handles their own faction only. Admin can see their own faction plus all boards.
-    banker_factions = sorted(set([faction_id] if (legacy_banker or manual_banker) else []))
+    banker_factions = sorted(set([faction_id] if (legacy_banker or manual_banker or dynamic_role_banker) else []))
 
     user = {
         "player_id": player_id,
@@ -1180,6 +1187,12 @@ def notification_target_keys_for_request(item):
             keys.append(k)
 
     for k in manual_pushover_keys_for_request(item):
+        add_key(k)
+
+    # Role-based banker setup: leaders can add banker faction roles.
+    # Role-level phone keys are optional, and bankers can still save their
+    # own premium ping key in Settings, which creates/updates their saved entry.
+    for k in role_pushover_keys_for_faction((item or {}).get("faction_id")):
         add_key(k)
 
     # v1.2.4: make Wrath phone pings reliable.  If this is Wrath/49384,
@@ -1672,8 +1685,8 @@ def banker_status():
     requested_faction_id = str(request.args.get("faction_id") or "").strip() or str(user.get("faction_id") or "").strip()
     faction_name = user.get("faction_name") or faction_name_for_id(requested_faction_id) or requested_faction_id or "Faction"
 
-    # v1.4.5: Manual banker list only. No role detection and no FACTION_BANKERS fallback.
-    # Each faction leader/co-leader adds exact banker Torn ID + name in the Leaders tab.
+    # Role-bankers mode. Leaders save faction role names; the app resolves current
+    # members with those roles. Manual rows are kept for optional phone ping keys.
     manual_bankers = []
     role_bankers = []
     banker_ids = []
@@ -1685,10 +1698,19 @@ def banker_status():
         warnings.append(f"manual banker lookup failed: {e}")
         manual_bankers = []
 
-    banker_ids = [str(x.get("id") or x.get("banker_id")) for x in manual_bankers if x.get("id") or x.get("banker_id")]
+    try:
+        role_bankers = torn_get_role_bankers(key, requested_faction_id)
+    except Exception as e:
+        warnings.append(f"role banker lookup failed: {e}")
+        role_bankers = []
+
+    banker_ids = list(dict.fromkeys(
+        [str(x.get("id") or x.get("banker_id")) for x in manual_bankers if x.get("id") or x.get("banker_id")]
+        + [str(x.get("id")) for x in role_bankers if x.get("id")]
+    ))
 
     manual_by_id = {str(x.get("id") or x.get("banker_id")): x for x in manual_bankers_for_faction(requested_faction_id)}
-    role_by_id = {}
+    role_by_id = {str(x.get("id")): x for x in role_bankers if x.get("id")}
 
     seen = set()
     items = []
@@ -1735,9 +1757,10 @@ def banker_status():
         "faction_name": faction_name,
         "items": items,
         "count": len(items),
-        "role_names": [],
+        "role_names": banker_role_names_for_faction(requested_faction_id),
+        "role_count": len(role_bankers),
         "manual_count": len(manual_bankers),
-        "manual_only": True,
+        "manual_only": False,
         "global_fries_ping_enabled": should_ping_global_pushover_for_faction(requested_faction_id),
         "warnings": warnings,
         "time": now_iso(),
@@ -1758,6 +1781,7 @@ def banker_premium_ping_info():
         if str(row.get("id") or row.get("banker_id") or "") == pid:
             saved = row
             break
+    role_banker = is_banker_role(user.get("faction_role"), fid)
 
     return jsonify({
         "ok": True,
@@ -1766,10 +1790,10 @@ def banker_premium_ping_info():
         "player_name": user.get("name"),
         "faction_id": fid,
         "faction_name": user.get("faction_name"),
-        "is_saved_banker": bool(saved),
+        "is_saved_banker": bool(saved or role_banker),
         "has_pushover": bool(saved and clean_pushover_key(saved.get("pushover_key"))),
         "can_manage_leaders": can_manage_leaders(user),
-        "note": "Leader must add you as a manual banker first. Then paste your activated Pushover user key here to receive phone pings.",
+        "note": "Leader must add your faction role as a banker role. Then paste your activated phone ping key here to receive phone pings.",
     })
 
 
@@ -1790,16 +1814,17 @@ def banker_save_own_ping_key():
     pid = str(user.get("player_id") or "").strip()
     pname = str(user.get("name") or pid).strip()
 
-    # Must already be a saved manual banker or leader/admin. Leaders can use this on themselves too.
+    # Must already be a role/manual banker or leader/admin. Leaders can use this on themselves too.
     saved = None
     for row in manual_bankers_for_faction(fid):
         if str(row.get("id") or row.get("banker_id") or "") == pid:
             saved = row
             break
-    if not saved and not can_manage_leaders(user):
+    role_banker = is_banker_role(user.get("faction_role"), fid)
+    if not saved and not role_banker and not can_manage_leaders(user):
         return jsonify({
             "ok": False,
-            "error": "Your leader must add your Torn ID as a faction banker before you can activate phone pings.",
+            "error": "Your leader must add your faction role as a banker role before you can activate phone pings.",
         }), 403
 
     db_ok, db_msg = db_ready()
@@ -1863,11 +1888,18 @@ def get_leader_bankers():
             }
             for x in manual_bankers_for_faction(fid)
         ],
-        "role_names": [],
-        "role_items": [],
-        "role_key_count": 0,
+        "role_names": banker_role_names_for_faction(fid),
+        "role_items": [
+            {
+                "role_name": r.get("role_name"),
+                "has_pushover": bool(r.get("pushover_key")),
+                "source": r.get("source", "leaders"),
+            }
+            for r in banker_role_records_for_faction(fid)
+        ],
+        "role_key_count": len(role_pushover_keys_for_faction(fid)),
         "default_role_names": [],
-        "manual_only": True,
+        "manual_only": False,
         "can_manage": True,
         "manager_role": user.get("faction_role", ""),
         "manager_name": user.get("name", ""),
@@ -3002,16 +3034,19 @@ def banker_pending_count():
     own_faction_id = str(user.get("faction_id") or "").strip()
     own_faction_name = str(user.get("faction_name") or "").strip()
     manual_ids = {str(x).strip() for x in manual_banker_ids_for_faction(own_faction_id) if str(x).strip()}
+    role_banker = is_banker_role(user.get("faction_role"), own_faction_id)
 
     can_bank = bool(
         user.get("is_admin")
         or user.get("can_manage_leaders")
         or user.get("is_leader_role")
         or own_player_id in manual_ids
+        or role_banker
+        or user.get("is_banker")
     )
 
     # Keep user object honest even if /api/banker/me was cached by PDA/userscript.
-    if own_player_id in manual_ids:
+    if own_player_id in manual_ids or role_banker:
         user["is_banker"] = True
         user["banker_factions"] = list(dict.fromkeys((user.get("banker_factions") or []) + [own_faction_id]))
 
@@ -3021,7 +3056,7 @@ def banker_pending_count():
             "can_bank": False,
             "pending_count": 0,
             "items": [],
-            "reason": "not_manual_banker_or_leader",
+            "reason": "not_role_banker_manual_banker_or_leader",
             "manual_banker_ids_count": len(manual_ids),
             "mode": "memory" if not db_ok else "postgres",
         })
