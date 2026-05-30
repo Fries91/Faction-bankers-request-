@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.6.1
+// @version      1.6.2
 // @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.6.1-role-bankers-no-leader-premium";
+  const FB_BUILD = "1.6.2-premium-install-role-persist";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -73,7 +73,7 @@
     lastInbox: null,
     lastInboxTs: 0,
     lastHeaderError: "",
-    premiumPingUrl: "https://torn-banking-push.onrender.com",
+    premiumPingUrl: "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js",
     myPremiumPingHasKey: false,
     myPremiumPingIsSavedBanker: false,
     busy: false,
@@ -2967,9 +2967,9 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">📲 Premium Ping to Phone</div>
-            <div class="fb-small">Bankers can activate phone pings here, then save their key in Settings so new requests ping their phone.</div>
+            <div class="fb-small">Bankers can install the premium phone ping script here, then save their key in Settings so new requests ping their phone.</div>
           </div>
-          <button id="fb-banker-premium-ping" class="fb-btn blue" type="button">📲 Premium</button>
+          <button id="fb-banker-premium-ping" class="fb-btn blue" type="button">📲 Install Premium</button>
         </div>
         <div class="fb-mini-note">Status: <span id="fb-banker-premium-status">${APP.myPremiumPingHasKey ? "Phone ping key saved" : "No phone ping key saved yet"}</span></div>
       </div>
@@ -3944,7 +3944,7 @@
   async function loadPremiumPingInfo() {
     try {
       const res = await gmRequest("GET", "/api/banker/premium-ping");
-      APP.premiumPingUrl = String(res.signup_url || APP.premiumPingUrl || "");
+      APP.premiumPingUrl = String(res.install_url || res.signup_url || APP.premiumPingUrl || "");
       APP.myPremiumPingHasKey = !!res.has_pushover;
       APP.myPremiumPingIsSavedBanker = !!res.is_saved_banker;
       return res;
@@ -3954,7 +3954,10 @@
   }
 
   function premiumPingSignupUrl(info = null) {
-    const base = String((info && info.signup_url) || APP.premiumPingUrl || "https://torn-banking-push.onrender.com").trim();
+    const install = String((info && info.install_url) || APP.premiumPingUrl || "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js").trim();
+    // Direct .user.js installers work best without extra query params in PDA/Tampermonkey.
+    if (/\.user\.js(\?|$)/i.test(install)) return install;
+    const base = String((info && info.signup_url) || install || "https://torn-banking-push.onrender.com").trim();
     try {
       const u = new URL(base);
       if (APP.me?.player_id) u.searchParams.set("torn_id", APP.me.player_id);
@@ -4064,7 +4067,7 @@
         <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Banker" value="${esc(draft.roleName)}">
         <label class="fb-label" style="margin-top:10px;">Role phone ping key optional</label>
         <input id="fb-leader-role-pushover" class="fb-input" placeholder="Optional shared Pushover/User key for this role" value="${esc(draft.rolePushoverKey)}">
-        <div class="fb-mini-note">Premium signup is not shown here anymore. Bankers can open Premium Ping from the Banking page and save their own key in Settings.</div>
+        <div class="fb-mini-note">Saved banker roles are stored in the backend database and survive script/app updates. Premium signup is not shown here anymore; bankers can install Premium Ping from the Banking page and save their own key in Settings.</div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
           <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
@@ -4174,7 +4177,7 @@
           Bankers can sign up for the premium phone ping app. Once activated, paste the key below and new bank requests will ping your phone when your faction gets a request.
         </div>
         <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-premium-ping-signup" class="fb-btn blue" type="button">Open Premium Ping to Phone</button>
+          <button id="fb-premium-ping-signup" class="fb-btn blue" type="button">Install Premium Ping Script</button>
           <span class="fb-pill ${APP.myPremiumPingHasKey ? "approved" : "pending"}">${APP.myPremiumPingHasKey ? "Phone ping active" : "No phone key saved"}</span>
         </div>
         <label class="fb-label" style="margin-top:10px;">My activated phone ping key</label>
