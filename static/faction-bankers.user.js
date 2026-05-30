@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.3
-// @description  Faction vault banking with chat-to-request capture, banker coin alerts, Banking-tab request board, Pushover pings, and Torn-friendly settings/login.
+// @version      1.5.5
+// @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -23,7 +23,10 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.5.3-stale-cache-no-red-network";
+  const FB_BUILD = "1.5.5-fast-coin-db-poll";
+  const COIN_POLL_VISIBLE_MS = 5000;
+  const COIN_POLL_HIDDEN_MS = 20000;
+  const BOARD_REFRESH_OPEN_MS = 45000;
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -4629,7 +4632,8 @@
     const key = GM_getValue(K_API_KEY, "");
     if (!key || APP.headerRefreshing) return false;
     // PDA-safe: do not hammer Torn/Render. The backend also caches the Torn user.
-    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 18000) return true;
+    const minCoinPollMs = document.hidden ? COIN_POLL_HIDDEN_MS : COIN_POLL_VISIBLE_MS;
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < minCoinPollMs) return true;
 
     APP.headerRefreshing = true;
     APP.lastHeaderBadgeLoad = Date.now();
@@ -4866,13 +4870,13 @@
 
     pageMount("boot");
     if (GM_getValue(K_API_KEY, "")) {
-      setTimeout(() => refreshHeaderCoinBadge(true), 3000);
-      setTimeout(() => refreshHeaderCoinBadge(false), 25000);
-      setTimeout(() => refreshHeaderCoinBadge(false), 60000);
+      setTimeout(() => refreshHeaderCoinBadge(true), 1200);
+      setTimeout(() => refreshHeaderCoinBadge(false), 6500);
+      setTimeout(() => refreshHeaderCoinBadge(false), 12000);
     }
 
     window.addEventListener("focus", () => {
-      if (GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(false).catch(() => {});
+      if (GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(true).catch(() => {});
     });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(false).catch(() => {});
@@ -4893,16 +4897,16 @@
 
       pageMount("slow");
 
-      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 18000) {
+      if (GM_getValue(K_API_KEY, "") && Date.now() - (APP.lastHeaderBadgeLoad || 0) > (document.hidden ? COIN_POLL_HIDDEN_MS : COIN_POLL_VISIBLE_MS)) {
         refreshHeaderCoinBadge(false);
       }
-      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 30000) {
+      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > BOARD_REFRESH_OPEN_MS) {
         refreshAll(false);
       }
       if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
         refreshFactionBoxData(false);
       }
-    }, 12000);
+    }, 5000);
   }
 
 
