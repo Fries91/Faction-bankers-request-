@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.6.2-premium-install-role-persist"
+APP_VERSION = "1.6.3-premium-app-install-buttons"
 
 
 @app.errorhandler(Exception)
@@ -1791,6 +1791,7 @@ def banker_premium_ping_info():
     return jsonify({
         "ok": True,
         "signup_url": PING_TO_PHONE_APP_URL,
+        "app_url": PING_TO_PHONE_APP_URL,
         "install_url": PING_TO_PHONE_INSTALL_URL,
         "player_id": pid,
         "player_name": user.get("name"),
