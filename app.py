@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.5.5-fast-coin-db-poll"
+APP_VERSION = "1.5.8-premium-ping-url-set"
 
 
 @app.errorhandler(Exception)
@@ -28,6 +28,15 @@ def json_error_handler(e):
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 TORN_API_BASE = os.getenv("TORN_API_BASE", "https://api.torn.com").rstrip("/")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+
+# Premium ping-to-phone signup app. Set this in Render env to your payment/signup app.
+# Example: PING_TO_PHONE_APP_URL=https://your-ping-app.onrender.com
+PING_TO_PHONE_APP_URL = (
+    os.getenv("PING_TO_PHONE_APP_URL", "").strip()
+    or os.getenv("PREMIUM_PING_URL", "").strip()
+    or os.getenv("PUSH_TO_PHONE_APP_URL", "").strip()
+    or "https://faction-bankers-request.onrender.com/premium-ping"
+)
 
 # Cache the logged-in Torn user briefly so the coin badge does not hammer Torn API.
 # Without this, PDA focus/open/polling can trip Torn's "Too many requests" error.
@@ -1733,6 +1742,105 @@ def banker_status():
         "warnings": warnings,
         "time": now_iso(),
     })
+
+
+@app.get("/api/banker/premium-ping")
+def banker_premium_ping_info():
+    """Return the external premium ping-to-phone signup URL and the logged-in banker's key status."""
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    fid = str(user.get("faction_id") or "").strip()
+    pid = str(user.get("player_id") or "").strip()
+    saved = None
+    for row in manual_bankers_for_faction(fid):
+        if str(row.get("id") or row.get("banker_id") or "") == pid:
+            saved = row
+            break
+
+    return jsonify({
+        "ok": True,
+        "signup_url": PING_TO_PHONE_APP_URL,
+        "player_id": pid,
+        "player_name": user.get("name"),
+        "faction_id": fid,
+        "faction_name": user.get("faction_name"),
+        "is_saved_banker": bool(saved),
+        "has_pushover": bool(saved and clean_pushover_key(saved.get("pushover_key"))),
+        "can_manage_leaders": can_manage_leaders(user),
+        "note": "Leader must add you as a manual banker first. Then paste your activated Pushover user key here to receive phone pings.",
+    })
+
+
+@app.post("/api/banker/my-ping-key")
+def banker_save_own_ping_key():
+    """Allow a saved manual banker to add/update their own premium Pushover key."""
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+
+    data = get_json_body()
+    pushover_key = clean_pushover_key(data.get("pushover_key") or data.get("key") or "")
+    if not pushover_key:
+        return jsonify({"ok": False, "error": "Paste your activated Pushover user key first."}), 400
+
+    fid = str(user.get("faction_id") or "").strip()
+    fname = str(user.get("faction_name") or fid).strip()
+    pid = str(user.get("player_id") or "").strip()
+    pname = str(user.get("name") or pid).strip()
+
+    # Must already be a saved manual banker or leader/admin. Leaders can use this on themselves too.
+    saved = None
+    for row in manual_bankers_for_faction(fid):
+        if str(row.get("id") or row.get("banker_id") or "") == pid:
+            saved = row
+            break
+    if not saved and not can_manage_leaders(user):
+        return jsonify({
+            "ok": False,
+            "error": "Your leader must add your Torn ID as a faction banker before you can activate phone pings.",
+        }), 403
+
+    db_ok, db_msg = db_ready()
+    if db_ok:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO faction_manual_bankers (
+                        faction_id, faction_name, banker_id, banker_name, pushover_key, added_by_id, added_by_name, created_at, is_active
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                    ON CONFLICT (faction_id, banker_id) DO UPDATE SET
+                        faction_name = EXCLUDED.faction_name,
+                        banker_name = COALESCE(NULLIF(faction_manual_bankers.banker_name, ''), EXCLUDED.banker_name),
+                        pushover_key = EXCLUDED.pushover_key,
+                        is_active = TRUE
+                    """,
+                    (fid, fname, pid, pname, pushover_key, user.get("player_id"), user.get("name"), now_iso()),
+                )
+            conn.commit()
+    else:
+        rows = MEMORY_MANUAL_BANKERS.setdefault(fid, [])
+        rows[:] = [x for x in rows if str(x.get("id")) != pid]
+        rows.append({"id": pid, "name": pname, "pushover_key": pushover_key, "source": "self"})
+
+    BANKER_STATUS_CACHE.clear()
+    test_ping = send_pushover_to_key(
+        pushover_key,
+        "🪙 Premium Phone Ping Activated",
+        f"{pname}, your Faction Bankers phone pings are active for {fname}.",
+        "https://www.torn.com/factions.php?step=your#/tab=controls",
+    )
+    return jsonify({
+        "ok": True,
+        "has_pushover": True,
+        "test_ping_sent": test_ping,
+        "mode": "postgres" if db_ok else "memory",
+        "warning": "" if db_ok else db_msg,
+    })
+
 
 @app.get("/api/banker/leaders")
 def get_leader_bankers():
