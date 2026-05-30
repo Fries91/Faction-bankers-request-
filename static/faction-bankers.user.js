@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.8
+// @version      1.5.9
 // @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.5.8-premium-ping-url-set";
+  const FB_BUILD = "1.5.9-premium-icon-banker-page";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -73,6 +73,9 @@
     lastInbox: null,
     lastInboxTs: 0,
     lastHeaderError: "",
+    premiumPingUrl: "https://torn-banking-push.onrender.com",
+    myPremiumPingHasKey: false,
+    myPremiumPingIsSavedBanker: false,
     busy: false,
     open: false,
     lastLoad: 0,
@@ -2959,10 +2962,27 @@
         </div>
         ${bankerStatusPanel()}
       </div>
+
+      <div class="fb-box fb-premium-banker-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">📲 Premium Ping to Phone</div>
+            <div class="fb-small">Bankers can activate phone pings here, then save their key in Settings so new requests ping their phone.</div>
+          </div>
+          <button id="fb-banker-premium-ping" class="fb-btn blue" type="button">📲 Premium</button>
+        </div>
+        <div class="fb-mini-note">Status: <span id="fb-banker-premium-status">${APP.myPremiumPingHasKey ? "Phone ping key saved" : "No phone ping key saved yet"}</span></div>
+      </div>
+
       ${cards}
     `);
 
     $("#fb-refresh-banker")?.addEventListener("click", () => refreshAll(true));
+    $("#fb-banker-premium-ping")?.addEventListener("click", openPremiumPingSignup);
+    loadPremiumPingInfo().then(() => {
+      const el = $("#fb-banker-premium-status");
+      if (el) el.textContent = APP.myPremiumPingHasKey ? "Phone ping key saved" : "No phone ping key saved yet";
+    });
 
     $$("[data-fb-action]").forEach((btn) => {
       btn.addEventListener("click", () => bankerAction(btn.dataset.id, btn.dataset.fbAction));
