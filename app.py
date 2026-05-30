@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.5.3-stale-cache-no-red-network"
+APP_VERSION = "1.5.5-fast-coin-db-poll"
 
 
 @app.errorhandler(Exception)
@@ -32,8 +32,8 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
 # Cache the logged-in Torn user briefly so the coin badge does not hammer Torn API.
 # Without this, PDA focus/open/polling can trip Torn's "Too many requests" error.
 USER_CACHE = {}  # api-key suffix/full hash-ish -> {ts,user}
-USER_CACHE_TTL = int(os.getenv("USER_CACHE_TTL", "35"))
-USER_CACHE_STALE_TTL = int(os.getenv("USER_CACHE_STALE_TTL", "300"))
+USER_CACHE_TTL = int(os.getenv("USER_CACHE_TTL", "120"))
+USER_CACHE_STALE_TTL = int(os.getenv("USER_CACHE_STALE_TTL", "600"))
 
 ADMIN_PLAYER_ID = str(os.getenv("ADMIN_PLAYER_ID", "3679030")).strip()
 BANKER_IDS = {
@@ -2874,7 +2874,11 @@ def create_request_from_chat_command():
 
 @app.get("/api/banker/pending-count")
 def banker_pending_count():
-    """Fast server-side coin badge check.
+    """Fast DB-backed server-side coin badge check.
+
+    This endpoint is designed for 5-second coin polling. It uses the cached Torn identity
+    and then checks the database/manual banker list only, instead of loading the full
+    Banking board every time.
 
     This is intentionally independent from the full Banking board render. PDA/Torn
     can keep an old local APP.me or miss one refresh, so the coin asks the backend:
@@ -2974,6 +2978,7 @@ def banker_pending_count():
         "faction_id": own_faction_id,
         "faction_name": own_faction_name,
         "manual_banker_ids_count": len(manual_ids),
+        "poll_hint_ms": 5000,
     })
 
 @app.get("/api/banker/requests-lite")
