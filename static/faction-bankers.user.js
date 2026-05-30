@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.5
+// @version      1.5.8
 // @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.5.5-fast-coin-db-poll";
+  const FB_BUILD = "1.5.8-premium-ping-url-set";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -809,17 +809,28 @@
       #fb-bankers-notified-wrap {
         position: fixed !important;
         inset: 0 !important;
-        z-index: 100003 !important;
+        z-index: 2147483647 !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
         padding: 14px !important;
-        background: rgba(0,0,0,.46) !important;
+        background: rgba(0,0,0,.72) !important;
         font-family: Arial, Helvetica, sans-serif !important;
+        pointer-events: auto !important;
+        touch-action: none !important;
+      }
+
+      html.fb-modal-open,
+      html.fb-modal-open body {
+        overflow: hidden !important;
       }
 
       #fb-bankers-notified-card {
         width: min(420px, calc(100vw - 28px)) !important;
+        position: relative !important;
+        z-index: 2147483647 !important;
+        pointer-events: auto !important;
+        touch-action: manipulation !important;
         border: 1px solid rgba(255,211,106,.58) !important;
         border-radius: 16px !important;
         background:
@@ -2208,7 +2219,7 @@
       coin = $("#fb-bank-coin-clean");
     }
     const setupBtn = $("#fb-setup-button");
-    const n = Number(count || 0);
+    const n = Math.max(0, Number(count || 0));
     const hasKey = !!GM_getValue(K_API_KEY, "");
     const canBank = !!(APP.me?.is_banker || APP.me?.is_admin || APP.me?._coin_can_bank || APP.me?.can_manage_leaders || APP.me?.is_leader_role);
     APP.pendingCount = n;
@@ -3054,12 +3065,23 @@
     `;
     document.body.appendChild(wrap);
 
-    const close = () => wrap.remove();
+    const close = () => {
+      try { document.documentElement.classList.remove("fb-modal-open"); } catch (_) {}
+      wrap.remove();
+    };
+    // Do not close by tapping outside. This confirmation stays on top until the user closes it.
     wrap.addEventListener("click", (ev) => {
-      if (ev.target === wrap) close();
-    });
+      if (ev.target === wrap) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    }, true);
     wrap.querySelector("#fb-bankers-notified-close")?.addEventListener("click", close);
     wrap.querySelector("#fb-bankers-notified-ok")?.addEventListener("click", close);
+    try {
+      document.documentElement.classList.add("fb-modal-open");
+      wrap.querySelector("#fb-bankers-notified-ok")?.focus?.();
+    } catch (_) {}
   }
 
   function savePayPrefill(r) {
@@ -3902,6 +3924,63 @@
     return !!(d.bankerId || d.bankerName || d.pushoverKey);
   }
 
+
+  async function loadPremiumPingInfo() {
+    try {
+      const res = await gmRequest("GET", "/api/banker/premium-ping");
+      APP.premiumPingUrl = String(res.signup_url || APP.premiumPingUrl || "");
+      APP.myPremiumPingHasKey = !!res.has_pushover;
+      APP.myPremiumPingIsSavedBanker = !!res.is_saved_banker;
+      return res;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function premiumPingSignupUrl(info = null) {
+    const base = String((info && info.signup_url) || APP.premiumPingUrl || "https://torn-banking-push.onrender.com").trim();
+    try {
+      const u = new URL(base);
+      if (APP.me?.player_id) u.searchParams.set("torn_id", APP.me.player_id);
+      if (APP.me?.name) u.searchParams.set("name", APP.me.name);
+      if (APP.me?.faction_id) u.searchParams.set("faction_id", APP.me.faction_id);
+      if (APP.me?.faction_name) u.searchParams.set("faction_name", APP.me.faction_name);
+      u.searchParams.set("return", BANKER_API_BASE.replace(/\/$/, "") + "/static/faction-bankers.user.js");
+      return u.toString();
+    } catch {
+      return base;
+    }
+  }
+
+  async function openPremiumPingSignup() {
+    const info = await loadPremiumPingInfo();
+    const url = premiumPingSignupUrl(info);
+    try {
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      location.href = url;
+    }
+  }
+
+  async function saveMyPremiumPingKey() {
+    if (APP.busy) return;
+    const key = String($("#fb-my-ping-key")?.value || "").trim();
+    if (!key) {
+      renderSettings("Paste your activated phone ping key first.");
+      return;
+    }
+    APP.busy = true;
+    try {
+      const res = await gmRequest("POST", "/api/banker/my-ping-key", { pushover_key: key });
+      await refreshAll(true);
+      renderSettings(res.test_ping_sent ? "Premium phone ping key saved. Test ping sent." : "Premium phone ping key saved. If no test arrived, check the key/app token.");
+    } catch (err) {
+      renderSettings(err.message || String(err));
+    } finally {
+      APP.busy = false;
+    }
+  }
+
   function renderLeadersTab(msg = "", preserveDraft = true) {
     const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
     const draft = preserveDraft ? getLeaderBankerDraft() : { bankerId: "", bankerName: "", pushoverKey: "" };
@@ -3957,10 +4036,11 @@
         <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030" value="${esc(draft.bankerId)}">
         <label class="fb-label" style="margin-top:10px;">Banker name</label>
         <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91" value="${esc(draft.bankerName)}">
-        <label class="fb-label" style="margin-top:10px;">Pushover User Key optional</label>
-        <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their Pushover User Key for phone pings" value="${esc(draft.pushoverKey)}">
-        <div class="fb-small" style="margin-top:5px;">When a request is sent, saved bankers can see it in Banking. Saved Pushover keys get phone pings.</div>
+        <label class="fb-label" style="margin-top:10px;">Premium phone ping key optional</label>
+        <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their activated Pushover User Key for phone pings" value="${esc(draft.pushoverKey)}">
+        <div class="fb-small" style="margin-top:5px;">Saved bankers can use the premium signup button to activate phone pings, then paste their key here or save it themselves in Settings.</div>
         <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-open-premium-ping" class="fb-btn blue" type="button">📲 Premium Ping to Phone</button>
           <button id="fb-leader-add" class="fb-btn gold" type="button">Add Banker</button>
           <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
         </div>
@@ -3973,6 +4053,7 @@
       ${rows}
     `);
 
+    $("#fb-open-premium-ping")?.addEventListener("click", openPremiumPingSignup);
     $("#fb-leader-add")?.addEventListener("click", addLeaderBanker);
     $("#fb-leader-refresh")?.addEventListener("click", async () => {
       await loadLeaderBankers();
@@ -4052,6 +4133,23 @@
         </ul>
       </div>
 
+      <div class="fb-box">
+        <div class="fb-request-title">📲 Premium Ping to Phone</div>
+        <div class="fb-small" style="margin-top:6px; line-height:1.45;">
+          Bankers can sign up for the premium phone ping app. Once activated, paste the key below and new bank requests will ping your phone when your faction gets a request.
+        </div>
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-premium-ping-signup" class="fb-btn blue" type="button">Open Premium Ping to Phone</button>
+          <span class="fb-pill ${APP.myPremiumPingHasKey ? "approved" : "pending"}">${APP.myPremiumPingHasKey ? "Phone ping active" : "No phone key saved"}</span>
+        </div>
+        <label class="fb-label" style="margin-top:10px;">My activated phone ping key</label>
+        <input id="fb-my-ping-key" class="fb-input" placeholder="Paste your activated Pushover User Key here">
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-save-my-ping-key" class="fb-btn gold" type="button">Save My Phone Ping Key</button>
+        </div>
+        <div class="fb-mini-note">Your leader must add your Torn ID as a banker first. Leaders can also paste banker keys in the Leaders tab.</div>
+      </div>
+
       <div class="fb-box fb-login-card">
         <div class="fb-request-title">Login</div>
         <div class="fb-small" style="margin-top:4px;">Paste your Torn limited API key here, save it, then tap Test Login.</div>
@@ -4065,6 +4163,10 @@
         <div class="fb-mini-note">Backend: <span style="color:#ffd36a;">${esc(BANKER_API_BASE)}</span></div>
       </div>
     `);
+
+    $("#fb-premium-ping-signup")?.addEventListener("click", openPremiumPingSignup);
+    $("#fb-save-my-ping-key")?.addEventListener("click", saveMyPremiumPingKey);
+    loadPremiumPingInfo();
 
     $("#fb-save-key")?.addEventListener("click", () => {
       const keyInput = $("#fb-api-key")?.value?.trim() || "";
@@ -4663,9 +4765,11 @@
         saveRequestCache(APP.requests);
       }
 
+      // Server is now the authority for the red coin number.
+      // This stops the badge from flickering through stale local/cache counts.
       const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
-      setCoinAlert(Math.max(serverPending, pendingItems.length));
-      notifyBankerForNewPending(inboxItems.length ? inboxItems : pendingItems);
+      setCoinAlert(serverPending);
+      notifyBankerForNewPending(inboxItems.length ? inboxItems : pendingItems.filter((r) => !getSeenPendingIds().map(String).includes(String(r.id))));
       return true;
     } catch (err) {
       APP.lastHeaderError = String(err.message || err);
@@ -4958,6 +5062,59 @@
     }
   }
 
+  function fbForceClearChatCommand(el, originalText = "") {
+    const wanted = String(originalText || "").trim();
+    const targets = new Set();
+    if (el) targets.add(el);
+    try {
+      const active = document.activeElement;
+      if (active && fbLikelyChatInput(active)) targets.add(active);
+    } catch (_) {}
+    try {
+      document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]').forEach((node) => {
+        const text = String(fbGetEditableText(node) || "").trim();
+        if (text && (text === wanted || text.toLowerCase().startsWith("/banker"))) targets.add(node);
+      });
+    } catch (_) {}
+
+    const clearOne = (node) => {
+      if (!node) return;
+      try {
+        if (node.isContentEditable) {
+          node.focus?.();
+          node.textContent = "";
+          node.innerHTML = "";
+          node.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+          node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+        } else {
+          const proto = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const desc = Object.getOwnPropertyDescriptor(proto, "value");
+          if (desc && desc.set) desc.set.call(node, "");
+          else node.value = "";
+          node.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+          node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+          node.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        node.blur?.();
+      } catch (_) {
+        try { fbSetEditableText(node, ""); } catch (__) {}
+      }
+    };
+
+    targets.forEach(clearOne);
+    // PDA/Torn chat can be React-controlled and may restore the text after our first clear.
+    // Clear a few more times after the send tap so the command does not sit in the chat box.
+    [80, 220, 650, 1400].forEach((ms) => setTimeout(() => {
+      try {
+        targets.forEach(clearOne);
+        document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]').forEach((node) => {
+          const text = String(fbGetEditableText(node) || "").trim();
+          if (text === wanted || text.toLowerCase().startsWith("/banker")) clearOne(node);
+        });
+      } catch (_) {}
+    }, ms));
+  }
+
   function fbLikelyChatInput(el) {
     if (!el) return false;
     const tag = String(el.tagName || "").toLowerCase();
@@ -5057,7 +5214,7 @@
           saveRecentCreatedRequest(res.item);
           APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
           saveRequestCache(APP.requests);
-          if (isBankerUiUser()) setCoinAlert(APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase())).length);
+          if (isBankerUiUser()) setCoinAlert(Math.max(Number(APP.pendingCount || 0), 1));
           if (APP.open) renderBody(activeTab());
         }
       }
@@ -5115,10 +5272,10 @@
       if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
     }
 
-    FB_CHAT_LAST_TYPED_COMMAND = { text: String(text || "").trim(), ts: Date.now() };
-    fbSetEditableText(el, "");
+    FB_CHAT_LAST_TYPED_COMMAND = { text: String(text || "").trim(), ts: Date.now(), el };
+    fbForceClearChatCommand(el, text);
     try { el.blur?.(); } catch (_) {}
-    fbSendBankerChatCommand(text);
+    fbSendBankerChatCommand(text).finally?.(() => fbForceClearChatCommand(el, text));
     return true;
   }
 
@@ -5239,8 +5396,8 @@
           if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
         }
         const remembered = String(FB_CHAT_LAST_TYPED_COMMAND.text || "").trim();
-        try { fbSetEditableText(FB_CHAT_LAST_TYPED_COMMAND.el, ""); } catch (_) {}
-        fbSendBankerChatCommand(remembered);
+        try { fbForceClearChatCommand(FB_CHAT_LAST_TYPED_COMMAND.el, remembered); } catch (_) {}
+        fbSendBankerChatCommand(remembered).finally?.(() => fbForceClearChatCommand(FB_CHAT_LAST_TYPED_COMMAND.el, remembered));
       }
     };
 
