@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.5.9
+// @version      1.6.1
 // @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.5.9-premium-icon-banker-page";
+  const FB_BUILD = "1.6.1-role-bankers-no-leader-premium";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -50,8 +50,8 @@
   const K_LAST_BALANCE_SOURCE = "fb_last_personal_balance_source_v3";
   const K_LAST_BALANCE_TS = "fb_last_personal_balance_ts_v3";
 
-  // Manual banker mode: no hard-coded faction list and no role detection.
-  // Each leader/co-leader adds exact banker Torn names + IDs for their own faction.
+  // Role banker mode: leaders add exact faction role names for their own faction.
+  // Manual rows remain only for optional saved phone ping keys.
   const DEFAULT_FACTIONS = [];
 
   const APP = {
@@ -3051,12 +3051,10 @@
     // User-facing confirmation. This appears for chat commands and button requests.
     showBankersNotifiedBox(amount);
 
-    // If the requester is also one of the saved bankers/leaders, immediately
-    // light their own coin and jump them to Banking so they can verify the
-    // request landed on the board. Other bankers get the red coin through
-    // their fast badge polling, and Pushover is sent from the backend.
+    // Keep the overlay closed when the requester sends from chat.
+    // If the requester is also a banker, only light/update their coin;
+    // do not auto-open the Banking tab. Bankers open it by tapping the coin.
     bumpOwnBankerCoinAfterRequest();
-    if (isBankerUiUser()) openBankingTabForPendingRequest();
 
     setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 600);
     setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2400);
@@ -3900,7 +3898,7 @@
       await loadLeaderBankers();
       APP.bankers = [];
       mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that saved role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`);
+      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that saved role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`, false);
     } catch (err) {
       renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -3926,9 +3924,8 @@
 
   function getLeaderBankerDraft() {
     return {
-      bankerId: String($("#fb-leader-banker-id")?.value || "").replace(/[^0-9]/g, "").trim(),
-      bankerName: String($("#fb-leader-banker-name")?.value || "").trim(),
-      pushoverKey: String($("#fb-leader-pushover")?.value || "").trim(),
+      roleName: String($("#fb-leader-role-name")?.value || "").trim(),
+      rolePushoverKey: String($("#fb-leader-role-pushover")?.value || "").trim(),
     };
   }
 
@@ -3936,12 +3933,11 @@
     if (!APP.open || activeTab() !== "leaders") return false;
     const active = document.activeElement;
     if (active && active.closest && active.closest("#fb-body") && (
-      active.matches("#fb-leader-banker-id") ||
-      active.matches("#fb-leader-banker-name") ||
-      active.matches("#fb-leader-pushover")
+      active.matches("#fb-leader-role-name") ||
+      active.matches("#fb-leader-role-pushover")
     )) return true;
     const d = getLeaderBankerDraft();
-    return !!(d.bankerId || d.bankerName || d.pushoverKey);
+    return !!(d.roleName || d.rolePushoverKey);
   }
 
 
@@ -4003,13 +3999,13 @@
 
   function renderLeadersTab(msg = "", preserveDraft = true) {
     const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
-    const draft = preserveDraft ? getLeaderBankerDraft() : { bankerId: "", bankerName: "", pushoverKey: "" };
+    const draft = preserveDraft ? getLeaderBankerDraft() : { roleName: "", rolePushoverKey: "" };
 
     if (!canManage) {
       setBody(`
         <div class="fb-box fb-hero-card">
           <div class="fb-request-title">Leaders</div>
-          <div class="fb-error" style="margin-top:6px;">Leader/co-leader access is required to manage faction bankers.</div>
+          <div class="fb-error" style="margin-top:6px;">Leader/co-leader access is required to manage faction banker roles.</div>
           <div class="fb-small" style="margin-top:8px;">This tab is for the leader team of your own faction only.</div>
         </div>
       `);
@@ -4019,17 +4015,29 @@
     const factionName = APP.me?.faction_name || "Your faction";
     const yourRole = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "Leader team");
 
-    const rows = (APP.manualBankers || []).map((b) => `
+    const roleRows = (APP.leaderRoleItems || []).map((r) => `
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">${esc(r.role_name || "Banker role")}</div>
+            <div class="fb-small">Any faction member with this exact role gets the coin alert + Banking board.${r.has_pushover ? " • role phone ping key saved" : ""}</div>
+          </div>
+          <button class="fb-btn red" data-leader-role-remove="${esc(r.role_name || "")}" type="button">Remove</button>
+        </div>
+      </div>
+    `).join("") || `<div class="fb-box"><div class="fb-muted">No banker roles saved yet. Add the exact faction role name your bankers use.</div></div>`;
+
+    const savedKeyRows = (APP.manualBankers || []).map((b) => `
       <div class="fb-box">
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">${esc(b.banker_name || b.name || b.banker_id)}</div>
-            <div class="fb-small">ID: ${esc(b.banker_id || b.id)} ${b.has_pushover ? "• phone ping enabled" : "• no phone ping key saved"}</div>
+            <div class="fb-small">ID: ${esc(b.banker_id || b.id)} ${b.has_pushover ? "• phone ping key saved" : "• no phone ping key"}</div>
           </div>
-          <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove</button>
+          <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove key</button>
         </div>
       </div>
-    `).join("") || `<div class="fb-box"><div class="fb-muted">No bankers saved yet. Add each banker by Torn ID and name so their coin lights up and they can see requests.</div></div>`;
+    `).join("");
 
     setBody(`
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
@@ -4039,45 +4047,52 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">👑 Leaders • ${esc(factionName)}</div>
-            <div class="fb-small">Manual banker mode: this setup only affects your own faction.</div>
+            <div class="fb-small">Role banker mode: this setup only affects your own faction.</div>
           </div>
           <span class="fb-pill approved">${esc(yourRole)}</span>
         </div>
         <div class="fb-flow-grid" style="margin-top:10px;">
-          <div class="fb-flow-card"><b>1. Add banker</b><span>Enter the exact Torn ID and display name for each banker.</span></div>
-          <div class="fb-flow-card"><b>2. Coin lights up</b><span>Saved bankers get coin badges and can see the Banking request board.</span></div>
+          <div class="fb-flow-card"><b>1. Add role</b><span>Enter the exact faction role your bankers have, like Banker, Treasurer, or Vault.</span></div>
+          <div class="fb-flow-card"><b>2. Coin lights up</b><span>Anyone with that role gets coin alerts and Banking board access.</span></div>
         </div>
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">Add faction banker</div>
-        <div class="fb-small" style="margin-top:5px;">Roles are disabled. Bankers must be added here by name and Torn ID for this faction only.</div>
-        <label class="fb-label" style="margin-top:10px;">Banker Torn ID</label>
-        <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030" value="${esc(draft.bankerId)}">
-        <label class="fb-label" style="margin-top:10px;">Banker name</label>
-        <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91" value="${esc(draft.bankerName)}">
-        <label class="fb-label" style="margin-top:10px;">Premium phone ping key optional</label>
-        <input id="fb-leader-pushover" class="fb-input" placeholder="Paste their activated Pushover User Key for phone pings" value="${esc(draft.pushoverKey)}">
-        <div class="fb-small" style="margin-top:5px;">Saved bankers can use the premium signup button to activate phone pings, then paste their key here or save it themselves in Settings.</div>
+        <div class="fb-request-title">Add banker role</div>
+        <div class="fb-small" style="margin-top:5px;">Use the exact role name shown in your faction. Example: Banker, Treasurer, Vault Keeper.</div>
+        <label class="fb-label" style="margin-top:10px;">Faction banker role name</label>
+        <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Banker" value="${esc(draft.roleName)}">
+        <label class="fb-label" style="margin-top:10px;">Role phone ping key optional</label>
+        <input id="fb-leader-role-pushover" class="fb-input" placeholder="Optional shared Pushover/User key for this role" value="${esc(draft.rolePushoverKey)}">
+        <div class="fb-mini-note">Premium signup is not shown here anymore. Bankers can open Premium Ping from the Banking page and save their own key in Settings.</div>
         <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-open-premium-ping" class="fb-btn blue" type="button">📲 Premium Ping to Phone</button>
-          <button id="fb-leader-add" class="fb-btn gold" type="button">Add Banker</button>
+          <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
           <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
         </div>
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">Saved faction bankers</div>
-        <div class="fb-mini-note">Only these manual banker entries for ${esc(factionName)} get banker-board access. Leaders/co-leaders can still manage the list.</div>
+        <div class="fb-request-title">Saved banker roles</div>
+        <div class="fb-mini-note">These roles for ${esc(factionName)} control who gets banker-board access and red coin alerts.</div>
       </div>
-      ${rows}
+      ${roleRows}
+
+      ${savedKeyRows ? `
+        <div class="fb-box">
+          <div class="fb-request-title">Saved banker phone keys</div>
+          <div class="fb-mini-note">These are optional phone ping keys saved by bankers or leaders. Removing a key here does not remove the banker role.</div>
+        </div>
+        ${savedKeyRows}
+      ` : ""}
     `);
 
-    $("#fb-open-premium-ping")?.addEventListener("click", openPremiumPingSignup);
-    $("#fb-leader-add")?.addEventListener("click", addLeaderBanker);
+    $("#fb-leader-role-add")?.addEventListener("click", addLeaderRoleName);
     $("#fb-leader-refresh")?.addEventListener("click", async () => {
       await loadLeaderBankers();
       renderLeadersTab();
+    });
+    $$('[data-leader-role-remove]').forEach((btn) => {
+      btn.addEventListener("click", () => removeLeaderRoleName(btn.dataset.leaderRoleRemove));
     });
     $$('[data-leader-remove]').forEach((btn) => {
       btn.addEventListener("click", () => removeLeaderBanker(btn.dataset.leaderRemove));
