@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.6.5-pushover-only-owner-faction"
+APP_VERSION = "1.6.6-pushover-browser-open"
 
 
 @app.errorhandler(Exception)
@@ -1789,7 +1789,7 @@ def banker_premium_ping_info():
         "ok": True,
         "signup_url": PING_TO_PHONE_APP_URL,
         "app_url": PING_TO_PHONE_APP_URL,
-        "install_url": PING_TO_PHONE_INSTALL_URL,
+        "install_url": PING_TO_PHONE_APP_URL,
         "player_id": pid,
         "player_name": user.get("name"),
         "faction_id": fid,
@@ -1797,7 +1797,7 @@ def banker_premium_ping_info():
         "is_saved_banker": bool(saved or role_banker),
         "has_pushover": bool(saved and clean_pushover_key(saved.get("pushover_key"))),
         "can_manage_leaders": can_manage_leaders(user),
-        "note": "Pushover setup opens Pushover only. Your global Render Pushover key is only used for OWNER_PUSHOVER_FACTION_IDS; other factions must save their own Pushover user/group key.",
+        "note": "Pushover setup opens the exact PUSHOVER_SUBSCRIBE_URL/PUSHOVER_SETUP_URL. Owner global Pushover key is only used for OWNER_PUSHOVER_FACTION_IDS; other factions must save their own Pushover user/group key.",
     })
 
 
