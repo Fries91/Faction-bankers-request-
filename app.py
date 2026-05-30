@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.6.3-premium-app-install-buttons"
+APP_VERSION = "1.6.5-pushover-only-owner-faction"
 
 
 @app.errorhandler(Exception)
@@ -29,19 +29,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 TORN_API_BASE = os.getenv("TORN_API_BASE", "https://api.torn.com").rstrip("/")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
 
-# Premium ping-to-phone app/install links.
-# The button in Banking opens the install URL directly, so bankers can install the premium userscript.
-PING_TO_PHONE_APP_URL = (
-    os.getenv("PING_TO_PHONE_APP_URL", "").strip()
-    or os.getenv("PREMIUM_PING_URL", "").strip()
-    or os.getenv("PUSH_TO_PHONE_APP_URL", "").strip()
-    or "https://torn-banking-push.onrender.com"
+# Pushover phone-alert setup links.
+# The Banking button opens Pushover only. Set PUSHOVER_SUBSCRIBE_URL
+# to your Pushover subscription link if you want bankers to subscribe
+# to your own delivery group.
+PUSHOVER_SETUP_URL = (
+    os.getenv("PUSHOVER_SUBSCRIBE_URL", "").strip()
+    or os.getenv("PUSHOVER_SETUP_URL", "").strip()
+    or os.getenv("PING_TO_PHONE_APP_URL", "").strip()
+    or "https://pushover.net/"
 )
-PING_TO_PHONE_INSTALL_URL = (
-    os.getenv("PING_TO_PHONE_INSTALL_URL", "").strip()
-    or os.getenv("PREMIUM_PING_INSTALL_URL", "").strip()
-    or "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js"
-)
+PING_TO_PHONE_APP_URL = PUSHOVER_SETUP_URL
+PING_TO_PHONE_INSTALL_URL = PUSHOVER_SETUP_URL
 
 # Cache the logged-in Torn user briefly so the coin badge does not hammer Torn API.
 # Without this, PDA focus/open/polling can trip Torn's "Too many requests" error.
@@ -1075,16 +1074,20 @@ def pushover_configured():
 
 
 def fries91_notify_faction_ids():
-    """Factions where global Fries91/Render Pushover keys should be pinged.
+    """Factions where your Render/global Pushover key is allowed.
 
-    Default is no global faction pings. Factions ping their own
-    manually saved banker Pushover keys from the Leaders tab.
-    Override with FRIES91_NOTIFY_FACTION_IDS or GLOBAL_PUSHOVER_FACTION_IDS.
-    Use "*" only if you intentionally want Fries pinged for every faction.
+    Default is only Fries91/Wrath faction 49384. This prevents outside
+    factions from using your personal Pushover delivery key unless you
+    explicitly add their faction id. Override with OWNER_PUSHOVER_FACTION_IDS,
+    FRIES91_NOTIFY_FACTION_IDS, or GLOBAL_PUSHOVER_FACTION_IDS.
     """
-    raw = (os.getenv("FRIES91_NOTIFY_FACTION_IDS", "") or os.getenv("GLOBAL_PUSHOVER_FACTION_IDS", "") or "")
+    raw = (
+        os.getenv("OWNER_PUSHOVER_FACTION_IDS", "").strip()
+        or os.getenv("FRIES91_NOTIFY_FACTION_IDS", "").strip()
+        or os.getenv("GLOBAL_PUSHOVER_FACTION_IDS", "").strip()
+        or "49384"
+    )
     return {x.strip() for x in str(raw).replace("\n", ",").split(",") if x.strip()}
-
 
 def should_ping_global_pushover_for_faction(faction_id):
     ids = fries91_notify_faction_ids()
@@ -1105,7 +1108,7 @@ def should_ping_global_pushover_for_item(item):
     raw_names = (
         os.getenv("FRIES91_NOTIFY_FACTION_NAMES", "")
         or os.getenv("GLOBAL_PUSHOVER_FACTION_NAMES", "")
-        or "7DS*: Wrath,Wrath"
+        or ""
     )
     names = {str(x).strip().lower() for x in str(raw_names).replace("\n", ",").split(",") if str(x).strip()}
     fname = str((item or {}).get("faction_name") or "").strip().lower()
@@ -1162,23 +1165,17 @@ def send_pushover_alert(title, message, url=None):
 
 
 def is_wrath_like_request(item):
-    """True for Fries91/Wrath requests that should hit the global Fries phone key.
-
-    This is intentionally narrow: faction id 49384, or a faction name containing
-    Wrath / 7DS. Other factions still only use their own Leaders-tab Pushover keys.
-    """
+    """True only for faction IDs allowed to use your global Pushover key."""
     fid = str((item or {}).get("faction_id") or "").strip()
-    fname = str((item or {}).get("faction_name") or "").strip().lower()
-    ids = {"49384"} | {str(x).strip() for x in fries91_notify_faction_ids() if str(x).strip() and str(x).strip() != "*"}
-    return fid in ids or "wrath" in fname or "7ds" in fname
-
+    ids = {str(x).strip() for x in fries91_notify_faction_ids() if str(x).strip() and str(x).strip() != "*"}
+    return fid in ids
 
 def notification_target_keys_for_request(item):
     """Return a de-duplicated list of Pushover keys for this request.
 
     Priority:
     1. Pushover keys saved on the manual banker entries in this faction's Leaders tab.
-    2. Fries91/global Render keys only for Wrath / configured Fries91 factions.
+    2. Your Render/global Pushover key only for OWNER_PUSHOVER_FACTION_IDS.
 
     Roles are intentionally not used for banker access or phone pings in v1.4.5.
     """
@@ -1196,13 +1193,12 @@ def notification_target_keys_for_request(item):
 
     # Role-based banker setup: leaders can add banker faction roles.
     # Role-level phone keys are optional, and bankers can still save their
-    # own premium ping key in Settings, which creates/updates their saved entry.
+    # own Pushover key in Settings, which creates/updates their saved entry.
     for k in role_pushover_keys_for_faction((item or {}).get("faction_id")):
         add_key(k)
 
-    # v1.2.4: make Wrath phone pings reliable.  If this is Wrath/49384,
-    # include the Render global Fries91 key even when a role/manual key lookup
-    # returns empty. Do not do this for outside factions unless explicitly allowed.
+    # Your faction can use your Render/global Pushover key.
+    # Outside factions do not get this key; they must save their own Pushover user/group key.
     if should_ping_global_pushover_for_item(item) or is_wrath_like_request(item):
         for k in configured_pushover_keys():
             add_key(k)
@@ -1772,9 +1768,10 @@ def banker_status():
     })
 
 
-@app.get("/api/banker/premium-ping")
+@app.get("/api/banker/pushapp")
+@app.get("/api/banker/premium-ping")  # backwards-compatible old endpoint
 def banker_premium_ping_info():
-    """Return the external premium ping-to-phone signup URL and the logged-in banker's key status."""
+    """Return the external Pushover setup URL and the logged-in banker's key status."""
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -1800,13 +1797,13 @@ def banker_premium_ping_info():
         "is_saved_banker": bool(saved or role_banker),
         "has_pushover": bool(saved and clean_pushover_key(saved.get("pushover_key"))),
         "can_manage_leaders": can_manage_leaders(user),
-        "note": "Leader-saved banker roles and banker phone keys are stored in Postgres and survive script/app updates. The premium button opens the premium userscript installer.",
+        "note": "Pushover setup opens Pushover only. Your global Render Pushover key is only used for OWNER_PUSHOVER_FACTION_IDS; other factions must save their own Pushover user/group key.",
     })
 
 
 @app.post("/api/banker/my-ping-key")
 def banker_save_own_ping_key():
-    """Allow a saved manual banker to add/update their own premium Pushover key."""
+    """Allow a role/manual banker to add/update their own Pushover key."""
     user, resp, code = require_user()
     if resp:
         return resp, code
@@ -1861,8 +1858,8 @@ def banker_save_own_ping_key():
     BANKER_STATUS_CACHE.clear()
     test_ping = send_pushover_to_key(
         pushover_key,
-        "🪙 Premium Phone Ping Activated",
-        f"{pname}, your Faction Bankers phone pings are active for {fname}.",
+        "🪙 Pushover Phone Alerts Activated",
+        f"{pname}, your Faction Bankers Pushover phone pings are active for {fname}.",
         "https://www.torn.com/factions.php?step=your#/tab=controls",
     )
     return jsonify({
