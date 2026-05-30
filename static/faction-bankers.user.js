@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.6.4
+// @version      1.6.5
 // @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -13,8 +13,6 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      faction-bankers-request.onrender.com
-// @connect      torn-banking-push.onrender.com
-// @connect      https://torn-banking-push.onrender.com/*
 // @connect      https://faction-bankers-request.onrender.com/*
 // @connect      *.onrender.com
 // @connect      api.torn.com
@@ -25,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.6.4-premium-direct-phone-ping";
+  const FB_BUILD = "1.6.5-pushover-only-owner-faction";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -51,8 +49,6 @@
   const K_LAST_BALANCE_TEXT = "fb_last_personal_balance_text_v3";
   const K_LAST_BALANCE_SOURCE = "fb_last_personal_balance_source_v3";
   const K_LAST_BALANCE_TS = "fb_last_personal_balance_ts_v3";
-  const K_PREMIUM_PUSH_KEY = "fries91_premium_push_key";
-  const K_PREMIUM_PUSH_SEEN = "fries91_premium_seen_request_ids_v1";
 
   // Role banker mode: leaders add exact faction role names for their own faction.
   // Manual rows remain only for optional saved phone ping keys.
@@ -77,10 +73,10 @@
     lastInbox: null,
     lastInboxTs: 0,
     lastHeaderError: "",
-    premiumPingUrl: "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js",
-    premiumPingAppUrl: "https://torn-banking-push.onrender.com",
-    myPremiumPingHasKey: false,
-    myPremiumPingIsSavedBanker: false,
+    pushoverPingUrl: "https://pushover.net/",
+    pushoverPingAppUrl: "https://pushover.net/",
+    myPushoverPingHasKey: false,
+    myPushoverPingIsSavedBanker: false,
     busy: false,
     open: false,
     lastLoad: 0,
@@ -2968,29 +2964,28 @@
         ${bankerStatusPanel()}
       </div>
 
-      <div class="fb-box fb-premium-banker-box">
+      <div class="fb-box fb-pushover-banker-box">
         <div class="fb-row fb-space">
           <div>
-            <div class="fb-request-title">📲 Premium Ping to Phone</div>
-            <div class="fb-small">Open the premium app to activate your phone ping. Use install/update only if the premium userscript is missing or needs updating.</div>
+            <div class="fb-request-title">📲 Pushover Phone Alerts</div>
+            <div class="fb-small">Open Pushover to set up phone alerts. Your faction can use the owner Pushover setup only when allowed; other factions must use their own Pushover key/group.</div>
           </div>
         </div>
         <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-banker-premium-app" class="fb-btn blue" type="button">📲 Open Premium App</button>
-          <button id="fb-banker-premium-install" class="fb-btn" type="button">Install / Update Script</button>
+          <button id="fb-banker-pushover-app" class="fb-btn blue" type="button">🔔 Pushover Setup</button>
         </div>
-        <div class="fb-mini-note">Status: <span id="fb-banker-premium-status">${APP.myPremiumPingHasKey ? "Premium key saved" : "No premium key saved yet"}</span>. Open the premium app to reserve/pay/activate, then paste the premium_ key in Settings.</div>
+        <div class="fb-mini-note">Status: <span id="fb-banker-pushover-status">${APP.myPushoverPingHasKey ? "Pushover key saved" : "No Pushover key saved yet"}</span>. This opens Pushover only. Save your Pushover user/group key in Settings after setup.</div>
       </div>
 
       ${cards}
     `);
 
     $("#fb-refresh-banker")?.addEventListener("click", () => refreshAll(true));
-    $("#fb-banker-premium-app")?.addEventListener("click", openPremiumPingApp);
-    $("#fb-banker-premium-install")?.addEventListener("click", openPremiumPingInstall);
-    loadPremiumPingInfo().then(() => {
-      const el = $("#fb-banker-premium-status");
-      if (el) el.textContent = APP.myPremiumPingHasKey ? "Premium key saved" : "No premium key saved yet";
+    $("#fb-banker-pushover-app")?.addEventListener("click", openPushoverPingApp);
+    $("#fb-banker-pushover-install")?.addEventListener("click", openPushoverPingInstall);
+    loadPushoverPingInfo().then(() => {
+      const el = $("#fb-banker-pushover-status");
+      if (el) el.textContent = APP.myPushoverPingHasKey ? "Pushover key saved" : "No Pushover key saved yet";
     });
 
     $$("[data-fb-action]").forEach((btn) => {
@@ -3064,11 +3059,6 @@
     // If the requester is also a banker, only light/update their coin;
     // do not auto-open the Banking tab. Bankers open it by tapping the coin.
     bumpOwnBankerCoinAfterRequest();
-
-    // If this same device belongs to a banker with a saved premium_ key, send the phone ping once.
-    if (item && isBankerUiUser()) {
-      pingPremiumPhoneOnlyIfNew(item, "New faction bank request").catch(() => {});
-    }
 
     setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 600);
     setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2400);
@@ -3955,98 +3945,21 @@
   }
 
 
-  function getMyPremiumPushKey() {
-    return String(GM_getValue(K_PREMIUM_PUSH_KEY, "") || "").trim();
-  }
-
-  function setMyPremiumPushKey(key) {
-    const clean = String(key || "").trim();
-    GM_setValue(K_PREMIUM_PUSH_KEY, clean);
-    try { localStorage.setItem(K_PREMIUM_PUSH_KEY, clean); } catch (_) {}
-    APP.myPremiumPingHasKey = clean.startsWith("premium_");
-    return clean;
-  }
-
-  function getPremiumSeenRequestIds() {
+  async function loadPushoverPingInfo() {
     try {
-      const raw = GM_getValue(K_PREMIUM_PUSH_SEEN, "[]");
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr.map(String) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function markPremiumRequestPinged(requestId) {
-    const id = String(requestId || "").trim();
-    if (!id) return;
-    const next = [...new Set([...getPremiumSeenRequestIds(), id])].slice(-150);
-    GM_setValue(K_PREMIUM_PUSH_SEEN, JSON.stringify(next));
-  }
-
-  function premiumRequestAlreadyPinged(requestId) {
-    const id = String(requestId || "").trim();
-    if (!id) return false;
-    return getPremiumSeenRequestIds().includes(id);
-  }
-
-  async function sendPremiumPhonePing(req, reason = "New banking request") {
-    const premiumKey = getMyPremiumPushKey();
-    if (!premiumKey.startsWith("premium_")) {
-      return { ok: false, skipped: true, error: "No premium_ key saved in Settings." };
-    }
-
-    const requester = String(req?.requester_name || req?.name || req?.player_name || "Bank request").trim();
-    const note = String(req?.note || "").trim();
-    const fullBalance = note === FULL_BALANCE_NOTE;
-    const amountText = fullBalance ? "Full Balance" : money(req?.amount || 0);
-
-    const res = await fetch(`${APP.premiumPingAppUrl.replace(/\/$/, "")}/api/banking/request`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        premium_key: premiumKey,
-        requester_name: requester,
-        amount: amountText,
-        note: reason,
-        url: location.href,
-      }),
-    });
-
-    const json = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-    if (!res.ok && !json.error) json.error = `HTTP ${res.status}`;
-    return json;
-  }
-
-  async function pingPremiumPhoneOnlyIfNew(req, reason = "New banking request") {
-    const requestId = String(req?.id || req?.request_id || "").trim();
-    if (!requestId) return { ok: false, skipped: true, error: "Missing request id." };
-    if (premiumRequestAlreadyPinged(requestId)) return { ok: true, skipped: true, reason: "already pinged" };
-    markPremiumRequestPinged(requestId);
-    try {
-      const result = await sendPremiumPhonePing(req, reason);
-      return result;
+      const res = await gmRequest("GET", "/api/banker/pushover");
+      APP.pushoverPingUrl = String(res.install_url || APP.pushoverPingUrl || "https://pushover.net/");
+      APP.pushoverPingAppUrl = String(res.signup_url || res.app_url || APP.pushoverPingAppUrl || "https://pushover.net/");
+      APP.myPushoverPingHasKey = !!res.has_pushover;
+      APP.myPushoverPingIsSavedBanker = !!res.is_saved_banker;
+      return res;
     } catch (err) {
-      return { ok: false, error: String(err?.message || err || "Premium ping failed") };
+      return null;
     }
   }
 
-  async function loadPremiumPingInfo() {
-    const saved = getMyPremiumPushKey();
-    APP.myPremiumPingHasKey = saved.startsWith("premium_");
-    try {
-      const res = await gmRequest("GET", "/api/banker/premium-ping");
-      APP.premiumPingUrl = String(res.install_url || APP.premiumPingUrl || "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js");
-      APP.premiumPingAppUrl = String(res.signup_url || res.app_url || APP.premiumPingAppUrl || "https://torn-banking-push.onrender.com");
-      APP.myPremiumPingIsSavedBanker = !!res.is_saved_banker;
-      return { ...res, has_pushover: APP.myPremiumPingHasKey };
-    } catch (err) {
-      return { has_pushover: APP.myPremiumPingHasKey, signup_url: APP.premiumPingAppUrl, app_url: APP.premiumPingAppUrl, install_url: APP.premiumPingUrl };
-    }
-  }
-
-  function premiumPingAppUrl(info = null) {
-    const base = String((info && (info.signup_url || info.app_url)) || APP.premiumPingAppUrl || "https://torn-banking-push.onrender.com").trim();
+  function pushoverPingAppUrl(info = null) {
+    const base = String((info && (info.signup_url || info.app_url)) || APP.pushoverPingAppUrl || "https://pushover.net/").trim();
     try {
       const u = new URL(base);
       if (APP.me?.player_id) u.searchParams.set("torn_id", APP.me.player_id);
@@ -4060,8 +3973,8 @@
     }
   }
 
-  function premiumPingInstallUrl(info = null) {
-    return String((info && info.install_url) || APP.premiumPingUrl || "https://torn-banking-push.onrender.com/static/torn-banking-push-premium.user.js").trim();
+  function pushoverPingInstallUrl(info = null) {
+    return String((info && info.install_url) || APP.pushoverPingUrl || "https://pushover.net/").trim();
   }
 
   async function openUrlSafe(url) {
@@ -4072,46 +3985,39 @@
     }
   }
 
-  async function openPremiumPingApp() {
-    const info = await loadPremiumPingInfo();
-    openUrlSafe(premiumPingAppUrl(info));
+  async function openPushoverPingApp() {
+    const info = await loadPushoverPingInfo();
+    openUrlSafe(pushoverPingAppUrl(info));
   }
 
-  async function openPremiumPingInstall() {
-    const info = await loadPremiumPingInfo();
-    openUrlSafe(premiumPingInstallUrl(info));
+  async function openPushoverPingInstall() {
+    const info = await loadPushoverPingInfo();
+    openUrlSafe(pushoverPingInstallUrl(info));
   }
 
-  async function openPremiumPingSignup() {
-    return openPremiumPingApp();
+  async function openPushoverPingSignup() {
+    // Backwards-compatible name used by older click handlers: open the app, not the raw installer.
+    return openPushoverPingApp();
   }
 
-  async function saveMyPremiumPingKey() {
+  async function saveMyPushoverPingKey() {
     if (APP.busy) return;
     const key = String($("#fb-my-ping-key")?.value || "").trim();
-    if (!key.startsWith("premium_")) {
-      renderSettings("Paste your activated premium_ phone ping key first.");
+    if (!key) {
+      renderSettings("Paste your Pushover user/group key first.");
       return;
     }
-
     APP.busy = true;
     try {
-      setMyPremiumPushKey(key);
-      let msg = "Premium phone ping key saved.";
-      try {
-        const test = await sendPremiumPhonePing({ id: "settings-test-" + Date.now(), requester_name: APP.me?.name || "Test", amount: 1, note: "Premium key saved test" }, "Test ping from banker settings");
-        msg = test?.sent > 0 ? "Premium key saved. Test phone ping sent." : `Premium key saved, but test did not send: ${test?.warning || test?.error || "no enabled phone connected yet"}`;
-      } catch (err) {
-        msg = "Premium key saved. Test ping failed, so make sure phone alerts are enabled in the premium app.";
-      }
-      renderSettings(msg);
+      const res = await gmRequest("POST", "/api/banker/my-ping-key", { pushover_key: key });
+      await refreshAll(true);
+      renderSettings(res.test_ping_sent ? "Pushover phone key saved. Test ping sent." : "Pushover phone key saved. If no test arrived, check the key/app token.");
     } catch (err) {
       renderSettings(err.message || String(err));
     } finally {
       APP.busy = false;
     }
   }
-
 
   function renderLeadersTab(msg = "", preserveDraft = true) {
     const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
@@ -4180,7 +4086,7 @@
         <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Banker" value="${esc(draft.roleName)}">
         <label class="fb-label" style="margin-top:10px;">Role phone ping key optional</label>
         <input id="fb-leader-role-pushover" class="fb-input" placeholder="Optional shared Pushover/User key for this role" value="${esc(draft.rolePushoverKey)}">
-        <div class="fb-mini-note">Saved banker roles are stored in the backend database and survive script/app updates. Premium signup is not shown here anymore; bankers can install Premium Ping from the Banking page and save their own key in Settings.</div>
+        <div class="fb-mini-note">Saved banker roles are stored in the backend database and survive script/app updates. Pushover setup is on the Banking page and Settings. Saved banker roles survive updates.</div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
           <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
@@ -4285,21 +4191,20 @@
       </div>
 
       <div class="fb-box">
-        <div class="fb-request-title">📲 Premium Ping to Phone</div>
+        <div class="fb-request-title">📲 Pushover Phone Alerts</div>
         <div class="fb-small" style="margin-top:6px; line-height:1.45;">
-          Bankers can sign up for the premium phone ping app. Once activated, paste the key below and new bank requests will ping your phone when your faction gets a request.
+          Bankers can open your Pushover, activate phone alerts, then paste the key below. New bank requests will ping their phone when the faction gets a request.
         </div>
         <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-premium-ping-app" class="fb-btn blue" type="button">Open Premium App</button>
-          <button id="fb-premium-ping-install" class="fb-btn" type="button">Install / Update Script</button>
-          <span class="fb-pill ${APP.myPremiumPingHasKey ? "approved" : "pending"}">${APP.myPremiumPingHasKey ? "Premium phone ping saved" : "No premium key saved"}</span>
+          <button id="fb-pushover-ping-app" class="fb-btn blue" type="button">Open Pushover Setup</button>
+          <span class="fb-pill ${APP.myPushoverPingHasKey ? "approved" : "pending"}">${APP.myPushoverPingHasKey ? "Pushover active" : "No Pushover key saved"}</span>
         </div>
-        <label class="fb-label" style="margin-top:10px;">My activated phone ping key</label>
-        <input id="fb-my-ping-key" class="fb-input" placeholder="Paste your activated premium_ key here" value="${esc(getMyPremiumPushKey())}">
+        <label class="fb-label" style="margin-top:10px;">My Pushover user/group key</label>
+        <input id="fb-my-ping-key" class="fb-input" placeholder="Paste your Pushover User Key or Group Key here">
         <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-save-my-ping-key" class="fb-btn gold" type="button">Save My Phone Ping Key</button>
+          <button id="fb-save-my-ping-key" class="fb-btn gold" type="button">Save My Pushover Key</button>
         </div>
-        <div class="fb-mini-note">If PDA says the premium userscript already exists, it is installed already. Open TornPDA scripts to enable/update it, then paste your phone ping key here. Banker access is saved by faction role and survives updates.</div>
+        <div class="fb-mini-note">This button opens Pushover only. For Fries91/Wrath, the owner Pushover key can be used. Other factions need their own Pushover user/group key saved here. Banker access is saved by faction role and survives updates.</div>
       </div>
 
       <div class="fb-box fb-login-card">
@@ -4316,10 +4221,10 @@
       </div>
     `);
 
-    $("#fb-premium-ping-app")?.addEventListener("click", openPremiumPingApp);
-    $("#fb-premium-ping-install")?.addEventListener("click", openPremiumPingInstall);
-    $("#fb-save-my-ping-key")?.addEventListener("click", saveMyPremiumPingKey);
-    loadPremiumPingInfo();
+    $("#fb-pushover-ping-app")?.addEventListener("click", openPushoverPingApp);
+    $("#fb-pushover-ping-install")?.addEventListener("click", openPushoverPingInstall);
+    $("#fb-save-my-ping-key")?.addEventListener("click", saveMyPushoverPingKey);
+    loadPushoverPingInfo();
 
     $("#fb-save-key")?.addEventListener("click", () => {
       const keyInput = $("#fb-api-key")?.value?.trim() || "";
@@ -4821,17 +4726,6 @@
           // Ignore notification errors.
         }
       }
-    }
-
-    // Premium phone ping: only pings once per new request ID and only if this banker saved a premium_ key.
-    for (const req of fresh.slice(0, 3)) {
-      pingPremiumPhoneOnlyIfNew(req, "New faction bank request").then((result) => {
-        if (result && result.sent > 0) {
-          console.log("[Faction Bankers] Premium phone ping sent", result);
-        } else if (result && !result.skipped) {
-          console.log("[Faction Bankers] Premium phone ping not sent", result);
-        }
-      }).catch((err) => console.log("[Faction Bankers] Premium phone ping failed", err));
     }
 
     saveSeenPendingIds([...seen, ...fresh.map((r) => String(r.id))]);
