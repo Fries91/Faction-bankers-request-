@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.6.6-pushover-browser-open"
+APP_VERSION = "1.6.7-clean-core-fries-pushover"
 
 
 @app.errorhandler(Exception)
@@ -1171,13 +1171,12 @@ def is_wrath_like_request(item):
     return fid in ids
 
 def notification_target_keys_for_request(item):
-    """Return a de-duplicated list of Pushover keys for this request.
+    """Return Pushover targets for the request.
 
-    Priority:
-    1. Pushover keys saved on the manual banker entries in this faction's Leaders tab.
-    2. Your Render/global Pushover key only for OWNER_PUSHOVER_FACTION_IDS.
-
-    Roles are intentionally not used for banker access or phone pings in v1.4.5.
+    Clean-core mode: no signup/key UI for other factions. Only Fries91/owner
+    configured Pushover keys are used, and only for OWNER_PUSHOVER_FACTION_IDS.
+    Other factions still get in-app coin alerts and banker boards, but no phone
+    ping unless the owner explicitly adds their faction id to OWNER_PUSHOVER_FACTION_IDS.
     """
     keys = []
     seen = set()
@@ -1188,17 +1187,6 @@ def notification_target_keys_for_request(item):
             seen.add(k)
             keys.append(k)
 
-    for k in manual_pushover_keys_for_request(item):
-        add_key(k)
-
-    # Role-based banker setup: leaders can add banker faction roles.
-    # Role-level phone keys are optional, and bankers can still save their
-    # own Pushover key in Settings, which creates/updates their saved entry.
-    for k in role_pushover_keys_for_faction((item or {}).get("faction_id")):
-        add_key(k)
-
-    # Your faction can use your Render/global Pushover key.
-    # Outside factions do not get this key; they must save their own Pushover user/group key.
     if should_ping_global_pushover_for_item(item) or is_wrath_like_request(item):
         for k in configured_pushover_keys():
             add_key(k)
@@ -1302,9 +1290,9 @@ def row_to_item(row):
 
 def completed_history_limit():
     try:
-        return max(0, int(os.getenv("COMPLETED_HISTORY_LIMIT", "5")))
+        return max(0, int(os.getenv("COMPLETED_HISTORY_LIMIT", "3")))
     except Exception:
-        return 5
+        return 3
 
 
 def trim_completed_history_items(items):
@@ -2316,6 +2304,13 @@ def create_request():
     if amount <= 0:
         return jsonify({"ok": False, "error": "Enter a valid amount"}), 400
 
+    try:
+        known_balance = int(str(data.get("known_balance") or 0).replace(",", "").replace("$", "").strip())
+    except Exception:
+        known_balance = 0
+    if known_balance > 0 and amount > known_balance:
+        return jsonify({"ok": False, "error": f"Request cannot be more than your synced balance (${known_balance:,})."}), 400
+
     if len(note) > 500:
         note = note[:500]
 
@@ -2955,6 +2950,13 @@ def create_request_from_chat_command():
     if amount <= 0:
         return jsonify({"ok": False, "error": "Use /banker 25m, /banker 25000000, or /banker full"}), 400
 
+    try:
+        known_balance = int(str(data.get("known_balance") or 0).replace(",", "").replace("$", "").strip())
+    except Exception:
+        known_balance = 0
+    if known_balance > 0 and amount > known_balance:
+        return jsonify({"ok": False, "error": f"Request cannot be more than your synced balance (${known_balance:,})."}), 400
+
     if len(note) > 500:
         note = note[:500]
 
@@ -3211,6 +3213,32 @@ def list_requests_lite():
     items = trim_completed_history_items([row_to_item(row) for row in rows])
     return jsonify({"ok": True, "items": items, "count": len(items), "mode": "postgres-lite"})
 
+
+
+@app.get("/api/banker/admin/overview")
+def banker_admin_overview():
+    db_ok, db_msg = db_ready()
+    user, resp, code = require_user()
+    if resp:
+        return resp, code
+    if not user.get("is_admin"):
+        return jsonify({"ok": False, "error": "Admin only"}), 403
+    out = {"ok": True, "app_version": APP_VERSION, "db_ok": bool(db_ok), "db_warning": db_msg or "", "totals": {}}
+    if not db_ok:
+        active = [r for r in MEMORY_REQUESTS if str(r.get("status") or "pending").lower() in {"pending", "approved"}]
+        comp = [r for r in MEMORY_REQUESTS if str(r.get("status") or "").lower() == "complete"]
+        out["totals"] = {"open_requests": len(active), "completed_kept": len(comp), "memory_rows": len(MEMORY_REQUESTS)}
+        return jsonify(out)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM banker_requests WHERE status IN ('pending','approved') AND is_active = TRUE")
+            open_n = int((cur.fetchone() or {}).get("n") or 0)
+            cur.execute("SELECT COUNT(*) AS n FROM banker_requests WHERE status = 'complete'")
+            comp_n = int((cur.fetchone() or {}).get("n") or 0)
+            cur.execute("SELECT COUNT(DISTINCT faction_id) AS n FROM faction_banker_roles WHERE is_active = TRUE")
+            faction_n = int((cur.fetchone() or {}).get("n") or 0)
+    out["totals"] = {"open_requests": open_n, "completed_kept": comp_n, "factions_with_roles": faction_n}
+    return jsonify(out)
 
 
 if __name__ == "__main__":
