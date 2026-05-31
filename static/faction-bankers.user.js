@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.6.7-clean-core-fries-pushover";
+  const FB_BUILD = "1.6.8-complete-ping-history-fries-pushover";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -2996,7 +2996,7 @@
         ? `<div class="fb-box"><strong style="color:#ffd36a;">Open Requests</strong><div class="fb-small">Pending/approved requests stay here and keep the coin lit until a banker marks complete.</div></div>${pending.map(requestCard).join("")}`
         : `<div class="fb-box"><div class="fb-muted">No open requests.</div></div>`,
       others.length
-        ? `<div class="fb-box"><strong>Recently Completed / Last 3</strong><div class="fb-small">Shows the newest 3 completed payouts so nobody double-pays.</div></div>${others.slice(0, 3).map(requestCard).join("")}`
+        ? `<div class="fb-box"><strong>Recently Completed / Last 3</strong><div class="fb-small">Shows who completed each payout so bankers do not double-pay.</div></div>${others.slice(0, 3).map(requestCard).join("")}`
         : "",
     ].join("");
 
@@ -3842,7 +3842,7 @@
         </div>
 
         ${String(r.note || "") === FULL_BALANCE_NOTE ? `<div class="fb-request-note">Full balance requested.</div>` : ""}
-        ${status === "complete" && r.handled_by_name ? `<div class="fb-request-note" style="color:#8dffac;">Paid/cleared by ${esc(r.handled_by_name)}. Do not pay this request again.</div>` : ""}
+        ${status === "complete" && r.handled_by_name ? `<div class="fb-request-note" style="color:#8dffac;font-weight:900;border:1px solid rgba(141,255,172,.28);border-radius:10px;padding:8px;background:rgba(30,130,75,.12);">✅ Completed by ${esc(r.handled_by_name)}${r.handled_at ? ` • ${esc(r.handled_at)}` : ""}. Do not pay this request again.</div>` : ""}
 
         ${preferredBanker}
         ${handledBy}
@@ -4443,7 +4443,8 @@
         const body = $("#fb-body");
         if (body) {
           const who = res?.item?.handled_by_name ? ` by ${esc(res.item.handled_by_name)}` : "";
-          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)}${who}. Other bankers can see this in Recently Completed.</div></div>`);
+          const pingText = isCompleteAction ? (res?.completion_pushover_sent ? " Completion phone ping sent." : " Completion phone ping not confirmed, but history is saved.") : "";
+          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)}${who}. Other bankers can see this in Recently Completed.${esc(pingText)}</div></div>`);
         }
       } else {
         renderBody(activeTab());
