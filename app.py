@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
-APP_VERSION = "1.6.7-clean-core-fries-pushover"
+APP_VERSION = "1.6.8-complete-ping-history"
 
 
 @app.errorhandler(Exception)
@@ -1261,6 +1261,36 @@ def send_bank_request_ping_debug(item):
         "results": results,
         "sent": any(bool(r.get("ok")) for r in results),
     }
+
+
+def send_bank_completion_ping_debug(item):
+    """Notify configured phone targets when a banker marks a request complete."""
+    target_keys = notification_target_keys_for_request(item)
+    results = []
+    is_full_balance = str((item or {}).get("note") or "") == "__FULL_BALANCE_REQUEST__"
+    amount_text = "Full Balance" if is_full_balance else f"${int((item or {}).get('amount') or 0):,}"
+    request_url = f"https://www.torn.com/factions.php?step=your&fb_bank_req={(item or {}).get('id')}#/tab=controls"
+    message = (
+        f"Completed by: {(item or {}).get('handled_by_name') or 'Banker'} [{(item or {}).get('handled_by_id') or ''}]\n"
+        f"Player paid: {(item or {}).get('requester_name')} [{(item or {}).get('requester_id')}]\n"
+        f"Amount: {amount_text}\n"
+        f"Faction: {(item or {}).get('faction_name')} [{(item or {}).get('faction_id')}]\n"
+        f"Request ID: #{(item or {}).get('id')}"
+    )
+    for k in target_keys:
+        results.append(send_pushover_to_key_detailed(k, "✅ Torn Bank Request Completed", message, request_url))
+    return {
+        "target_key_count": len(target_keys),
+        "target_keys_masked": [mask_key(k) for k in target_keys],
+        "global_allowed": should_ping_global_pushover_for_item(item) or is_wrath_like_request(item),
+        "global_key_count": len(configured_pushover_keys()),
+        "results": results,
+        "sent": any(bool(r.get("ok")) for r in results),
+    }
+
+
+def send_bank_completion_ping(item):
+    return bool(send_bank_completion_ping_debug(item).get("sent"))
 
 
 def row_to_item(row):
@@ -2546,9 +2576,11 @@ def banker_action(req_id, action):
             }), 403
         item = memory_update_request(req_id, user, new_status, bank_note)
         pruned = 0
-        if new_status == "complete":
+        completion_debug = {"sent": False, "target_key_count": 0}
+        if new_status == "complete" and item:
             pruned = memory_prune_completed_history(item.get("faction_id"))
-        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "access": reason, "warning": db_msg, "completed_history_limit": completed_history_limit(), "pruned_completed": pruned})
+            completion_debug = send_bank_completion_ping_debug(item)
+        return jsonify({"ok": True, "item": item, "removed_from_active": not item.get("is_active", True), "mode": "memory", "access": reason, "warning": db_msg, "completed_history_limit": completed_history_limit(), "pruned_completed": pruned, "completion_pushover_sent": bool(completion_debug.get("sent")), "completion_notify_debug": completion_debug})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -2633,13 +2665,20 @@ def banker_action(req_id, action):
                 pruned_completed = prune_completed_history_db(cur, row.get("faction_id"))
         conn.commit()
 
+    item_out = row_to_item(row)
+    completion_debug = {"sent": False, "target_key_count": 0}
+    if new_status == "complete":
+        completion_debug = send_bank_completion_ping_debug(item_out)
+
     return jsonify({
         "ok": True,
-        "item": row_to_item(row),
+        "item": item_out,
         "removed_from_active": not is_active,
         "access": reason,
         "completed_history_limit": completed_history_limit(),
         "pruned_completed": pruned_completed,
+        "completion_pushover_sent": bool(completion_debug.get("sent")),
+        "completion_notify_debug": completion_debug,
     })
 
 @app.post("/api/banker/clear-completed")
