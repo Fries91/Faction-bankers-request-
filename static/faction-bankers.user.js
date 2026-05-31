@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.6.6
-// @description  Faction vault banking with fast DB-backed coin alerts, chat-to-request capture, Banking-tab board, Pushover pings, and Torn-friendly settings/login.
+// @version      1.6.7
+// @description  Faction vault banking with role-based bankers, fast coin alerts, chat command capture, user balance sync, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -23,7 +23,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.6.6-pushover-browser-open";
+  const FB_BUILD = "1.6.7-clean-core-fries-pushover";
   const COIN_POLL_VISIBLE_MS = 5000;
   const COIN_POLL_HIDDEN_MS = 20000;
   const BOARD_REFRESH_OPEN_MS = 45000;
@@ -2152,11 +2152,20 @@
       return [{ id: "settings", label: "Settings / Login" }];
     }
 
+    if (APP.me?.is_admin) {
+      return [
+        { id: "banker", label: "Banking" },
+        { id: "user", label: "User" },
+        { id: "leaders", label: "Leaders" },
+        { id: "settings", label: "Settings" },
+        { id: "admin", label: "Admin" },
+      ];
+    }
+
     if (isLeaderUiUser()) {
       return [
         { id: "banker", label: "Banking" },
-        { id: "balance", label: "Balance" },
-        { id: "commands", label: "Commands" },
+        { id: "user", label: "User" },
         { id: "leaders", label: "Leaders" },
         { id: "settings", label: "Settings" },
       ];
@@ -2165,15 +2174,13 @@
     if (isBankerUiUser()) {
       return [
         { id: "banker", label: "Banking" },
-        { id: "balance", label: "Balance" },
-        { id: "commands", label: "Commands" },
+        { id: "user", label: "User" },
         { id: "settings", label: "Settings" },
       ];
     }
 
     return [
-      { id: "balance", label: "Balance" },
-      { id: "commands", label: "Commands" },
+      { id: "user", label: "User" },
       { id: "settings", label: "Settings" },
     ];
   }
@@ -2182,7 +2189,7 @@
     const hasKey = !!GM_getValue(K_API_KEY, "");
     if (!hasKey || !APP.me) return "settings";
     if (isBankerUiUser() || isLeaderUiUser()) return "banker";
-    return "commands";
+    return "user";
   }
 
   function isTabAllowed(tab) {
@@ -2756,10 +2763,51 @@
 
     if (tab === "commands" || tab === "request") renderCommandsTab();
     if (tab === "balance") renderBalanceTab();
+    if (tab === "user") renderUserTab();
     if (tab === "my") renderMyTab();
     if (tab === "banker") renderBankerTab();
     if (tab === "leaders") renderLeadersTab();
     if (tab === "settings") renderSettings();
+    if (tab === "admin") renderAdminTab();
+  }
+
+  function renderUserTab(msg = "") {
+    const has = Number.isFinite(Number(APP.balanceAmount));
+    const label = has ? money(APP.balanceAmount) : esc(APP.balanceText || "Balance unavailable");
+    const src = APP.balanceSource ? `Source: ${APP.balanceSource}` : "Use Sync Balance or Enter Manually.";
+    const updated = APP.balanceUpdatedAt ? new Date(APP.balanceUpdatedAt).toLocaleTimeString() : "Not synced this session";
+    setBody(`
+      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") || String(msg).toLowerCase().includes("synced") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
+      <div class="fb-box fb-hero-card">
+        <div class="fb-row fb-space"><div><div class="fb-request-title">👤 User Panel</div><div class="fb-small">Sync your faction-bank balance and use basic <code>/banker</code> commands.</div></div><span class="fb-pill ${has ? "approved" : "pending"}">${has ? "Balance Ready" : "Needs Sync"}</span></div>
+        <div style="font-size:26px;font-weight:900;color:#ffd36a;margin-top:12px;">${label}</div>
+        <div class="fb-small" style="margin-top:4px;">${esc(src)} • ${esc(updated)}</div>
+        <div class="fb-row" style="margin-top:10px;"><button id="fb-user-balance-sync" class="fb-btn blue" type="button">Sync Balance</button><button id="fb-user-balance-refresh" class="fb-btn" type="button">Refresh Here</button><button id="fb-user-balance-manual" class="fb-btn gold" type="button">Enter Manually</button></div>
+      </div>
+      <div class="fb-box fb-command-guide">
+        <div class="fb-request-title">🪙 Basic Commands</div>
+        <div class="fb-flow-grid" style="margin-top:10px;">
+          <div class="fb-flow-card"><b>Request money</b><span><code>/banker 25m</code><br><code>/banker 500k</code><br>Captured from faction chat.</span></div>
+          <div class="fb-flow-card"><b>Full balance</b><span><code>/banker full</code><br><code>/banker balance</code><br>Uses synced balance only.</span></div>
+          <div class="fb-flow-card"><b>Check request</b><span><code>/banker status</code><br><code>/banker mine</code></span></div>
+          <div class="fb-flow-card"><b>Cancel / change</b><span><code>/banker cancel</code><br><code>/banker change 50m</code></span></div>
+        </div>
+        <div class="fb-mini-note">Requests cannot be more than your synced balance. If your balance is missing, sync or enter it manually first.</div>
+      </div>
+    `);
+    $("#fb-user-balance-sync")?.addEventListener("click", openBalancePageForCapture);
+    $("#fb-user-balance-refresh")?.addEventListener("click", async () => { await loadFactionBalance(true); renderUserTab(APP.balanceAmount !== null ? "Balance synced." : "Could not see balance here. Try Sync Balance or Enter Manually."); });
+    $("#fb-user-balance-manual")?.addEventListener("click", () => { promptManualBalance(); renderUserTab(APP.balanceAmount !== null ? "Manual balance saved." : ""); });
+  }
+
+  async function renderAdminTab() {
+    if (!APP.me?.is_admin) { setBody(`<div class="fb-box"><div class="fb-error">Admin only.</div></div>`); return; }
+    setBody(`<div class="fb-box"><div class="fb-muted">Loading admin overview...</div></div>`);
+    try {
+      const res = await gmRequest("GET", "/api/banker/admin/overview");
+      const t = res.totals || {};
+      setBody(`<div class="fb-box fb-hero-card"><div class="fb-request-title">🛡️ Admin</div><div class="fb-small">Version: ${esc(res.app_version || FB_BUILD)}</div><div class="fb-small">DB: ${res.db_ok ? "connected" : esc(res.db_warning || "fallback")}</div></div><div class="fb-box"><div class="fb-flow-grid"><div class="fb-flow-card"><b>Open requests</b><span>${esc(t.open_requests ?? 0)}</span></div><div class="fb-flow-card"><b>Completed kept</b><span>${esc(t.completed_kept ?? 0)}</span></div><div class="fb-flow-card"><b>Factions with roles</b><span>${esc(t.factions_with_roles ?? 0)}</span></div></div></div>`);
+    } catch (err) { setBody(`<div class="fb-box"><div class="fb-error">${esc(err.message || err)}</div></div>`); }
   }
 
   function renderCommandsTab(msg = "") {
@@ -2795,7 +2843,7 @@
 
         <div class="fb-small" style="margin-top:10px; line-height:1.45;">
           <b>Bankers:</b> open the Banking tab to see pending requests and mark them complete.<br>
-          <b>Leaders:</b> open Leaders to add banker names, Torn IDs, and optional Pushover keys.
+          <b>Leaders:</b> open Leaders to add exact faction roles that count as bankers.
         </div>
       </div>
     `);
@@ -2948,7 +2996,7 @@
         ? `<div class="fb-box"><strong style="color:#ffd36a;">Open Requests</strong><div class="fb-small">Pending/approved requests stay here and keep the coin lit until a banker marks complete.</div></div>${pending.map(requestCard).join("")}`
         : `<div class="fb-box"><div class="fb-muted">No open requests.</div></div>`,
       others.length
-        ? `<div class="fb-box"><strong>Recently Completed / Last 5</strong><div class="fb-small">Shows the newest 5 completed payouts so nobody double-pays.</div></div>${others.slice(0, 5).map(requestCard).join("")}`
+        ? `<div class="fb-box"><strong>Recently Completed / Last 3</strong><div class="fb-small">Shows the newest 3 completed payouts so nobody double-pays.</div></div>${others.slice(0, 3).map(requestCard).join("")}`
         : "",
     ].join("");
 
@@ -2964,30 +3012,10 @@
         ${bankerStatusPanel()}
       </div>
 
-      <div class="fb-box fb-pushover-banker-box">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">📲 Pushover Phone Alerts</div>
-            <div class="fb-small">Open Pushover to subscribe or set up phone alerts. Your faction can use the owner Pushover setup only when allowed; other factions must use their own Pushover key/group.</div>
-          </div>
-        </div>
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-banker-pushover-app" class="fb-btn blue" type="button">🔔 Pushover Setup</button>
-        </div>
-        <div class="fb-mini-note">Status: <span id="fb-banker-pushover-status">${APP.myPushoverPingHasKey ? "Pushover key saved" : "No Pushover key saved yet"}</span>. Opens your exact Pushover setup/subscription page. Save the Pushover user/group key in Settings after setup.</div>
-      </div>
-
       ${cards}
     `);
 
     $("#fb-refresh-banker")?.addEventListener("click", () => refreshAll(true));
-    $("#fb-banker-pushover-app")?.addEventListener("click", openPushoverPingApp);
-    $("#fb-banker-pushover-install")?.addEventListener("click", openPushoverPingInstall);
-    loadPushoverPingInfo().then(() => {
-      const el = $("#fb-banker-pushover-status");
-      if (el) el.textContent = APP.myPushoverPingHasKey ? "Pushover key saved" : "No Pushover key saved yet";
-    });
-
     $$("[data-fb-action]").forEach((btn) => {
       btn.addEventListener("click", () => bankerAction(btn.dataset.id, btn.dataset.fbAction));
     });
@@ -3889,8 +3917,7 @@
   async function addLeaderRoleName() {
     if (APP.busy) return;
     const roleName = String($("#fb-leader-role-name")?.value || "").trim();
-    const rolePushoverKey = String($("#fb-leader-role-pushover")?.value || "").trim();
-
+    
     if (!roleName) {
       renderLeadersTab(`<div class="fb-error">Enter the faction role name that should count as a banker.</div>`);
       return;
@@ -3898,11 +3925,11 @@
 
     APP.busy = true;
     try {
-      const res = await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName, pushover_key: rolePushoverKey });
+      const res = await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName });
       await loadLeaderBankers();
       APP.bankers = [];
       mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that saved role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`, false);
+      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that saved role counts as a banker.</div>`, false);
     } catch (err) {
       renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -3929,8 +3956,7 @@
   function getLeaderBankerDraft() {
     return {
       roleName: String($("#fb-leader-role-name")?.value || "").trim(),
-      rolePushoverKey: String($("#fb-leader-role-pushover")?.value || "").trim(),
-    };
+          };
   }
 
   function isLeaderBankerDraftActive() {
@@ -3941,7 +3967,7 @@
       active.matches("#fb-leader-role-pushover")
     )) return true;
     const d = getLeaderBankerDraft();
-    return !!(d.roleName || d.rolePushoverKey);
+    return !!(d.roleName);
   }
 
 
@@ -4018,7 +4044,7 @@
 
   function renderLeadersTab(msg = "", preserveDraft = true) {
     const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
-    const draft = preserveDraft ? getLeaderBankerDraft() : { roleName: "", rolePushoverKey: "" };
+    const draft = preserveDraft ? getLeaderBankerDraft() : { roleName: "" };
 
     if (!canManage) {
       setBody(`
@@ -4039,7 +4065,7 @@
         <div class="fb-row fb-space">
           <div>
             <div class="fb-request-title">${esc(r.role_name || "Banker role")}</div>
-            <div class="fb-small">Any faction member with this exact role gets the coin alert + Banking board.${r.has_pushover ? " • role phone ping key saved" : ""}</div>
+            <div class="fb-small">Any faction member with this exact role gets the coin alert + Banking board.</div>
           </div>
           <button class="fb-btn red" data-leader-role-remove="${esc(r.role_name || "")}" type="button">Remove</button>
         </div>
@@ -4081,9 +4107,7 @@
         <div class="fb-small" style="margin-top:5px;">Use the exact role name shown in your faction. Example: Banker, Treasurer, Vault Keeper.</div>
         <label class="fb-label" style="margin-top:10px;">Faction banker role name</label>
         <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Banker" value="${esc(draft.roleName)}">
-        <label class="fb-label" style="margin-top:10px;">Role phone ping key optional</label>
-        <input id="fb-leader-role-pushover" class="fb-input" placeholder="Optional shared Pushover/User key for this role" value="${esc(draft.rolePushoverKey)}">
-        <div class="fb-mini-note">Saved banker roles are stored in the backend database and survive script/app updates. Pushover setup is on the Banking page and Settings. Saved banker roles survive updates.</div>
+        <div class="fb-mini-note">Saved banker roles are stored in the backend database and survive script/app updates. Each faction can only manage and see its own roles and requests.</div>
         <div class="fb-row" style="margin-top:10px;">
           <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
           <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
@@ -4095,14 +4119,6 @@
         <div class="fb-mini-note">These roles for ${esc(factionName)} control who gets banker-board access and red coin alerts.</div>
       </div>
       ${roleRows}
-
-      ${savedKeyRows ? `
-        <div class="fb-box">
-          <div class="fb-request-title">Saved banker phone keys</div>
-          <div class="fb-mini-note">These are optional phone ping keys saved by bankers or leaders. Removing a key here does not remove the banker role.</div>
-        </div>
-        ${savedKeyRows}
-      ` : ""}
     `);
 
     $("#fb-leader-role-add")?.addEventListener("click", addLeaderRoleName);
@@ -4154,7 +4170,7 @@
           <li>It does not auto-pay, auto-click Torn buttons, or move money by itself.</li>
           <li>Bankers still manually review requests and manually complete payouts in Torn.</li>
           <li>Members are responsible for making accurate requests with <code>/banker amount</code>.</li>
-          <li>Faction leaders/co-leaders control their own banker list and optional Pushover keys in the Leaders tab.</li>
+          <li>Faction leaders/co-leaders control their own banker roles in the Leaders tab.</li>
           <li>Completed requests are shown so bankers can avoid double-paying.</li>
         </ul>
       </div>
@@ -4166,7 +4182,7 @@
           <li>Uses the smallest useful key type: a limited API key.</li>
           <li>Does not ask for your Torn password.</li>
           <li>Does not automate gameplay actions or payments.</li>
-          <li>Pushover is only used to notify configured bankers that a request exists.</li>
+          <li>For Fries91's allowed faction only, Pushover can notify that a request exists. Other factions still use coin alerts and their own board.</li>
         </ul>
       </div>
 
@@ -4187,23 +4203,6 @@
         </ul>
       </div>
 
-      <div class="fb-box">
-        <div class="fb-request-title">📲 Pushover Phone Alerts</div>
-        <div class="fb-small" style="margin-top:6px; line-height:1.45;">
-          Bankers can open your Pushover, activate phone alerts, then paste the key below. New bank requests will ping their phone when the faction gets a request.
-        </div>
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-pushover-ping-app" class="fb-btn blue" type="button">Open Pushover Setup</button>
-          <span class="fb-pill ${APP.myPushoverPingHasKey ? "approved" : "pending"}">${APP.myPushoverPingHasKey ? "Pushover active" : "No Pushover key saved"}</span>
-        </div>
-        <label class="fb-label" style="margin-top:10px;">My Pushover user/group key</label>
-        <input id="fb-my-ping-key" class="fb-input" placeholder="Paste your Pushover User Key or Group Key here">
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-save-my-ping-key" class="fb-btn gold" type="button">Save My Pushover Key</button>
-        </div>
-        <div class="fb-mini-note">This button opens Pushover only. For Fries91/Wrath, the owner Pushover key can be used. Other factions need their own Pushover user/group key saved here. Banker access is saved by faction role and survives updates.</div>
-      </div>
-
       <div class="fb-box fb-login-card">
         <div class="fb-request-title">Login</div>
         <div class="fb-small" style="margin-top:4px;">Paste your Torn limited API key here, save it, then tap Test Login.</div>
@@ -4217,11 +4216,6 @@
         <div class="fb-mini-note">Backend: <span style="color:#ffd36a;">${esc(BANKER_API_BASE)}</span></div>
       </div>
     `);
-
-    $("#fb-pushover-ping-app")?.addEventListener("click", openPushoverPingApp);
-    $("#fb-pushover-ping-install")?.addEventListener("click", openPushoverPingInstall);
-    $("#fb-save-my-ping-key")?.addEventListener("click", saveMyPushoverPingKey);
-    loadPushoverPingInfo();
 
     $("#fb-save-key")?.addEventListener("click", () => {
       const keyInput = $("#fb-api-key")?.value?.trim() || "";
@@ -4277,6 +4271,7 @@
     try {
       const res = await gmRequest("POST", "/api/banker/requests", {
         amount: detectedFullBalance,
+        known_balance: detectedFullBalance,
         note: `Full balance requested: ${money(detectedFullBalance)}`,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
@@ -4328,6 +4323,11 @@
       if (status) status.textContent = "Enter a valid amount";
       return;
     }
+    const knownBalance = Number(APP.balanceAmount || 0);
+    if (knownBalance > 0 && amount > knownBalance) {
+      if (status) status.textContent = `Request cannot be more than your synced balance ${money(knownBalance)}`;
+      return;
+    }
 
     APP.busy = true;
     if (status) status.textContent = "Sending request...";
@@ -4335,6 +4335,7 @@
     try {
       const res = await gmRequest("POST", "/api/banker/requests", {
         amount,
+        known_balance: Number(APP.balanceAmount || 0),
         note,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
@@ -4370,6 +4371,11 @@
       renderRequestTab(`<div class="fb-error">Enter a valid amount.</div>`);
       return;
     }
+    const knownBalance = Number(APP.balanceAmount || 0);
+    if (knownBalance > 0 && amount > knownBalance) {
+      renderRequestTab(`<div class="fb-error">Request cannot be more than your synced balance ${money(knownBalance)}.</div>`);
+      return;
+    }
 
     APP.busy = true;
     renderRequestTab(`<div class="fb-muted">Sending request...</div>`);
@@ -4377,6 +4383,7 @@
     try {
       const res = await gmRequest("POST", "/api/banker/requests", {
         amount,
+        known_balance: Number(APP.balanceAmount || 0),
         note,
         target_faction_id: targetFactionId,
         target_banker_id: targetBankerId,
@@ -4385,10 +4392,7 @@
       afterRequestCreatedNotifyBankers(res?.item, amount);
       GM_setValue(K_TARGET_FACTION, targetFactionId);
       await refreshAll(true);
-      const pingMsg = res && res.pushover_sent === false
-        ? `<div class="fb-error" style="margin-top:6px;">Request saved, but Pushover did not confirm. Check Render env PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN, or add banker Pushover keys in Leaders.</div>`
-        : `<div class="fb-success" style="margin-top:6px;">Phone ping sent/queued.</div>`;
-      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>${pingMsg}`);
+      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>`);
     } catch (err) {
       renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
     } finally {
@@ -5255,8 +5259,14 @@
 
     try {
       if (!APP.me) APP.me = await gmRequest("GET", "/api/banker/me");
+      const knownBalance = Number(APP.balanceAmount || 0);
+      if (amount > 0 && knownBalance > 0 && amount > knownBalance) {
+        showPayNotice(`Request blocked: ${money(amount)} is more than your synced balance ${money(knownBalance)}.`);
+        FB_CHAT_COMMAND_BUSY = false;
+        return true;
+      }
       showPayNotice("🪙 Processing /banker command...");
-      const res = await gmRequest("POST", "/api/banker/chat-command", { command_text: text, amount });
+      const res = await gmRequest("POST", "/api/banker/chat-command", { command_text: text, amount, known_balance: knownBalance });
 
       if (res && res.item) {
         if (res.action === "canceled") {
