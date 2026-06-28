@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.6.7
-// @description  Faction vault banking with role-based bankers, fast coin alerts, chat command capture, user balance sync, and Torn-friendly settings/login.
+// @version      1.3.8
+// @description  Faction vault banking with strict /banker chat commands, banker board, leader role setup, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -13,8 +13,6 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      faction-bankers-request.onrender.com
-// @connect      https://faction-bankers-request.onrender.com/*
-// @connect      *.onrender.com
 // @connect      api.torn.com
 // @connect      *
 // ==/UserScript==
@@ -23,10 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.6.8-complete-ping-history-fries-pushover";
-  const COIN_POLL_VISIBLE_MS = 5000;
-  const COIN_POLL_HIDDEN_MS = 20000;
-  const BOARD_REFRESH_OPEN_MS = 45000;
+  const FB_BUILD = "1.3.8-dashboard-remake";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -37,7 +32,6 @@
   const K_API_KEY = "fb_api_key_v1";
   const K_OPEN = "fb_overlay_open_v1";
   const K_SEEN_PENDING = "fb_seen_pending_ids_v1";
-  const K_REQUEST_CACHE = "fb_request_board_cache_v1";
   const K_TARGET_FACTION = "fb_target_faction_v1";
   const K_PAY_PREFILL = "fb_pay_prefill_v1";
   const K_SCROLL_TO_BANK = "fb_scroll_to_bank_box_v1";
@@ -45,13 +39,9 @@
   const K_BALANCE_CAPTURE = "fb_balance_capture_pending_v1";
   const K_MANUAL_BALANCE_AMOUNT = "fb_manual_personal_balance_amount_v1";
   const K_MANUAL_BALANCE_TEXT = "fb_manual_personal_balance_text_v1";
-  const K_LAST_BALANCE_AMOUNT = "fb_last_personal_balance_amount_v3";
-  const K_LAST_BALANCE_TEXT = "fb_last_personal_balance_text_v3";
-  const K_LAST_BALANCE_SOURCE = "fb_last_personal_balance_source_v3";
-  const K_LAST_BALANCE_TS = "fb_last_personal_balance_ts_v3";
 
-  // Role banker mode: leaders add exact faction role names for their own faction.
-  // Manual rows remain only for optional saved phone ping keys.
+  // Dynamic role mode: no hard-coded faction list.
+  // The backend uses the logged-in player's own faction and finds bankers by faction role.
   const DEFAULT_FACTIONS = [];
 
   const APP = {
@@ -70,13 +60,6 @@
     balanceSource: "",
     balanceUpdatedAt: 0,
     pendingCount: 0,
-    lastInbox: null,
-    lastInboxTs: 0,
-    lastHeaderError: "",
-    pushoverPingUrl: "https://pushover.net/",
-    pushoverPingAppUrl: "https://pushover.net/",
-    myPushoverPingHasKey: false,
-    myPushoverPingIsSavedBanker: false,
     busy: false,
     open: false,
     lastLoad: 0,
@@ -136,71 +119,11 @@
     return location.href.includes("profiles.php") || location.href.includes("/profiles.php");
   }
 
-  async function fetchFallbackRequest(method, path, body) {
-    // PDA/WebView fallback: avoid custom headers and application/json preflight.
-    // Put the Torn key on the query string and send POST body as text/plain JSON.
-    const key = GM_getValue(K_API_KEY, "");
-    const joiner = path.includes("?") ? "&" : "?";
-    const safePath = key ? `${path}${joiner}key=${encodeURIComponent(key)}&pda_fallback=1` : `${path}${joiner}pda_fallback=1`;
-    const url = BANKER_API_BASE.replace(/\/$/, "") + safePath;
-    const opts = {
-      method,
-      mode: "cors",
-      cache: "no-store",
-      headers: {},
-    };
-    if (body) {
-      opts.headers["Content-Type"] = "text/plain;charset=UTF-8";
-      opts.body = JSON.stringify(body);
-    }
-
-    const res = await fetch(url, opts);
-    const raw = await res.text();
-    let data = {};
-    try {
-      data = JSON.parse(raw || "{}");
-    } catch {
-      const clean = String(raw || "")
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 180);
-      data = { ok: false, error: clean || "Render returned a non-JSON response." };
-    }
-
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    return data;
-  }
-
   function gmRequest(method, path, body) {
-    const url = BANKER_API_BASE.replace(/\/$/, "") + path;
-
-    // PDA sometimes throws GM_xmlhttpRequest "Network error" even when normal
-    // browser fetch can reach Render. Try GM first, then fetch before failing.
-    if (typeof GM_xmlhttpRequest !== "function") {
-      return fetchFallbackRequest(method, path, body);
-    }
-
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const failViaFetch = (primaryMessage) => {
-        if (settled) return;
-        fetchFallbackRequest(method, path, body)
-          .then((data) => {
-            settled = true;
-            resolve(data);
-          })
-          .catch((fetchErr) => {
-            settled = true;
-            reject(new Error(`${primaryMessage}; fetch fallback failed: ${String(fetchErr?.message || fetchErr || "unknown").slice(0, 120)}`));
-          });
-      };
-
       GM_xmlhttpRequest({
         method,
-        url,
+        url: BANKER_API_BASE.replace(/\/$/, "") + path,
         headers: {
           "Content-Type": "application/json",
           "X-Torn-Key": GM_getValue(K_API_KEY, ""),
@@ -208,7 +131,6 @@
         data: body ? JSON.stringify(body) : undefined,
         timeout: 45000,
         onload: (res) => {
-          if (settled) return;
           let data = {};
           try {
             data = JSON.parse(res.responseText || "{}");
@@ -224,15 +146,14 @@
             data = { ok: false, error: (res.status >= 500 ? "Render backend 500. Replace/redeploy app.py or check DATABASE_URL. Details: " : "") + (clean || "Render returned a non-JSON error. Check app.py deploy logs.") };
           }
 
-          settled = true;
           if (res.status >= 200 && res.status < 300) {
             resolve(data);
           } else {
             reject(new Error(data.error || `HTTP ${res.status}`));
           }
         },
-        onerror: () => failViaFetch("GM network error"),
-        ontimeout: () => failViaFetch("GM request timed out"),
+        onerror: () => reject(new Error("Network error")),
+        ontimeout: () => reject(new Error("Request timed out")),
       });
     });
   }
@@ -807,103 +728,6 @@
         color: #ddd;
         line-height: 1.35;
         white-space: pre-wrap;
-      }
-
-
-      #fb-bankers-notified-wrap {
-        position: fixed !important;
-        inset: 0 !important;
-        z-index: 2147483647 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        padding: 14px !important;
-        background: rgba(0,0,0,.72) !important;
-        font-family: Arial, Helvetica, sans-serif !important;
-        pointer-events: auto !important;
-        touch-action: none !important;
-      }
-
-      html.fb-modal-open,
-      html.fb-modal-open body {
-        overflow: hidden !important;
-      }
-
-      #fb-bankers-notified-card {
-        width: min(420px, calc(100vw - 28px)) !important;
-        position: relative !important;
-        z-index: 2147483647 !important;
-        pointer-events: auto !important;
-        touch-action: manipulation !important;
-        border: 1px solid rgba(255,211,106,.58) !important;
-        border-radius: 16px !important;
-        background:
-          radial-gradient(circle at top left, rgba(255,211,106,.20), transparent 42%),
-          linear-gradient(180deg, rgba(25,22,14,.98), rgba(6,6,6,.98)) !important;
-        color: #eee !important;
-        box-shadow: 0 18px 55px rgba(0,0,0,.75), 0 0 18px rgba(255,211,106,.18) !important;
-        overflow: hidden !important;
-      }
-
-      .fb-notified-head {
-        display: flex !important;
-        align-items: center !important;
-        justify-content: space-between !important;
-        gap: 10px !important;
-        padding: 12px 13px !important;
-        border-bottom: 1px solid rgba(255,255,255,.11) !important;
-        background: rgba(0,0,0,.22) !important;
-      }
-
-      .fb-notified-head strong {
-        color: #ffd36a !important;
-        font-size: 15px !important;
-        font-weight: 900 !important;
-      }
-
-      #fb-bankers-notified-close {
-        border: 1px solid rgba(255,255,255,.18) !important;
-        background: rgba(255,255,255,.07) !important;
-        color: #fff !important;
-        border-radius: 10px !important;
-        padding: 7px 10px !important;
-        font-weight: 900 !important;
-        cursor: pointer !important;
-        font-size: 13px !important;
-      }
-
-      .fb-notified-body {
-        padding: 14px !important;
-        font-size: 13px !important;
-        line-height: 1.45 !important;
-        color: #f1f1f1 !important;
-      }
-
-      .fb-notified-body b {
-        color: #ffd36a !important;
-      }
-
-      .fb-notified-small {
-        margin-top: 8px !important;
-        color: #aaa !important;
-        font-size: 11px !important;
-      }
-
-      .fb-notified-actions {
-        display: flex !important;
-        justify-content: flex-end !important;
-        gap: 8px !important;
-        padding: 0 14px 14px !important;
-      }
-
-      #fb-bankers-notified-ok {
-        border: 1px solid rgba(255,211,106,.52) !important;
-        background: rgba(255,211,106,.16) !important;
-        color: #ffd36a !important;
-        border-radius: 10px !important;
-        padding: 9px 13px !important;
-        font-weight: 900 !important;
-        cursor: pointer !important;
       }
 
       .fb-pay-notice {
@@ -1748,13 +1572,6 @@
     if (scrollToFactionBankingBox()) GM_setValue(K_SCROLL_TO_BANK, false);
   }
 
-  function preferredCoinOpenTab() {
-    // When a banker/leader has a pending request, the coin must jump straight
-    // to Banking so they see the request board immediately.
-    if (isBankerUiUser() && Number(APP.pendingCount || 0) > 0) return "banker";
-    return defaultTabForMe();
-  }
-
   async function openHeaderCoinBoard() {
     // Coin is visible to everyone. New users land on Settings/Login.
     try {
@@ -1771,21 +1588,11 @@
 
     openOverlay();
     setTimeout(() => {
-      const tabName = preferredCoinOpenTab();
+      const tabName = defaultTabForMe();
       rebuildTabs(tabName);
       const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
       if (tab) tab.click();
       else renderBody(tabName);
-
-      // Force one fresh pull after opening, then keep Banking selected if
-      // pending requests exist. This avoids opening to a stale/no-request view.
-      refreshAll(true).then(() => {
-        const again = preferredCoinOpenTab();
-        rebuildTabs(again);
-        const next = document.querySelector(`.fb-tab[data-tab="${again}"]`);
-        if (next) next.click();
-        else renderBody(again);
-      }).catch(() => {});
     }, 120);
   }
 
@@ -2118,14 +1925,8 @@
 
     setTimeout(() => {
       const tabName = GM_getValue(K_API_KEY, "") ? "banker" : "settings";
-      rebuildTabs(tabName);
       const tab = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
       if (tab) tab.click();
-      else renderBody(tabName);
-      refreshAll(true).then(() => {
-        const next = document.querySelector(`.fb-tab[data-tab="${tabName}"]`);
-        if (next) next.click();
-      }).catch(() => {});
     }, 150);
   }
 
@@ -2143,7 +1944,7 @@
   }
 
   function isBankerUiUser() {
-    return !!(APP.me?.is_banker || APP.me?.is_admin || APP.me?._coin_can_bank || isLeaderUiUser());
+    return !!(APP.me?.is_banker || APP.me?.is_admin || isLeaderUiUser());
   }
 
   function allowedTabsForMe() {
@@ -2152,21 +1953,12 @@
       return [{ id: "settings", label: "Settings / Login" }];
     }
 
-    if (APP.me?.is_admin) {
-      return [
-        { id: "banker", label: "Banking" },
-        { id: "user", label: "User" },
-        { id: "leaders", label: "Leaders" },
-        { id: "settings", label: "Settings" },
-        { id: "admin", label: "Admin" },
-      ];
-    }
-
     if (isLeaderUiUser()) {
       return [
         { id: "banker", label: "Banking" },
-        { id: "user", label: "User" },
-        { id: "leaders", label: "Leaders" },
+        { id: "completed", label: "Completed" },
+        { id: "bankers", label: "Bankers" },
+        { id: "roles", label: "Roles" },
         { id: "settings", label: "Settings" },
       ];
     }
@@ -2174,13 +1966,16 @@
     if (isBankerUiUser()) {
       return [
         { id: "banker", label: "Banking" },
-        { id: "user", label: "User" },
+        { id: "completed", label: "Completed" },
+        { id: "commands", label: "Commands" },
+        { id: "balance", label: "Balance" },
         { id: "settings", label: "Settings" },
       ];
     }
 
     return [
-      { id: "user", label: "User" },
+      { id: "commands", label: "Commands" },
+      { id: "balance", label: "Balance" },
       { id: "settings", label: "Settings" },
     ];
   }
@@ -2189,7 +1984,7 @@
     const hasKey = !!GM_getValue(K_API_KEY, "");
     if (!hasKey || !APP.me) return "settings";
     if (isBankerUiUser() || isLeaderUiUser()) return "banker";
-    return "user";
+    return "commands";
   }
 
   function isTabAllowed(tab) {
@@ -2230,9 +2025,9 @@
       coin = $("#fb-bank-coin-clean");
     }
     const setupBtn = $("#fb-setup-button");
-    const n = Math.max(0, Number(count || 0));
+    const n = Number(count || 0);
     const hasKey = !!GM_getValue(K_API_KEY, "");
-    const canBank = !!(APP.me?.is_banker || APP.me?.is_admin || APP.me?._coin_can_bank || APP.me?.can_manage_leaders || APP.me?.is_leader_role);
+    const canBank = !!(APP.me?.is_banker || APP.me?.is_admin);
     APP.pendingCount = n;
 
     if (coin) {
@@ -2243,7 +2038,7 @@
 
       if (canBank && n > 0) {
         coin.classList.add("fb-alert");
-        coin.title = `${n} open faction bank request${n === 1 ? "" : "s"} — tap to review in Banking`;
+        coin.title = `${n} pending faction bank request${n === 1 ? "" : "s"} — tap to approve and send`;
       } else {
         coin.classList.remove("fb-alert");
         coin.title = hasKey ? "Factional Banking" : "Factional Banking setup/login";
@@ -2401,21 +2196,14 @@
   function setManualBalance(amount) {
     const n = parseBalanceInput(amount);
     if (n === null) return false;
-    const now = Date.now();
-    const txt = money(n);
     GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(n));
-    GM_setValue(K_MANUAL_BALANCE_TEXT, txt);
-    GM_setValue(K_LAST_BALANCE_AMOUNT, String(n));
-    GM_setValue(K_LAST_BALANCE_TEXT, txt);
-    GM_setValue(K_LAST_BALANCE_SOURCE, "manual");
-    GM_setValue(K_LAST_BALANCE_TS, String(now));
-    // Legacy keys kept so older installed builds do not lose the saved balance while updating.
-    GM_setValue("fb_last_personal_balance_amount_v2", String(n));
-    GM_setValue("fb_last_personal_balance_text_v2", txt);
+    GM_setValue(K_MANUAL_BALANCE_TEXT, money(n));
     APP.balanceAmount = n;
-    APP.balanceText = txt;
+    APP.balanceText = money(n);
     APP.balanceSource = "manual";
-    APP.balanceUpdatedAt = now;
+    APP.balanceUpdatedAt = Date.now();
+    GM_setValue("fb_last_personal_balance_amount_v2", String(n));
+    GM_setValue("fb_last_personal_balance_text_v2", money(n));
     return true;
   }
 
@@ -2437,41 +2225,10 @@
     if (Number.isFinite(manual) && manual >= 0 && manualText) {
       APP.balanceAmount = Math.floor(manual);
       APP.balanceText = manualText;
-      APP.balanceSource = "manual saved";
-      APP.balanceUpdatedAt = Number(GM_getValue(K_LAST_BALANCE_TS, "")) || APP.balanceUpdatedAt || 0;
+      APP.balanceSource = "manual";
       return true;
     }
     return false;
-  }
-
-  function loadLastKnownBalanceCache() {
-    const last = Number(GM_getValue(K_LAST_BALANCE_AMOUNT, GM_getValue("fb_last_personal_balance_amount_v2", "")));
-    const lastText = GM_getValue(K_LAST_BALANCE_TEXT, GM_getValue("fb_last_personal_balance_text_v2", ""));
-    if (Number.isFinite(last) && last >= 0 && lastText) {
-      APP.balanceAmount = Math.floor(last);
-      APP.balanceText = lastText;
-      APP.balanceSource = GM_getValue(K_LAST_BALANCE_SOURCE, "last saved") || "last saved";
-      APP.balanceUpdatedAt = Number(GM_getValue(K_LAST_BALANCE_TS, "")) || APP.balanceUpdatedAt || 0;
-      return true;
-    }
-    return loadManualBalanceCache();
-  }
-
-  function saveStickyBalance(amount, text, source) {
-    const n = Number(amount);
-    if (!Number.isFinite(n) || n < 0) return false;
-    const now = Date.now();
-    const txt = text || money(n);
-    GM_setValue(K_LAST_BALANCE_AMOUNT, String(Math.floor(n)));
-    GM_setValue(K_LAST_BALANCE_TEXT, txt);
-    GM_setValue(K_LAST_BALANCE_SOURCE, source || "last saved");
-    GM_setValue(K_LAST_BALANCE_TS, String(now));
-    // Also refresh the older/manual cache so an old saved $0 can never overwrite a newly detected Torn balance.
-    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(Math.floor(n)));
-    GM_setValue(K_MANUAL_BALANCE_TEXT, txt);
-    GM_setValue("fb_last_personal_balance_amount_v2", String(Math.floor(n)));
-    GM_setValue("fb_last_personal_balance_text_v2", txt);
-    return true;
   }
 
   function setFactionBalance(amount, source = "", fallbackText = "Balance unavailable") {
@@ -2480,11 +2237,21 @@
       APP.balanceText = money(APP.balanceAmount);
       APP.balanceSource = source || "detected";
       APP.balanceUpdatedAt = Date.now();
-      saveStickyBalance(APP.balanceAmount, APP.balanceText, APP.balanceSource);
+      GM_setValue("fb_last_personal_balance_amount_v2", String(APP.balanceAmount));
+      GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
       return true;
     }
 
-    if (loadLastKnownBalanceCache()) return true;
+    if (loadManualBalanceCache()) return true;
+
+    const cached = Number(GM_getValue("fb_last_personal_balance_amount_v2", ""));
+    const cachedText = GM_getValue("fb_last_personal_balance_text_v2", "");
+    if (Number.isFinite(cached) && cached >= 0 && cachedText) {
+      APP.balanceAmount = Math.floor(cached);
+      APP.balanceText = cachedText;
+      APP.balanceSource = "last verified";
+      return true;
+    }
 
     APP.balanceAmount = null;
     APP.balanceText = fallbackText || "Balance unavailable";
@@ -2507,7 +2274,10 @@
     APP.balanceUpdatedAt = Date.now();
 
     // Save it locally so the box keeps showing the reduced balance after PDA refreshes.
-    saveStickyBalance(next, APP.balanceText, APP.balanceSource);
+    GM_setValue("fb_last_personal_balance_amount_v2", String(next));
+    GM_setValue("fb_last_personal_balance_text_v2", APP.balanceText);
+    GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(next));
+    GM_setValue(K_MANUAL_BALANCE_TEXT, APP.balanceText);
 
     return true;
   }
@@ -2516,20 +2286,10 @@
     if (!isOwnFactionPage()) return false;
 
     const allText = String(document.body?.innerText || document.body?.textContent || "").replace(/\s+/g, " ");
-    // Torn faction controls/deposit page commonly shows:
-    // "You have $78,967 and a balance of $1,400,000".
-    // The first number is cash on hand. The SECOND number is the member's faction-bank balance.
-    const depositBalanceLine = allText.match(/\byou\s+have\s+\$\s*[0-9][0-9,]*\s+and\s+a\s+balance\s+of\s+\$\s*([0-9][0-9,]*)/i);
-    if (depositBalanceLine) {
-      const n = Number(String(depositBalanceLine[1] || "").replace(/,/g, ""));
-      if (Number.isFinite(n) && n >= 0) return setFactionBalance(n, "Torn deposit page");
-    }
-
     const exactPatterns = [
       /[A-Za-z0-9_\-]+(?:\'s|’s)\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
       /your\s+current\s+balance\s+is\s*\$\s*([0-9][0-9,]*)/i,
       /your\s+(?:faction\s+)?balance\s*(?:is|:)\s*\$\s*([0-9][0-9,]*)/i,
-      /\bmember\s+balance\s*(?:is|:)\s*\$\s*([0-9][0-9,]*)/i,
     ];
     for (const re of exactPatterns) {
       const m = allText.match(re);
@@ -2567,18 +2327,13 @@
       if (/\byour\s+(faction\s+)?balance\b/i.test(text)) score += 140;
       if (/\bmy\s+(faction\s+)?balance\b/i.test(text)) score += 110;
       if (/\bbalance\s*[:\-]?\s*\$/i.test(text)) score += 80;
-      if (/\band\s+a\s+balance\s+of\s*\$/i.test(text)) score += 190;
       if (/\$[\d,]+\s*\b(balance)\b/i.test(text)) score += 50;
       if (lower.includes("member balance")) score += 90;
       if (lower.includes("bank balance")) score += 35;
       if (score < 80) continue;
 
-      // On Torn deposit controls, use the balance number, not the user's cash-on-hand number.
-      const depositMatch = text.match(/\byou\s+have\s+\$\s*[0-9][0-9,]*\s+and\s+a\s+balance\s+of\s+\$\s*([0-9][0-9,]*)/i);
-      const amount = depositMatch
-        ? Number(String(depositMatch[1] || "").replace(/,/g, ""))
-        : parseMoneyAmount(text);
-      if (amount === null || !Number.isFinite(Number(amount))) continue;
+      const amount = parseMoneyAmount(text);
+      if (amount === null) continue;
       if (!best || score > best.score) best = { amount, score, text };
     }
 
@@ -2590,7 +2345,7 @@
     // Page text is the source of truth for personal faction-bank balance.
     // The API may expose vault/funds/member data, which is not always the user's exact bank balance.
     if (detectFactionBalanceFromPage()) return true;
-    if (loadLastKnownBalanceCache()) return true;
+    if (loadManualBalanceCache()) return true;
 
     if (!GM_getValue(K_API_KEY, "")) {
       setFactionBalance(null, "", "Save key to check balance");
@@ -2763,145 +2518,162 @@
 
     if (tab === "commands" || tab === "request") renderCommandsTab();
     if (tab === "balance") renderBalanceTab();
-    if (tab === "user") renderUserTab();
     if (tab === "my") renderMyTab();
     if (tab === "banker") renderBankerTab();
+    if (tab === "completed") renderCompletedTab();
+    if (tab === "bankers") renderBankersManageTab();
+    if (tab === "roles") renderRolesManageTab();
     if (tab === "leaders") renderLeadersTab();
     if (tab === "settings") renderSettings();
-    if (tab === "admin") renderAdminTab();
-  }
-
-  function renderUserTab(msg = "") {
-    const has = Number.isFinite(Number(APP.balanceAmount));
-    const label = has ? money(APP.balanceAmount) : esc(APP.balanceText || "Balance unavailable");
-    const src = APP.balanceSource ? `Source: ${APP.balanceSource}` : "Use Sync Balance or Enter Manually.";
-    const updated = APP.balanceUpdatedAt ? new Date(APP.balanceUpdatedAt).toLocaleTimeString() : "Not synced this session";
-    setBody(`
-      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") || String(msg).toLowerCase().includes("synced") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
-      <div class="fb-box fb-hero-card">
-        <div class="fb-row fb-space"><div><div class="fb-request-title">👤 User Panel</div><div class="fb-small">Sync your faction-bank balance and use basic <code>/banker</code> commands.</div></div><span class="fb-pill ${has ? "approved" : "pending"}">${has ? "Balance Ready" : "Needs Sync"}</span></div>
-        <div style="font-size:26px;font-weight:900;color:#ffd36a;margin-top:12px;">${label}</div>
-        <div class="fb-small" style="margin-top:4px;">${esc(src)} • ${esc(updated)}</div>
-        <div class="fb-row" style="margin-top:10px;"><button id="fb-user-balance-sync" class="fb-btn blue" type="button">Sync Balance</button><button id="fb-user-balance-refresh" class="fb-btn" type="button">Refresh Here</button><button id="fb-user-balance-manual" class="fb-btn gold" type="button">Enter Manually</button></div>
-      </div>
-      <div class="fb-box fb-command-guide">
-        <div class="fb-request-title">🪙 Basic Commands</div>
-        <div class="fb-flow-grid" style="margin-top:10px;">
-          <div class="fb-flow-card"><b>Request money</b><span><code>/banker 25m</code><br><code>/banker 500k</code><br>Captured from faction chat.</span></div>
-          <div class="fb-flow-card"><b>Full balance</b><span><code>/banker full</code><br><code>/banker balance</code><br>Uses synced balance only.</span></div>
-          <div class="fb-flow-card"><b>Check request</b><span><code>/banker status</code><br><code>/banker mine</code></span></div>
-          <div class="fb-flow-card"><b>Cancel / change</b><span><code>/banker cancel</code><br><code>/banker change 50m</code></span></div>
-        </div>
-        <div class="fb-mini-note">Requests cannot be more than your synced balance. If your balance is missing, sync or enter it manually first.</div>
-      </div>
-    `);
-    $("#fb-user-balance-sync")?.addEventListener("click", openBalancePageForCapture);
-    $("#fb-user-balance-refresh")?.addEventListener("click", async () => { await loadFactionBalance(true); renderUserTab(APP.balanceAmount !== null ? "Balance synced." : "Could not see balance here. Try Sync Balance or Enter Manually."); });
-    $("#fb-user-balance-manual")?.addEventListener("click", () => { promptManualBalance(); renderUserTab(APP.balanceAmount !== null ? "Manual balance saved." : ""); });
-  }
-
-  async function renderAdminTab() {
-    if (!APP.me?.is_admin) { setBody(`<div class="fb-box"><div class="fb-error">Admin only.</div></div>`); return; }
-    setBody(`<div class="fb-box"><div class="fb-muted">Loading admin overview...</div></div>`);
-    try {
-      const res = await gmRequest("GET", "/api/banker/admin/overview");
-      const t = res.totals || {};
-      setBody(`<div class="fb-box fb-hero-card"><div class="fb-request-title">🛡️ Admin</div><div class="fb-small">Version: ${esc(res.app_version || FB_BUILD)}</div><div class="fb-small">DB: ${res.db_ok ? "connected" : esc(res.db_warning || "fallback")}</div></div><div class="fb-box"><div class="fb-flow-grid"><div class="fb-flow-card"><b>Open requests</b><span>${esc(t.open_requests ?? 0)}</span></div><div class="fb-flow-card"><b>Completed kept</b><span>${esc(t.completed_kept ?? 0)}</span></div><div class="fb-flow-card"><b>Factions with roles</b><span>${esc(t.factions_with_roles ?? 0)}</span></div></div></div>`);
-    } catch (err) { setBody(`<div class="fb-box"><div class="fb-error">${esc(err.message || err)}</div></div>`); }
-  }
-
-  function renderCommandsTab(msg = "") {
-    setBody(`
-      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
-      <div class="fb-box fb-command-guide">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">🪙 Basic /banker Commands</div>
-            <div class="fb-small">Use these in faction chat. The script catches the command, saves the request, and blocks it from posting into chat.</div>
-          </div>
-          <span class="fb-pill">Command Mode</span>
-        </div>
-
-        <div class="fb-flow-grid" style="margin-top:10px;">
-          <div class="fb-flow-card">
-            <b>Request money</b>
-            <span><code>/banker 25m</code><br><code>/banker 25000000</code><br><code>/banker 10m war meds</code></span>
-          </div>
-          <div class="fb-flow-card">
-            <b>Full balance</b>
-            <span><code>/banker full</code><br><code>/banker balance</code><br>Uses the Balance tab sync/manual amount.</span>
-          </div>
-          <div class="fb-flow-card">
-            <b>Check request</b>
-            <span><code>/banker status</code><br><code>/banker mine</code><br>Shows your latest saved request.</span>
-          </div>
-          <div class="fb-flow-card">
-            <b>Cancel / change</b>
-            <span><code>/banker cancel</code><br><code>/banker cancel 123</code><br><code>/banker change 50m</code></span>
-          </div>
-        </div>
-
-        <div class="fb-small" style="margin-top:10px; line-height:1.45;">
-          <b>Bankers:</b> open the Banking tab to see pending requests and mark them complete.<br>
-          <b>Leaders:</b> open Leaders to add exact faction roles that count as bankers.
-        </div>
-      </div>
-    `);
   }
 
   function renderBalanceTab(msg = "") {
-    const has = Number.isFinite(Number(APP.balanceAmount));
-    const label = has ? money(APP.balanceAmount) : esc(APP.balanceText || "Balance unavailable");
-    const src = APP.balanceSource ? `Source: ${APP.balanceSource}` : "Use Sync Balance or Enter Manually.";
-    const updated = APP.balanceUpdatedAt ? new Date(APP.balanceUpdatedAt).toLocaleTimeString() : "Not synced this session";
-
     setBody(`
-      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") || String(msg).toLowerCase().includes("synced") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
-
-      <div class="fb-box fb-hero-card">
+      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
+      <div class="fb-box">
         <div class="fb-row fb-space">
           <div>
-            <div class="fb-request-title">💰 Balance Sync</div>
-            <div class="fb-small">This is your personal faction-bank balance used by <code>/banker full</code>.</div>
+            <div class="fb-request-title">🪙 Balance Sync</div>
+            <div class="fb-small">Sync or enter your faction bank balance so <code>/banker full</code> and your balance display work better.</div>
           </div>
-          <span class="fb-pill ${has ? "approved" : "pending"}">${has ? "Balance Ready" : "Needs Sync"}</span>
+          <span class="fb-pill">User Balance</span>
         </div>
 
-        <div style="font-size:26px;font-weight:900;color:#ffd36a;margin-top:12px;">${label}</div>
-        <div class="fb-small" style="margin-top:4px;">${esc(src)} • ${esc(updated)}</div>
-      </div>
+        <div style="margin-top:12px;">${balanceLineHtml()}</div>
 
-      <div class="fb-box">
-        <div class="fb-request-title">Sync options</div>
-        <div class="fb-small" style="margin-top:5px;line-height:1.45;">
-          <b>Sync Balance</b> opens your faction controls/bank area and tries to read Torn's balance line.<br>
-          <b>Refresh Here</b> re-checks the current page if you are already on the faction bank page.<br>
-          <b>Enter Manually</b> lets you save the balance yourself when Torn/PDA hides the balance text.
+        <div class="fb-grid" style="margin-top:12px;">
+          <button id="fb-balance-sync-tab" class="fb-btn blue" type="button">Sync Balance</button>
+          <button id="fb-balance-refresh-tab" class="fb-btn" type="button">Refresh</button>
         </div>
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-balance-sync" class="fb-btn blue" type="button">Sync Balance</button>
-          <button id="fb-balance-refresh" class="fb-btn" type="button">Refresh Here</button>
-          <button id="fb-balance-manual" class="fb-btn gold" type="button">Enter Manually</button>
-        </div>
-      </div>
 
-      <div class="fb-box">
-        <div class="fb-request-title">Full amount command</div>
-        <div class="fb-small" style="margin-top:6px;line-height:1.45;">
-          After your balance is synced, <code>/banker full</code> sends the synced amount instead of $1.
-          If balance is unavailable, use Enter Manually first.
+        <div class="fb-small" style="margin-top:12px;">Manual balance</div>
+        <div class="fb-grid" style="margin-top:8px;">
+          <input id="fb-balance-manual-input" class="fb-input" placeholder="Example: 25m or 25000000" value="">
+          <button id="fb-balance-manual-save" class="fb-btn gold" type="button">Save Balance</button>
+        </div>
+
+        <div class="fb-small" style="margin-top:12px; line-height:1.45;">
+          Tip: Torn does not always expose balance cleanly from every page or while travelling.
+          Use manual balance when sync cannot read it. The script stores it locally on your device.
         </div>
       </div>
     `);
 
-    $("#fb-balance-sync")?.addEventListener("click", openBalancePageForCapture);
-    $("#fb-balance-refresh")?.addEventListener("click", async () => {
-      await loadFactionBalance(true);
-      renderBalanceTab(APP.balanceAmount !== null ? "Balance synced." : "Could not see balance here. Try Sync Balance or Enter Manually.");
+    $("#fb-balance-sync-tab")?.addEventListener("click", async () => {
+      showPayNotice("🪙 Syncing faction balance...");
+      const ok = await loadFactionBalance(true);
+      renderBalanceTab(ok ? "Balance sync finished." : "Balance sync failed. Try opening the faction balance page or enter it manually.");
     });
-    $("#fb-balance-manual")?.addEventListener("click", () => {
-      promptManualBalance();
-      renderBalanceTab(APP.balanceAmount !== null ? "Manual balance saved." : "");
+
+    $("#fb-balance-refresh-tab")?.addEventListener("click", async () => {
+      await loadFactionBalance(true);
+      renderBalanceTab("Balance refreshed.");
+    });
+
+    $("#fb-balance-manual-save")?.addEventListener("click", () => {
+      const raw = $("#fb-balance-manual-input")?.value || "";
+      const amount = fbParseBankerAmountToken(raw);
+      if (!amount || amount <= 0) {
+        showPayNotice("Enter a valid balance like 25m or 25000000.");
+        return;
+      }
+      setFactionBalance(amount, "manual");
+      GM_setValue(K_MANUAL_BALANCE_AMOUNT, String(amount));
+      GM_setValue(K_MANUAL_BALANCE_TEXT, money(amount));
+      showPayNotice(`🪙 Balance saved: ${money(amount)}`);
+      renderBalanceTab("Manual balance saved.");
+    });
+  }
+
+  function pendingRequests() {
+    return (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+  }
+
+  function completedRequests() {
+    return (APP.requests || [])
+      .filter((r) => String(r.status || "").toLowerCase() === "complete")
+      .slice(0, 5);
+  }
+
+  function copyTextToClipboard(text) {
+    try {
+      navigator.clipboard?.writeText(text);
+      showPayNotice(`Copied: ${text}`);
+    } catch (_) {
+      showPayNotice(text);
+    }
+  }
+
+  function renderCompletedTab(msg = "") {
+    const completed = completedRequests();
+    const cards = completed.length
+      ? completed.map(requestCard).join("")
+      : `<div class="fb-empty">No completed payouts yet. Completed requests will show here so bankers do not double-pay.</div>`;
+
+    setBody(`
+      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
+      <div class="fb-box">
+        <div class="fb-section-head">
+          <div>
+            <div class="fb-dashboard-title">Recently Completed</div>
+            <div class="fb-dashboard-sub">Last 5 completed payouts. Use this to avoid double-paying someone.</div>
+          </div>
+          <button id="fb-completed-refresh" class="fb-btn" type="button">Refresh</button>
+        </div>
+      </div>
+      ${cards}
+    `);
+
+    $("#fb-completed-refresh")?.addEventListener("click", () => refreshAll(true));
+  }
+
+  function renderBankersManageTab(msg = "") {
+    renderLeadersTab(msg, "bankers");
+  }
+
+  function renderRolesManageTab(msg = "") {
+    renderLeadersTab(msg, "roles");
+  }
+
+  function renderCommandsTab(msg = "") {
+    const cards = [
+      ["/banker 25m", "Request $25,000,000 from faction bank."],
+      ["/banker 10m war meds", "Request with a note so bankers know why."],
+      ["/banker full", "Request your full saved/synced balance."],
+      ["/banker status", "Check your latest request."],
+      ["/banker cancel", "Cancel your latest pending request."],
+      ["/banker change 50m", "Change your latest pending request."]
+    ];
+
+    setBody(`
+      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
+      <div class="fb-box fb-hero-card">
+        <div class="fb-dashboard-title">🪙 Chat Command Banking</div>
+        <div class="fb-dashboard-sub">Type commands in faction chat. The script catches them, alerts bankers, and keeps requests out of public chat when possible.</div>
+      </div>
+
+      ${cards.map(([cmd, desc]) => `
+        <div class="fb-command-card">
+          <div class="fb-row fb-space">
+            <div>
+              <code>${esc(cmd)}</code>
+              <div class="fb-small" style="margin-top:6px;">${esc(desc)}</div>
+            </div>
+            <button class="fb-btn gold" data-copy-command="${esc(cmd)}" type="button">Copy</button>
+          </div>
+        </div>
+      `).join("")}
+
+      <div class="fb-box">
+        <div class="fb-request-title">How it flows</div>
+        <div class="fb-small" style="line-height:1.55;margin-top:8px;">
+          Member types command → request is saved → faction bankers are alerted → banker pays → banker marks complete.
+        </div>
+      </div>
+    `);
+
+    $$("[data-copy-command]").forEach((btn) => {
+      btn.addEventListener("click", () => copyTextToClipboard(btn.getAttribute("data-copy-command") || ""));
     });
   }
 
@@ -2972,1433 +2744,48 @@
     }
   }
 
-  function renderBankerTab() {
-    if (!isBankerUiUser()) {
-      setBody(`
-        <div class="fb-box">
-          <div class="fb-request-title">Banker Access</div>
-          <div class="fb-error" style="margin-top:6px;">
-            You are not listed as a banker for this app.
-          </div>
-          <div class="fb-small" style="margin-top:8px;">
-            Banker access is controlled by exact banker Torn IDs saved by your faction leader/co-leader in the Leaders tab.
-          </div>
-        </div>
-      `);
-      return;
-    }
-
-    const pending = APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
-    const others = APP.requests.filter((r) => !["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
-
-    const cards = [
-      pending.length
-        ? `<div class="fb-box"><strong style="color:#ffd36a;">Open Requests</strong><div class="fb-small">Pending/approved requests stay here and keep the coin lit until a banker marks complete.</div></div>${pending.map(requestCard).join("")}`
-        : `<div class="fb-box"><div class="fb-muted">No open requests.</div></div>`,
-      others.length
-        ? `<div class="fb-box"><strong>Recently Completed / Last 3</strong><div class="fb-small">Shows who completed each payout so bankers do not double-pay.</div></div>${others.slice(0, 3).map(requestCard).join("")}`
-        : "",
-    ].join("");
-
-    setBody(`
-      <div class="fb-box">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">Banker Board</div>
-            <div class="fb-small">${pending.length} open request${pending.length === 1 ? "" : "s"} — stays until completed</div>
-          </div>
-          <button id="fb-refresh-banker" class="fb-btn" type="button">Refresh</button>
-        </div>
-        ${bankerStatusPanel()}
-      </div>
-
-      ${cards}
-    `);
-
-    $("#fb-refresh-banker")?.addEventListener("click", () => refreshAll(true));
-    $$("[data-fb-action]").forEach((btn) => {
-      btn.addEventListener("click", () => bankerAction(btn.dataset.id, btn.dataset.fbAction));
-    });
-
-    $$("[data-fb-pay]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (btn.dataset.fbPay === "approve-open") approveAndOpenBank(btn.dataset.id);
-        else openSavedRequestInBank(btn.dataset.id);
-      });
-    });
-  }
-
-
-  function normalizedPayAmount(r) {
-    if (!r || String(r.note || "") === FULL_BALANCE_NOTE) return "";
-    const amount = Number(r.amount || 0);
-    return Number.isFinite(amount) && amount > 0 ? String(Math.floor(amount)) : "";
-  }
-
-  function showPayNotice(text) {
-    let notice = document.querySelector("#fb-pay-prefill-notice");
-    if (!notice) {
-      notice = document.createElement("div");
-      notice.id = "fb-pay-prefill-notice";
-      notice.className = "fb-pay-notice";
-      document.body.appendChild(notice);
-    }
-    notice.textContent = text;
-    clearTimeout(showPayNotice._timer);
-    showPayNotice._timer = setTimeout(() => notice.remove(), 7000);
-  }
-
-  function openBankingTabForPendingRequest() {
-    if (!isBankerUiUser()) return false;
-    openOverlay();
-    rebuildTabs("banker");
-    const tab = document.querySelector('.fb-tab[data-tab="banker"]');
-    if (tab) tab.click();
-    else renderBody("banker");
-    setTimeout(() => refreshAll(true).then(() => {
-      rebuildTabs("banker");
-      const again = document.querySelector('.fb-tab[data-tab="banker"]');
-      if (again) again.click();
-      else renderBody("banker");
-    }).catch(() => {}), 250);
-    return true;
-  }
-
-  function bumpOwnBankerCoinAfterRequest() {
-    if (!isBankerUiUser()) return;
-    const pendingNow = (APP.requests || []).filter((r) => String(r.status || "pending").toLowerCase() === "pending").length;
-    APP.pendingCount = Math.max(1, pendingNow);
-    setCoinAlert(APP.pendingCount);
-    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 300);
-    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 1800);
-  }
-
-  function afterRequestCreatedNotifyBankers(item, amount = 0) {
-    if (item) {
-      upsertRequestItem(item);
-      saveLocalRequest(item);
-      saveRecentCreatedRequest(item);
-    }
-
-    // User-facing confirmation. This appears for chat commands and button requests.
-    showBankersNotifiedBox(amount);
-
-    // Keep the overlay closed when the requester sends from chat.
-    // If the requester is also a banker, only light/update their coin;
-    // do not auto-open the Banking tab. Bankers open it by tapping the coin.
-    bumpOwnBankerCoinAfterRequest();
-
-    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 600);
-    setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2400);
-  }
-
-  function showBankersNotifiedBox(amount = 0) {
-    document.querySelector("#fb-bankers-notified-wrap")?.remove();
-    const wrap = document.createElement("div");
-    wrap.id = "fb-bankers-notified-wrap";
-    const amountLine = Number(amount || 0) > 1 ? `<div class="fb-notified-small">Request amount: <b>${money(amount)}</b></div>` : "";
-    wrap.innerHTML = `
-      <div id="fb-bankers-notified-card" role="dialog" aria-modal="true" aria-label="Bankers notified">
-        <div class="fb-notified-head">
-          <strong>🪙 Bankers notified</strong>
-          <button id="fb-bankers-notified-close" type="button">✕</button>
-        </div>
-        <div class="fb-notified-body">
-          <b>Your request has been sent.</b><br>
-          Bankers have been notified and will be with you as soon as they can.
-          ${amountLine}
-        </div>
-        <div class="fb-notified-actions">
-          <button id="fb-bankers-notified-ok" type="button">Close</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(wrap);
-
-    const close = () => {
-      try { document.documentElement.classList.remove("fb-modal-open"); } catch (_) {}
-      wrap.remove();
-    };
-    // Do not close by tapping outside. This confirmation stays on top until the user closes it.
-    wrap.addEventListener("click", (ev) => {
-      if (ev.target === wrap) {
-        ev.preventDefault();
-        ev.stopPropagation();
-      }
-    }, true);
-    wrap.querySelector("#fb-bankers-notified-close")?.addEventListener("click", close);
-    wrap.querySelector("#fb-bankers-notified-ok")?.addEventListener("click", close);
-    try {
-      document.documentElement.classList.add("fb-modal-open");
-      wrap.querySelector("#fb-bankers-notified-ok")?.focus?.();
-    } catch (_) {}
-  }
-
-  function savePayPrefill(r) {
-    if (!r) return false;
-    const payload = {
-      requestId: String(r.id || ""),
-      playerId: String(r.requester_id || ""),
-      playerName: String(r.requester_name || ""),
-      amount: normalizedPayAmount(r),
-      factionName: String(r.faction_name || ""),
-      savedAt: Date.now(),
-    };
-    GM_setValue(K_PAY_PREFILL, JSON.stringify(payload));
-    try {
-      localStorage.setItem(K_PAY_PREFILL, JSON.stringify(payload));
-    } catch {
-      // PDA can block localStorage in some modes; GM storage is enough.
-    }
-    return true;
-  }
-
-  function getPayPrefill() {
-    let raw = GM_getValue(K_PAY_PREFILL, "");
-    if (!raw) {
-      try { raw = localStorage.getItem(K_PAY_PREFILL) || ""; } catch { raw = ""; }
-    }
-    if (!raw) return null;
-    try {
-      const data = JSON.parse(raw);
-      if (!data || !data.playerId) return null;
-      if (Date.now() - Number(data.savedAt || 0) > 20 * 60 * 1000) {
-        clearPayPrefill();
-        return null;
-      }
-      return data;
-    } catch {
-      return null;
-    }
-  }
-
-  function clearPayPrefill() {
-    GM_setValue(K_PAY_PREFILL, "");
-    try { localStorage.removeItem(K_PAY_PREFILL); } catch {}
-  }
-
-
-  function incomingRequestIdFromUrl() {
-    try {
-      const url = new URL(location.href);
-      return String(url.searchParams.get("fb_bank_req") || "").replace(/\D/g, "");
-    } catch {
-      return "";
-    }
-  }
-
-  async function handleIncomingBankRequestUrl() {
-    const reqId = incomingRequestIdFromUrl();
-    if (!reqId || !GM_getValue(K_API_KEY, "")) return false;
-
-    try {
-      const res = await gmRequest("GET", `/api/banker/requests/${encodeURIComponent(reqId)}`);
-      const item = res && res.item;
-      if (!item) return false;
-      savePayPrefill(item);
-      showPayNotice("Bank request loaded from phone ping. Player and amount will auto-fill. Manually press Give Money.");
-      setTimeout(tryPrefillFactionBankForm, 600);
-      setTimeout(tryPrefillFactionBankForm, 1600);
-      setTimeout(tryPrefillFactionBankForm, 3200);
-      setTimeout(tryPrefillFactionBankForm, 5500);
-      return true;
-    } catch (err) {
-      showPayNotice(`Could not load bank request #${reqId}: ${String(err.message || err).slice(0, 90)}`);
-      return false;
-    }
-  }
-
-  function openBankingPageForRequest(r) {
-    if (!r) return;
-    savePayPrefill(r);
-    showPayNotice("Opening Torn faction bank. Player and amount will auto-fill when the bank form loads. You still manually press Give Money.");
-    window.location.href = "https://www.torn.com/factions.php?step=your#/tab=controls";
-  }
-
-  function setNativeValue(input, value) {
-    if (!input) return false;
-
-    const val = String(value ?? "");
-
-    try { input.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
-    try { input.focus(); } catch {}
-    try { input.click(); } catch {}
-
-    const isEditable = !!input.isContentEditable || String(input.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
-
-    if (isEditable) {
-      try { input.textContent = val; } catch {}
-      try { input.innerText = val; } catch {}
-      try { input.setAttribute("data-value", val); } catch {}
-    } else {
-      // React/Torn-safe value setter. Some Torn fields ignore plain input.value = x.
-      const proto = Object.getPrototypeOf(input);
-      const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-      const ownDescriptor = Object.getOwnPropertyDescriptor(input, "value");
-
-      if (descriptor && descriptor.set && (!ownDescriptor || ownDescriptor.set !== descriptor.set)) {
-        descriptor.set.call(input, val);
-      } else {
-        input.value = val;
-      }
-
-      try { input.setAttribute("value", val); } catch {}
-    }
-
-    const events = [
-      new Event("input", { bubbles: true }),
-      new Event("change", { bubbles: true }),
-      new KeyboardEvent("keydown", { bubbles: true, key: val.slice(-1) || "0" }),
-      new KeyboardEvent("keyup", { bubbles: true, key: val.slice(-1) || "0" }),
-      new Event("blur", { bubbles: true }),
-    ];
-
-    // InputEvent is not always available in PDA, so keep it optional.
-    try {
-      events.unshift(new InputEvent("input", { bubbles: true, inputType: "insertText", data: val }));
-    } catch {}
-
-    events.forEach((ev) => {
-      try { input.dispatchEvent(ev); } catch {}
-    });
-
-    try { input.focus(); } catch {}
-    return true;
-  }
-
-  function isFactionBankerOwnInput(el) {
-    return !!(
-      el &&
-      (el.closest?.("#fb-built-in-box") ||
-       el.closest?.("#fb-overlay") ||
-       el.closest?.("#fb-profile-bank-coin") ||
-       el.id?.startsWith?.("fb-") ||
-       String(el.className || "").includes("fb-"))
-    );
-  }
-
-  function visibleInput(el) {
-    if (!el || el.disabled) return false;
-    const isEditable = !!el.isContentEditable || String(el.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
-    if (el.readOnly && !isEditable) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 30 && rect.height > 12;
-  }
-
-  function scoreInputFor(input, kind) {
-    const s = [
-      input.id,
-      input.name,
-      input.placeholder,
-      input.getAttribute("aria-label"),
-      input.className,
-      input.closest("div")?.textContent,
-    ].map((v) => String(v || "").toLowerCase()).join(" ");
-
-    if (kind === "player") {
-      return (s.includes("player") ? 40 : 0) +
-        (s.includes("user") ? 25 : 0) +
-        (s.includes("member") ? 25 : 0) +
-        (s.includes("recipient") ? 35 : 0) +
-        (s.includes("name") ? 15 : 0) +
-        (s.includes("id") ? 10 : 0) -
-        (s.includes("amount") || s.includes("money") || s.includes("cash") ? 50 : 0);
-    }
-
-    return (s.includes("amount") ? 45 : 0) +
-      (s.includes("money") ? 30 : 0) +
-      (s.includes("cash") ? 30 : 0) +
-      (s.includes("give") ? 18 : 0) +
-      (input.inputMode === "numeric" ? 15 : 0) +
-      (input.type === "number" || input.type === "tel" ? 20 : 0) -
-      (s.includes("player") || s.includes("user") || s.includes("member") ? 45 : 0);
-  }
-
-  function inputSignature(el) {
-    const bits = [
-      el?.id,
-      el?.name,
-      el?.placeholder,
-      el?.getAttribute?.("aria-label"),
-      el?.className,
-      el?.closest?.("label")?.textContent,
-      el?.parentElement?.textContent,
-      el?.parentElement?.previousElementSibling?.textContent,
-      el?.parentElement?.parentElement?.textContent,
-    ];
-    return bits.map((v) => String(v || "").toLowerCase()).join(" ");
-  }
-
-  function allUsableInputs() {
-    return Array.from(document.querySelectorAll("input, textarea, [contenteditable=\"true\"]"))
-      .filter((el) => !isFactionBankerOwnInput(el))
-      .filter(visibleInput)
-      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i));
-  }
-
-  function looksLikePlayerInput(el) {
-    const s = inputSignature(el);
-    return s.includes("search player") ||
-      s.includes("player") ||
-      s.includes("recipient") ||
-      s.includes("user") ||
-      s.includes("member") ||
-      s.includes("name") ||
-      s.includes("xid");
-  }
-
-  function looksLikeAmountInput(el) {
-    const s = inputSignature(el);
-    const type = String(el.type || "").toLowerCase();
-    const mode = String(el.inputMode || "").toLowerCase();
-
-    if (looksLikePlayerInput(el) && !s.includes("amount")) return false;
-
-    return s.includes("amount") ||
-      s.includes("money") ||
-      s.includes("cash") ||
-      s.includes("give money") ||
-      s.includes("change balance") ||
-      s.includes("$") ||
-      mode === "numeric" ||
-      type === "number" ||
-      type === "tel";
-  }
-
-  function bestAmountInputNearDollar(inputs, playerInput) {
-    const dollarNodes = Array.from(document.querySelectorAll("div, span, label, p"))
-      .filter((el) => getCleanText(el).trim() === "$" || getCleanText(el).trim().startsWith("$"))
-      .map((el) => el.getBoundingClientRect());
-
-    const playerRect = playerInput?.getBoundingClientRect?.();
-
-    const candidates = inputs.filter((input) => input !== playerInput && !looksLikePlayerInput(input));
-
-    if (dollarNodes.length && candidates.length) {
-      const scored = candidates.map((input) => {
-        const r = input.getBoundingClientRect();
-        let best = 999999;
-        for (const d of dollarNodes) {
-          const dist = Math.abs(r.top - d.top) + Math.abs(r.left - d.right);
-          best = Math.min(best, dist);
-        }
-        return { input, score: best };
-      }).sort((a, b) => a.score - b.score);
-      if (scored[0] && scored[0].score < 250) return scored[0].input;
-    }
-
-    // Torn banking page often has player search first, then amount field below it.
-    if (playerRect) {
-      const below = candidates
-        .filter((input) => {
-          const r = input.getBoundingClientRect();
-          return r.top > playerRect.top - 6;
-        })
-        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-      if (below.length) return below[0];
-    }
-
-    return candidates[0] || null;
-  }
-
-  function bestInput(kind, avoidInput = null) {
-    const inputs = allUsableInputs();
-
-    if (kind === "amount") {
-      const scoredAmount = inputs
-        .filter((el) => el !== avoidInput)
-        .map((el) => ({ el, score: scoreInputFor(el, kind) + (looksLikeAmountInput(el) ? 40 : 0) }))
-        .filter((x) => x.score > 10 && !looksLikePlayerInput(x.el))
-        .sort((a, b) => b.score - a.score);
-
-      if (scoredAmount[0]) return scoredAmount[0].el;
-      return bestAmountInputNearDollar(inputs, avoidInput || bestInput("player"));
-    }
-
-    const scored = inputs.map((el) => ({ el, score: scoreInputFor(el, kind) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score);
-
-    return scored[0]?.el || null;
-  }
-
-  function findTornFactionAmountInput(playerInput) {
-    const rawAmount = getPayPrefill()?.amount ? String(getPayPrefill().amount).replace(/[^0-9]/g, "") : "";
-    const inputs = allUsableInputs().filter((el) => el !== playerInput && !looksLikePlayerInput(el));
-    if (!inputs.length) return null;
-
-    // Prefer the real Torn vault amount field: it is usually directly beside/below a lone "$" prefix.
-    const dollarEls = Array.from(document.querySelectorAll("div, span, label, b, strong"))
-      .filter((el) => !el.closest?.("#fb-built-in-box") && !el.closest?.("#fb-overlay"))
-      .filter((el) => getCleanText(el).trim() === "$" || getCleanText(el).trim() === "$")
-      .map((el) => el.getBoundingClientRect());
-
-    if (dollarEls.length) {
-      const scored = inputs.map((input) => {
-        const r = input.getBoundingClientRect();
-        let best = 999999;
-        for (const d of dollarEls) {
-          // amount box normally starts just to the right of the $ prefix and on the same row
-          const dist = Math.abs(r.top - d.top) * 3 + Math.abs(r.left - d.right);
-          best = Math.min(best, dist);
-        }
-        return { input, score: best };
-      }).sort((a, b) => a.score - b.score);
-      if (scored[0] && scored[0].score < 900) return scored[0].input;
-    }
-
-    if (playerInput) {
-      const pr = playerInput.getBoundingClientRect();
-      const below = inputs
-        .map((input) => ({ input, r: input.getBoundingClientRect() }))
-        .filter(({ r }) => r.top > pr.bottom - 8 && r.top < pr.bottom + 180)
-        .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
-      if (below.length) return below[0].input;
-    }
-
-    return bestInput("amount", playerInput);
-  }
-
-  function fillTornAmountStrong(playerInput, amount) {
-    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
-    if (!cleanAmount) return false;
-
-    const amountInput = findTornFactionAmountInput(playerInput);
-    if (!amountInput) return false;
-
-    const ok = setNativeValue(amountInput, cleanAmount);
-    try {
-      amountInput.focus();
-      amountInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "1" }));
-      amountInput.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "1" }));
-      amountInput.blur();
-    } catch {}
-    return ok;
-  }
-
-  function tapElementHard(el) {
-    if (!el) return false;
-    try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
-    const r = el.getBoundingClientRect?.();
-    const x = r ? Math.max(2, Math.min(window.innerWidth - 2, r.left + Math.min(r.width - 2, Math.max(2, r.width / 2)))) : 10;
-    const y = r ? Math.max(2, Math.min(window.innerHeight - 2, r.top + Math.min(r.height - 2, Math.max(2, r.height / 2)))) : 10;
-    const target = document.elementFromPoint?.(x, y) || el;
-    const chain = Array.from(new Set([target, target?.parentElement, el, el.closest?.("li, a, button, div")].filter(Boolean)));
-    let ok = false;
-
-    for (const node of chain) {
-      try {
-        node.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch", clientX: x, clientY: y }));
-      } catch {}
-      try { node.dispatchEvent(new TouchEvent("touchstart", { bubbles: true, cancelable: true })); } catch {}
-      try { node.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
-      try { node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
-      try { node.click(); ok = true; } catch {}
-      try { node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); } catch {}
-      try { node.dispatchEvent(new TouchEvent("touchend", { bubbles: true, cancelable: true })); } catch {}
-      try { node.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, pointerType: "touch", clientX: x, clientY: y })); } catch {}
-    }
-    return ok;
-  }
-
-  function closeKeyboardAndAutocomplete(playerInput) {
-    try {
-      const el = playerInput || document.activeElement;
-      if (el) {
-        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
-        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
-        el.blur();
-      }
-    } catch {}
-  }
-
-  function clickPlayerAutocompleteChoice(data) {
-    const name = String(data?.playerName || "").toLowerCase();
-    const id = String(data?.playerId || "");
-    if (!name && !id) return false;
-
-    const ownSelectors = "#fb-built-in-box, #fb-overlay";
-    const all = Array.from(document.querySelectorAll("li, div, span, a, button"))
-      .filter((el) => !el.closest?.(ownSelectors))
-      .filter((el) => {
-        const r = el.getBoundingClientRect?.();
-        if (!r || r.width < 25 || r.height < 10 || r.top < 0 || r.top > window.innerHeight) return false;
-        const txt = getCleanText(el).toLowerCase();
-        if (!txt || txt.length > 180) return false;
-        if (id && !txt.includes(id)) return false;
-        if (name && !txt.includes(name)) return false;
-        if (txt.includes("friends") || txt.includes("company") || txt === "all" || txt === "faction") return false;
-        return true;
-      })
-      .map((el) => {
-        const r = el.getBoundingClientRect();
-        const txt = getCleanText(el).toLowerCase();
-        let score = 0;
-        if (id && txt.includes(id)) score += 150;
-        if (name && txt.includes(name)) score += 100;
-        if (/\[[0-9]+\]/.test(txt)) score += 45;
-        if (el.tagName === "LI") score += 55;
-        if (el.tagName === "A" || el.tagName === "BUTTON") score += 35;
-        if (r.height >= 22 && r.height <= 58) score += 45;
-        if (r.width >= 120 && r.width <= 620) score += 20;
-        score -= Math.max(0, (r.width * r.height - 35000) / 900); // avoid giant wrappers
-        return { el, score };
-      })
-      .sort((a, b) => b.score - a.score);
-
-    const choice = all[0]?.el;
-    let ok = false;
-    if (choice) ok = tapElementHard(choice);
-
-    // PDA fallback: Enter often accepts the highlighted Torn autocomplete result.
-    const active = document.activeElement;
-    try {
-      if (active) {
-        active.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
-        active.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
-      }
-    } catch {}
-
-    setTimeout(() => closeKeyboardAndAutocomplete(active), 120);
-    return ok;
-  }
-
-  function findInputBesideDollarPrefix() {
-    const ownSelectors = "#fb-built-in-box, #fb-overlay";
-    const dollarEls = Array.from(document.querySelectorAll("div, span, label, b, strong, i"))
-      .filter((el) => !el.closest?.(ownSelectors))
-      .filter((el) => /^\s*\$\s*$/.test(String(el.textContent || "")) || /^\s*\$\s*$/.test(String(el.getAttribute?.("aria-label") || "")));
-
-    for (const dollar of dollarEls) {
-      const scopes = [
-        dollar.parentElement,
-        dollar.parentElement?.parentElement,
-        dollar.closest?.("div"),
-        dollar.closest?.("li"),
-      ].filter(Boolean);
-
-      for (const scope of scopes) {
-        const inputs = Array.from(scope.querySelectorAll?.("input, textarea, [contenteditable=\"true\"]") || [])
-          .filter((el) => !el.closest?.(ownSelectors))
-          .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
-          .filter((el) => !looksLikePlayerInput(el))
-          .filter((el) => {
-            const r = el.getBoundingClientRect?.();
-            return r && r.width > 45 && r.height > 14;
-          });
-        if (inputs.length) return inputs[0];
-      }
-
-      // PDA Torn sometimes renders the $ block and the input as neighboring siblings.
-      let n = dollar.nextElementSibling;
-      for (let i = 0; i < 5 && n; i += 1, n = n.nextElementSibling) {
-        const input = n.matches?.("input, textarea, [contenteditable=\"true\"]") ? n : n.querySelector?.("input, textarea, [contenteditable=\"true\"]");
-        if (input && !input.closest?.(ownSelectors) && !looksLikePlayerInput(input)) return input;
-      }
-    }
-
-    // Visual fallback: choose the first blank input below the selected player field and inside the Give Money block.
-    const player = bestInput("player");
-    if (player) {
-      const pr = player.getBoundingClientRect();
-      const candidates = allUsableInputs()
-        .filter((el) => el !== player && !looksLikePlayerInput(el))
-        .map((el) => ({ el, r: el.getBoundingClientRect() }))
-        .filter(({ r }) => r.top > pr.bottom - 4 && r.top < pr.bottom + 160 && r.width > 100)
-        .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
-      if (candidates[0]) return candidates[0].el;
-    }
-
-    return null;
-  }
-
-  function setTornAmountDirect(amount) {
-    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
-    if (!cleanAmount) return false;
-    const el = findInputBesideDollarPrefix();
-    if (!el) return false;
-    const ok = setNativeValue(el, cleanAmount);
-    try {
-      el.focus();
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: cleanAmount.slice(-1) || "0" }));
-      el.blur();
-    } catch {}
-    return ok && String(el.value || "").replace(/[^0-9]/g, "") === cleanAmount;
-  }
-
-  function forceFillTornDollarAmount(amount) {
-    const cleanAmount = String(amount || "").replace(/[^0-9]/g, "");
-    if (!cleanAmount) return false;
-
-    const ownSelectors = "#fb-built-in-box, #fb-overlay";
-    const player = bestInput("player");
-    const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable=\"true\"]"))
-      .filter((el) => !el.closest?.(ownSelectors))
-      .filter((el) => el.isContentEditable || !String(el.type || "").match(/hidden|submit|button|checkbox|radio/i))
-      .filter((el) => el !== player && !looksLikePlayerInput(el))
-      .filter((el) => {
-        const r = el.getBoundingClientRect();
-        return r.width > 40 && r.height > 14;
-      });
-
-    const dollarRects = Array.from(document.querySelectorAll("div, span, label, b, strong"))
-      .filter((el) => !el.closest?.(ownSelectors))
-      .filter((el) => getCleanText(el).trim() === "$" || /^\$\s*$/.test(getCleanText(el).trim()))
-      .map((el) => el.getBoundingClientRect());
-
-    let candidates = inputs.map((input) => {
-      const r = input.getBoundingClientRect();
-      let score = 999999;
-      for (const d of dollarRects) {
-        const sameRow = Math.abs((r.top + r.height / 2) - (d.top + d.height / 2));
-        const rightOfDollar = Math.max(0, r.left - d.right);
-        score = Math.min(score, sameRow * 8 + rightOfDollar + Math.abs(r.top - d.top));
-      }
-      if (player) {
-        const pr = player.getBoundingClientRect();
-        if (r.top > pr.bottom - 6 && r.top < pr.bottom + 180) score -= 250;
-        if (r.left > pr.left - 80 && r.left < pr.left + 160) score -= 80;
-      }
-      return { input, score };
-    }).sort((a, b) => a.score - b.score);
-
-    for (const c of candidates.slice(0, 4)) {
-      const el = c.input;
-      if (el.disabled) continue;
-      if (setNativeValue(el, cleanAmount)) {
-        try {
-          el.focus();
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-          el.blur();
-        } catch {}
-        if (String(el.value || "").replace(/[^0-9]/g, "") === cleanAmount) return true;
-      }
-    }
-
-    return false;
-  }
-
-  function clickTextButton(words) {
-    const wanted = words.map((w) => String(w).toLowerCase());
-    const nodes = Array.from(document.querySelectorAll("button, a, div, span, li"));
-    const found = nodes.find((el) => {
-      const text = getCleanText(el).toLowerCase();
-      if (!text || text.length > 60) return false;
-      return wanted.some((w) => text === w || text.includes(w));
-    });
-    if (found) {
-      try { found.click(); } catch {}
-      return true;
-    }
-    return false;
-  }
-
-  function tryPrefillFactionBankForm() {
-    if (!isFactionPage()) return;
-    const data = getPayPrefill();
-    if (!data) return;
-
-    // Try to expose the controls/banking form if Torn has it hidden behind tabs.
-    clickTextButton(["controls", "bank", "give money", "vault"]);
-
-    const playerInput = bestInput("player");
-    let filled = false;
-
-    if (playerInput) {
-      filled = setNativeValue(playerInput, `${data.playerName} [${data.playerId}]`) || filled;
-      setTimeout(() => clickPlayerAutocompleteChoice(data), 250);
-      setTimeout(() => clickPlayerAutocompleteChoice(data), 650);
-      setTimeout(() => clickPlayerAutocompleteChoice(data), 1200);
-    }
-
-    if (data.amount) {
-      filled = setTornAmountDirect(data.amount) || fillTornAmountStrong(playerInput, data.amount) || forceFillTornDollarAmount(data.amount) || filled;
-    }
-
-    // Some Torn/PDA builds enable/replace the amount field only after the player autocomplete is selected.
-    // Keep trying and force the money into Torn's real $ input, never this script's amount box.
-    if (playerInput && data.amount) {
-      [250, 550, 900, 1400, 2200, 3400, 5200, 7600, 10500, 13500, 16500].forEach((delay) => {
-        setTimeout(() => {
-          clickPlayerAutocompleteChoice(data);
-          closeKeyboardAndAutocomplete(playerInput);
-          setTimeout(() => {
-            setTornAmountDirect(data.amount);
-            fillTornAmountStrong(playerInput, data.amount);
-            forceFillTornDollarAmount(data.amount);
-          }, 220);
-        }, delay);
-      });
-    }
-
-    if (filled) {
-      showPayNotice(`Bank prefill ready for ${data.playerName} [${data.playerId}]${data.amount ? ` — $${Number(data.amount).toLocaleString()}` : " — Full Balance request"}. Manually press Give Money.`);
-    }
-  }
-
-  function openSavedRequestInBank(id) {
-    const r = APP.requests.find((x) => String(x.id) === String(id));
-    if (!r) return;
-    openBankingPageForRequest(r);
-  }
-
-  async function approveAndOpenBank(id) {
-    if (APP.busy || !id) return;
-    const r = APP.requests.find((x) => String(x.id) === String(id));
-    if (!r) return;
-
-    APP.busy = true;
-    try {
-      await gmRequest("POST", `/api/banker/requests/${encodeURIComponent(id)}/approve`, { note: "" });
-      openBankingPageForRequest(r);
-    } catch (err) {
-      const msg = String(err?.message || err || "");
-
-      // If Render says the active request is already gone, treat that as success.
-      // This happens when PDA double-taps, refreshes late, or a local backup tries to re-add it.
-      if (/active request not found|request not found|404/i.test(msg)) {
-        rememberClosedRequest(id);
-        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
-        const label = action === "deny" ? "denied" : action === "approve" ? "approved" : "completed";
-        if (activeTab() === "banker" || activeTab() === "my") {
-          renderBody(activeTab());
-          const body = $("#fb-body");
-          if (body) {
-            body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} was already cleared. It has been removed locally too.</div></div>`);
-          }
-        } else {
-          renderBody(activeTab());
-        }
-        return;
-      }
-
-      setBody(`
-        <div class="fb-box">
-          <div class="fb-error">${esc(msg)}</div>
-          <div class="fb-row" style="margin-top:10px;">
-            <button id="fb-force-clear-local" class="fb-btn gold" type="button">Hide This Request Locally</button>
-            <button id="fb-retry-action" class="fb-btn" type="button">Retry</button>
-          </div>
-        </div>
-      `);
-      $("#fb-force-clear-local")?.addEventListener("click", () => {
-        rememberClosedRequest(id);
-        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
-        renderBody(activeTab());
-      });
-      $("#fb-retry-action")?.addEventListener("click", () => bankerAction(id, action));
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  function requestCard(r) {
-    const id = esc(r.id);
-    const status = String(r.status || "pending").toLowerCase();
-    const isBanker = isBankerUiUser();
-
-    const created = r.created_at ? esc(r.created_at) : "";
-    const requester = esc(r.requester_name || `User ${r.requester_id || ""}`);
-    const targetFaction = esc(r.faction_name || factionLabelById(r.faction_id) || "Faction");
-    const handledBy = r.handled_by_name
-      ? `<div class="fb-small" style="color:#8dffac;font-weight:900;">${status === "complete" ? "Completed" : "Handled"} by: ${esc(r.handled_by_name)}${r.handled_at ? ` • ${esc(r.handled_at)}` : ""}</div>`
-      : "";
-    const preferredBanker = r.selected_banker_name || r.selected_banker_id
-      ? `<div class="fb-small">Preferred banker: ${esc(r.selected_banker_name || r.selected_banker_id)}</div>`
-      : `<div class="fb-small">Notify: all faction bankers</div>`;
-
-    let actions = "";
-    const isMine = String(r.requester_id || "") === String(APP.me?.player_id || "");
-
-    if (isMine && status === "pending") {
-      actions += `
-        <div class="fb-row" style="margin-top:10px;">
-          <button class="fb-btn danger" data-id="${id}" data-fb-cancel="1" type="button">Remove Request</button>
-        </div>
-      `;
-    }
-
-    if (isBanker && ["pending", "approved"].includes(status)) {
-      actions = `
-        <div class="fb-row" style="margin-top:10px;">
-          <a class="fb-btn pay" href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(String(r.requester_id || ""))}" target="_blank" rel="noopener">Open Member</a>
-          <button class="fb-btn gold" data-id="${id}" data-fb-pay="open" type="button">Open Bank Page</button>
-          <button class="fb-btn blue" data-id="${id}" data-fb-action="paid" type="button">Mark Complete</button>
-        </div>
-      `;
-    }
-
-    return `
-      <div class="fb-box">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">${requester} requested ${String(r.note || "") === FULL_BALANCE_NOTE ? "Full Balance" : money(r.amount)}</div>
-            <div class="fb-request-meta">For ${targetFaction} • Request #${id}${created ? ` • ${created}` : ""}</div>
-          </div>
-          ${statusPill(status)}
-        </div>
-
-        ${String(r.note || "") === FULL_BALANCE_NOTE ? `<div class="fb-request-note">Full balance requested.</div>` : ""}
-        ${status === "complete" && r.handled_by_name ? `<div class="fb-request-note" style="color:#8dffac;font-weight:900;border:1px solid rgba(141,255,172,.28);border-radius:10px;padding:8px;background:rgba(30,130,75,.12);">✅ Completed by ${esc(r.handled_by_name)}${r.handled_at ? ` • ${esc(r.handled_at)}` : ""}. Do not pay this request again.</div>` : ""}
-
-        ${preferredBanker}
-        ${handledBy}
-        ${r.bank_note ? `<div class="fb-small">Bank note: ${esc(r.bank_note)}</div>` : ""}
-
-        ${actions}
-      </div>
-    `;
-  }
-
-  async function loadLeaderBankers() {
-    APP.leaderLoadError = "";
-    try {
-      const res = await gmRequest("GET", "/api/banker/leaders");
-      APP.manualBankers = Array.isArray(res.items) ? res.items : [];
-      APP.leaderRoleNames = Array.isArray(res.role_names) ? res.role_names : [];
-      APP.leaderRoleItems = Array.isArray(res.role_items) ? res.role_items : [];
-      APP.defaultRoleNames = Array.isArray(res.default_role_names) ? res.default_role_names : [];
-      return true;
-    } catch (err) {
-      APP.leaderLoadError = String(err?.message || err || "Could not load leader banker list");
-      APP.manualBankers = [];
-      return false;
-    }
-  }
-
-  async function addLeaderBanker() {
-    if (APP.busy) return;
-    const bankerId = String($("#fb-leader-banker-id")?.value || "").replace(/[^0-9]/g, "").trim();
-    const bankerName = String($("#fb-leader-banker-name")?.value || "").trim();
-    const pushoverKey = String($("#fb-leader-pushover")?.value || "").trim();
-
-    if (!bankerId) {
-      renderLeadersTab(`<div class="fb-error">Enter the banker Torn ID.</div>`);
-      return;
-    }
-
-    APP.busy = true;
-    try {
-      const res = await gmRequest("POST", "/api/banker/leaders/add", {
-        banker_id: bankerId,
-        banker_name: bankerName || bankerId,
-        pushover_key: pushoverKey,
-      });
-      await loadLeaderBankers();
-      APP.bankers = [];
-      mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker saved.${res.test_ping_sent ? " Test phone ping sent." : ""}</div>`, false);
-    } catch (err) {
-      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  async function removeLeaderBanker(bankerId) {
-    if (APP.busy || !bankerId) return;
-    APP.busy = true;
-    try {
-      await gmRequest("POST", "/api/banker/leaders/remove", { banker_id: bankerId });
-      await loadLeaderBankers();
-      APP.bankers = [];
-      mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker removed.</div>`);
-    } catch (err) {
-      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  async function addLeaderRoleName() {
-    if (APP.busy) return;
-    const roleName = String($("#fb-leader-role-name")?.value || "").trim();
-    
-    if (!roleName) {
-      renderLeadersTab(`<div class="fb-error">Enter the faction role name that should count as a banker.</div>`);
-      return;
-    }
-
-    APP.busy = true;
-    try {
-      const res = await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName });
-      await loadLeaderBankers();
-      APP.bankers = [];
-      mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that saved role counts as a banker.</div>`, false);
-    } catch (err) {
-      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  async function removeLeaderRoleName(roleName) {
-    if (APP.busy || !roleName) return;
-    APP.busy = true;
-    try {
-      await gmRequest("POST", "/api/banker/leaders/roles/remove", { role_name: roleName });
-      await loadLeaderBankers();
-      APP.bankers = [];
-      mountBuiltInBankerBox();
-      renderLeadersTab(`<div class="fb-success">Banker role removed.</div>`);
-    } catch (err) {
-      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  function getLeaderBankerDraft() {
-    return {
-      roleName: String($("#fb-leader-role-name")?.value || "").trim(),
-          };
-  }
-
-  function isLeaderBankerDraftActive() {
-    if (!APP.open || activeTab() !== "leaders") return false;
-    const active = document.activeElement;
-    if (active && active.closest && active.closest("#fb-body") && (
-      active.matches("#fb-leader-role-name") ||
-      active.matches("#fb-leader-role-pushover")
-    )) return true;
-    const d = getLeaderBankerDraft();
-    return !!(d.roleName);
-  }
-
-
-  async function loadPushoverPingInfo() {
-    try {
-      const res = await gmRequest("GET", "/api/banker/pushover");
-      APP.pushoverPingUrl = String(res.install_url || APP.pushoverPingUrl || "https://pushover.net/");
-      APP.pushoverPingAppUrl = String(res.signup_url || res.app_url || APP.pushoverPingAppUrl || "https://pushover.net/");
-      APP.myPushoverPingHasKey = !!res.has_pushover;
-      APP.myPushoverPingIsSavedBanker = !!res.is_saved_banker;
-      return res;
-    } catch (err) {
-      return null;
-    }
-  }
-
-  function pushoverPingAppUrl(info = null) {
-    // Use the exact Pushover setup/subscription URL only.
-    // Do not append Torn/player query params here: TornPDA can mistake
-    // a modified Pushover URL for a remote userscript-load screen.
-    return String((info && (info.signup_url || info.app_url)) || APP.pushoverPingAppUrl || "https://pushover.net/").trim();
-  }
-
-  function pushoverPingInstallUrl(info = null) {
-    // Pushover is a website/app setup link, not a userscript installer.
-    // Keep this the same as the app/setup URL so PDA opens a normal web page.
-    return String((info && (info.install_url || info.signup_url || info.app_url)) || APP.pushoverPingUrl || APP.pushoverPingAppUrl || "https://pushover.net/").trim();
-  }
-
-  async function openUrlSafe(url) {
-    const safe = String(url || "https://pushover.net/").trim();
-    try {
-      // In TornPDA, window.open can route through the remote-script loader.
-      // Direct location navigation opens the Pushover page normally.
-      window.location.assign(safe);
-    } catch {
-      try { window.top.location.href = safe; } catch (_) { location.href = safe; }
-    }
-  }
-
-  async function openPushoverPingApp() {
-    const info = await loadPushoverPingInfo();
-    openUrlSafe(pushoverPingAppUrl(info));
-  }
-
-  async function openPushoverPingInstall() {
-    const info = await loadPushoverPingInfo();
-    openUrlSafe(pushoverPingInstallUrl(info));
-  }
-
-  async function openPushoverPingSignup() {
-    // Backwards-compatible name used by older click handlers: open the app, not the raw installer.
-    return openPushoverPingApp();
-  }
-
-  async function saveMyPushoverPingKey() {
-    if (APP.busy) return;
-    const key = String($("#fb-my-ping-key")?.value || "").trim();
-    if (!key) {
-      renderSettings("Paste your Pushover user/group key first.");
-      return;
-    }
-    APP.busy = true;
-    try {
-      const res = await gmRequest("POST", "/api/banker/my-ping-key", { pushover_key: key });
-      await refreshAll(true);
-      renderSettings(res.test_ping_sent ? "Pushover phone key saved. Test ping sent." : "Pushover phone key saved. If no test arrived, check the key/app token.");
-    } catch (err) {
-      renderSettings(err.message || String(err));
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  function renderLeadersTab(msg = "", preserveDraft = true) {
-    const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_leader_role;
-    const draft = preserveDraft ? getLeaderBankerDraft() : { roleName: "" };
-
-    if (!canManage) {
-      setBody(`
-        <div class="fb-box fb-hero-card">
-          <div class="fb-request-title">Leaders</div>
-          <div class="fb-error" style="margin-top:6px;">Leader/co-leader access is required to manage faction banker roles.</div>
-          <div class="fb-small" style="margin-top:8px;">This tab is for the leader team of your own faction only.</div>
-        </div>
-      `);
-      return;
-    }
-
-    const factionName = APP.me?.faction_name || "Your faction";
-    const yourRole = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "Leader team");
-
-    const roleRows = (APP.leaderRoleItems || []).map((r) => `
-      <div class="fb-box">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">${esc(r.role_name || "Banker role")}</div>
-            <div class="fb-small">Any faction member with this exact role gets the coin alert + Banking board.</div>
-          </div>
-          <button class="fb-btn red" data-leader-role-remove="${esc(r.role_name || "")}" type="button">Remove</button>
-        </div>
-      </div>
-    `).join("") || `<div class="fb-box"><div class="fb-muted">No banker roles saved yet. Add the exact faction role name your bankers use.</div></div>`;
-
-    const savedKeyRows = (APP.manualBankers || []).map((b) => `
-      <div class="fb-box">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">${esc(b.banker_name || b.name || b.banker_id)}</div>
-            <div class="fb-small">ID: ${esc(b.banker_id || b.id)} ${b.has_pushover ? "• phone ping key saved" : "• no phone ping key"}</div>
-          </div>
-          <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove key</button>
-        </div>
-      </div>
-    `).join("");
+  function renderBankerTab(msg = "") {
+    const pending = pendingRequests();
+    const completed = completedRequests();
+
+    const cards = pending.length
+      ? pending.map(requestCard).join("")
+      : `<div class="fb-empty">No pending bank requests right now. The vault may rest.</div>`;
 
     setBody(`
       ${msg ? `<div class="fb-box">${msg}</div>` : ""}
-      ${APP.leaderLoadError ? `<div class="fb-box"><div class="fb-error">${esc(APP.leaderLoadError)}</div></div>` : ""}
-
       <div class="fb-box fb-hero-card">
-        <div class="fb-row fb-space">
+        <div class="fb-section-head">
           <div>
-            <div class="fb-request-title">👑 Leaders • ${esc(factionName)}</div>
-            <div class="fb-small">Role banker mode: this setup only affects your own faction.</div>
+            <div class="fb-dashboard-title">Banker Board</div>
+            <div class="fb-dashboard-sub">Pending requests only. Pay in Torn, then mark complete so other bankers do not double-pay.</div>
           </div>
-          <span class="fb-pill approved">${esc(yourRole)}</span>
+          <button id="fb-refresh-bank" class="fb-btn" type="button">Refresh</button>
         </div>
-        <div class="fb-flow-grid" style="margin-top:10px;">
-          <div class="fb-flow-card"><b>1. Add role</b><span>Enter the exact faction role your bankers have, like Banker, Treasurer, or Vault.</span></div>
-          <div class="fb-flow-card"><b>2. Coin lights up</b><span>Anyone with that role gets coin alerts and Banking board access.</span></div>
-        </div>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">Add banker role</div>
-        <div class="fb-small" style="margin-top:5px;">Use the exact role name shown in your faction. Example: Banker, Treasurer, Vault Keeper.</div>
-        <label class="fb-label" style="margin-top:10px;">Faction banker role name</label>
-        <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Banker" value="${esc(draft.roleName)}">
-        <div class="fb-mini-note">Saved banker roles are stored in the backend database and survive script/app updates. Each faction can only manage and see its own roles and requests.</div>
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
-          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
+        <div class="fb-stat-row">
+          <div class="fb-stat-card"><b>${pending.length}</b><span>Pending</span></div>
+          <div class="fb-stat-card"><b>${completed.length}</b><span>Recent completed</span></div>
         </div>
       </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">Saved banker roles</div>
-        <div class="fb-mini-note">These roles for ${esc(factionName)} control who gets banker-board access and red coin alerts.</div>
-      </div>
-      ${roleRows}
+      ${cards}
     `);
 
-    $("#fb-leader-role-add")?.addEventListener("click", addLeaderRoleName);
-    $("#fb-leader-refresh")?.addEventListener("click", async () => {
-      await loadLeaderBankers();
-      renderLeadersTab();
+    $("#fb-refresh-bank")?.addEventListener("click", () => refreshAll(true));
+    attachRequestButtons();
+  }
+
+  function attachRequestButtons() {
+    $$("[data-fb-action]").forEach((btn) => {
+      btn.addEventListener("click", () => bankerAction(btn.dataset.id, btn.dataset.fbAction));
     });
-    $$('[data-leader-role-remove]').forEach((btn) => {
-      btn.addEventListener("click", () => removeLeaderRoleName(btn.dataset.leaderRoleRemove));
+    $$("[data-fb-pay]").forEach((btn) => {
+      btn.addEventListener("click", () => openBankPageForRequest(btn.dataset.id));
     });
-    $$('[data-leader-remove]').forEach((btn) => {
-      btn.addEventListener("click", () => removeLeaderBanker(btn.dataset.leaderRemove));
+    $$("[data-fb-cancel]").forEach((btn) => {
+      btn.addEventListener("click", () => cancelOwnRequest(btn.dataset.id));
     });
   }
 
-  function renderSettings(msg = "") {
-    const key = GM_getValue(K_API_KEY, "");
-    const loggedIn = !!APP.me;
-    const roleText = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "role not detected");
-    const factionText = APP.me?.faction_name || "Faction not verified yet";
-    const accessText = !loggedIn
-      ? "Login needed"
-      : (isLeaderUiUser() ? "Leader tools enabled" : (isBankerUiUser() ? "Banker board enabled" : "Member command mode"));
-
-    setBody(`
-      ${msg ? `<div class="fb-box"><div class="${String(msg).toLowerCase().includes("saved") || String(msg).toLowerCase().includes("verified") ? "fb-success" : "fb-error"}">${esc(msg)}</div></div>` : ""}
-
-      <div class="fb-box fb-hero-card">
-        <div class="fb-row fb-space">
-          <div>
-            <div class="fb-request-title">⚙️ Factional Banking Settings</div>
-            <div class="fb-small" style="margin-top:5px;">Start here. Save a limited Torn API key, test login, then use <b>/banker</b> commands in faction chat.</div>
-          </div>
-          <span class="fb-pill ${loggedIn ? "approved" : "denied"}">${esc(accessText)}</span>
-        </div>
-
-        <div class="fb-login-status ${loggedIn ? "" : "off"}" style="margin-top:12px;">
-          <div>
-            <b><span class="fb-status-dot ${loggedIn ? "ok" : "bad"}"></span>${loggedIn ? `Logged in as ${esc(APP.me.name || "Torn user")} [${esc(APP.me.player_id || "")}]` : "Not logged in yet"}</b>
-            <div class="fb-small">${loggedIn ? `${esc(factionText)} • ${esc(roleText)}` : "Paste your limited API key at the bottom and tap Test Login."}</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">Rules / Terms of Use</div>
-        <ul class="fb-legal-list">
-          <li>This script is a faction banking request and notification helper.</li>
-          <li>It does not auto-pay, auto-click Torn buttons, or move money by itself.</li>
-          <li>Bankers still manually review requests and manually complete payouts in Torn.</li>
-          <li>Members are responsible for making accurate requests with <code>/banker amount</code>.</li>
-          <li>Faction leaders/co-leaders control their own banker roles in the Leaders tab.</li>
-          <li>Completed requests are shown so bankers can avoid double-paying.</li>
-        </ul>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">How this follows Torn-friendly API use</div>
-        <ul class="fb-legal-list">
-          <li>Uses Torn API data for verification and read-only checks such as your Torn ID, name, faction, and leader/co-leader access.</li>
-          <li>Uses the smallest useful key type: a limited API key.</li>
-          <li>Does not ask for your Torn password.</li>
-          <li>Does not automate gameplay actions or payments.</li>
-          <li>For Fries91's allowed faction only, Pushover can notify that a request exists. Other factions still use coin alerts and their own board.</li>
-        </ul>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">Why a limited API key?</div>
-        <div class="fb-small" style="margin-top:6px; line-height:1.45;">
-          A limited key lets the app confirm that the request belongs to the correct Torn player and faction. This keeps other factions separate, helps prevent fake requests, and lets the board show the right banker/leader tools without needing unsafe access.
-        </div>
-      </div>
-
-      <div class="fb-box">
-        <div class="fb-request-title">Privacy / Storage</div>
-        <ul class="fb-legal-list">
-          <li>Your key is saved in your userscript/PDA local storage on your device.</li>
-          <li>The backend only receives it when the app needs to verify your Torn account/faction.</li>
-          <li>Other players cannot see your key.</li>
-          <li>You can replace or clear the saved key anytime by editing the field below.</li>
-        </ul>
-      </div>
-
-      <div class="fb-box fb-login-card">
-        <div class="fb-request-title">Login</div>
-        <div class="fb-small" style="margin-top:4px;">Paste your Torn limited API key here, save it, then tap Test Login.</div>
-        <label class="fb-label" style="margin-top:10px;">Torn limited API key</label>
-        <input id="fb-api-key" class="fb-input" value="${esc(key)}" placeholder="Paste Torn limited API key">
-        <div class="fb-row" style="margin-top:10px;">
-          <button id="fb-save-key" class="fb-btn gold" type="button">Save Key</button>
-          <button id="fb-test-login" class="fb-btn" type="button">Test Login</button>
-          <button id="fb-enable-notify" class="fb-btn blue" type="button">Enable In-App Ping</button>
-        </div>
-        <div class="fb-mini-note">Backend: <span style="color:#ffd36a;">${esc(BANKER_API_BASE)}</span></div>
-      </div>
-    `);
-
-    $("#fb-save-key")?.addEventListener("click", () => {
-      const keyInput = $("#fb-api-key")?.value?.trim() || "";
-      GM_setValue(K_API_KEY, keyInput);
-      APP.me = null;
-      rebuildTabs("settings");
-      renderSettings("Saved. Tap Test Login to verify your faction login.");
-    });
-
-    $("#fb-test-login")?.addEventListener("click", async () => {
-      await refreshAll(true);
-      rebuildTabs(defaultTabForMe());
-      renderSettings(APP.me ? "Login verified." : "Login check finished. If this still shows not logged in, check your key.");
-    });
-    $("#fb-enable-notify")?.addEventListener("click", requestNotifyPermission);
-  }
-
-  async function submitFullBalanceRequest() {
-    if (APP.busy) return;
-
-    const status = $("#fb-built-status");
-    const targetFactionId = selectedFactionFromPage();
-    const targetBankerId = "";
-
-    if (!GM_getValue(K_API_KEY, "")) {
-      if (status) status.textContent = "Save your API key in settings first";
-      openOverlay();
-      return;
-    }
-
-    if (!targetFactionId) {
-      if (status) status.textContent = "Choose faction first";
-      if (APP.open) renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
-      return;
-    }
-
-    await loadFactionBalance(true);
-    const detectedFullBalance = Number(APP.balanceAmount || 0);
-    const sendDetectedAmount = Number.isFinite(detectedFullBalance) && detectedFullBalance > 0;
-
-    if (!sendDetectedAmount) {
-      const msg = "I could not read your balance yet. Open Faction → Controls → Deposit, then tap Balance → Refresh Here, or enter it manually.";
-      if (status) status.textContent = msg;
-      openOverlay();
-      setTimeout(() => document.querySelector('.fb-tab[data-tab="balance"]')?.click(), 120);
-      alert(msg);
-      return;
-    }
-
-    APP.busy = true;
-    if (status) status.textContent = `Sending full balance request for ${money(detectedFullBalance)}...`;
-
-    try {
-      const res = await gmRequest("POST", "/api/banker/requests", {
-        amount: detectedFullBalance,
-        known_balance: detectedFullBalance,
-        note: `Full balance requested: ${money(detectedFullBalance)}`,
-        target_faction_id: targetFactionId,
-        target_banker_id: targetBankerId,
-      });
-      if (sendDetectedAmount) {
-        deductRequestedAmountFromLocalBalance(detectedFullBalance);
-      }
-      afterRequestCreatedNotifyBankers(res?.item, detectedFullBalance);
-
-      GM_setValue(K_TARGET_FACTION, targetFactionId);
-      if (status) status.textContent = sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}` : `Full balance request sent to ${factionLabelById(targetFactionId)} bankers`;
-      await refreshAll(true);
-
-      if (APP.open) {
-        renderRequestTab(`<div class="fb-success">${sendDetectedAmount ? `Full balance request sent for ${money(detectedFullBalance)}.` : `Full balance request sent to ${esc(factionLabelById(targetFactionId))} bankers.`}</div>`);
-      }
-    } catch (err) {
-      if (status) status.textContent = err.message || "Request failed";
-      if (APP.open) {
-        renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
-      }
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  async function submitBuiltInRequest() {
-    if (APP.busy) return;
-
-    const amountRaw = ($("#fb-built-amount")?.value || "").replace(/[^\d]/g, "");
-    const amount = Number(amountRaw);
-    const note = "";
-    const targetFactionId = $("#fb-built-faction")?.value || "";
-    const targetBankerId = "";
-    const status = $("#fb-built-status");
-
-    if (!GM_getValue(K_API_KEY, "")) {
-      if (status) status.textContent = "Save your API key in settings first";
-      openOverlay();
-      return;
-    }
-
-    if (!targetFactionId) {
-      if (status) status.textContent = "Choose faction first";
-      return;
-    }
-
-    if (!amount || amount < 1) {
-      if (status) status.textContent = "Enter a valid amount";
-      return;
-    }
-    const knownBalance = Number(APP.balanceAmount || 0);
-    if (knownBalance > 0 && amount > knownBalance) {
-      if (status) status.textContent = `Request cannot be more than your synced balance ${money(knownBalance)}`;
-      return;
-    }
-
-    APP.busy = true;
-    if (status) status.textContent = "Sending request...";
-
-    try {
-      const res = await gmRequest("POST", "/api/banker/requests", {
-        amount,
-        known_balance: Number(APP.balanceAmount || 0),
-        note,
-        target_faction_id: targetFactionId,
-        target_banker_id: targetBankerId,
-      });
-      deductRequestedAmountFromLocalBalance(amount);
-      afterRequestCreatedNotifyBankers(res?.item, amount);
-      GM_setValue(K_TARGET_FACTION, targetFactionId);
-      $("#fb-built-amount").value = "";
-      if (status) status.textContent = `Request sent to ${factionLabelById(targetFactionId)} bankers`;
-      await refreshAll(true);
-    } catch (err) {
-      if (status) status.textContent = err.message || "Request failed";
-    } finally {
-      APP.busy = false;
-    }
-  }
-
-  async function submitRequest() {
-    if (APP.busy) return;
-
-    const amountRaw = ($("#fb-amount")?.value || "").replace(/[^\d]/g, "");
-    const amount = Number(amountRaw);
-    const note = "";
-    const targetFactionId = $("#fb-target-faction")?.value || "";
-    const targetBankerId = "";
-
-    if (!targetFactionId) {
-      renderRequestTab(`<div class="fb-error">Choose a faction banker group first.</div>`);
-      return;
-    }
-
-    if (!amount || amount < 1) {
-      renderRequestTab(`<div class="fb-error">Enter a valid amount.</div>`);
-      return;
-    }
-    const knownBalance = Number(APP.balanceAmount || 0);
-    if (knownBalance > 0 && amount > knownBalance) {
-      renderRequestTab(`<div class="fb-error">Request cannot be more than your synced balance ${money(knownBalance)}.</div>`);
-      return;
-    }
-
-    APP.busy = true;
-    renderRequestTab(`<div class="fb-muted">Sending request...</div>`);
-
-    try {
-      const res = await gmRequest("POST", "/api/banker/requests", {
-        amount,
-        known_balance: Number(APP.balanceAmount || 0),
-        note,
-        target_faction_id: targetFactionId,
-        target_banker_id: targetBankerId,
-      });
-      deductRequestedAmountFromLocalBalance(amount);
-      afterRequestCreatedNotifyBankers(res?.item, amount);
-      GM_setValue(K_TARGET_FACTION, targetFactionId);
-      await refreshAll(true);
-      renderRequestTab(`<div class="fb-success">Amount request sent to ${esc(factionLabelById(targetFactionId))} bankers.</div>`);
-    } catch (err) {
-      renderRequestTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
-    } finally {
-      APP.busy = false;
-    }
-  }
 
   async function bankerAction(id, action) {
     if (APP.busy || !id || !action) return;
@@ -4417,23 +2804,16 @@
       const isCompleteAction = ["paid", "complete", "mark_paid", "mark_complete"].includes(String(action || "").toLowerCase());
       const label = isCompleteAction ? "completed" : action === "deny" ? "denied" : "approved";
 
-      // Open requests should stay visible and keep the coin lit until a banker marks Complete.
-      // Complete remains visible in Recent Completed/Last 5 with the banker name. Deny clears it.
+      // Important: completed requests should NOT be hidden locally. Bankers need
+      // to see who completed it so nobody double-pays. Deny/cancel can still hide.
       if (isCompleteAction) {
         forgetClosedRequest(id);
         clearLocalRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
         if (res && res.item) APP.requests.unshift(res.item);
-        saveRequestCache(APP.requests);
-      } else if (action === "deny") {
+      } else {
         rememberClosedRequest(id);
         APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
-      } else {
-        forgetClosedRequest(id);
-        clearLocalRequest(id);
-        APP.requests = (APP.requests || []).filter((r) => String(r.id) !== String(id));
-        if (res && res.item) APP.requests.unshift(res.item);
-        saveRequestCache(APP.requests);
       }
 
       await refreshAll(true);
@@ -4443,8 +2823,7 @@
         const body = $("#fb-body");
         if (body) {
           const who = res?.item?.handled_by_name ? ` by ${esc(res.item.handled_by_name)}` : "";
-          const pingText = isCompleteAction ? (res?.completion_pushover_sent ? " Completion phone ping sent." : " Completion phone ping not confirmed, but history is saved.") : "";
-          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)}${who}. Other bankers can see this in Recently Completed.${esc(pingText)}</div></div>`);
+          body.insertAdjacentHTML("afterbegin", `<div class="fb-box"><div class="fb-success">Request #${esc(id)} ${esc(label)}${who}. Other bankers can see this in Recently Completed.</div></div>`);
         }
       } else {
         renderBody(activeTab());
@@ -4594,34 +2973,6 @@
     clearLocalRequest(id);
   }
 
-  function requestCacheKey() {
-    const fid = String(APP.me?.faction_id || APP.bankerFactionId || currentTargetFactionId() || "global").trim() || "global";
-    return `${K_REQUEST_CACHE}:${fid}`;
-  }
-
-  function saveRequestCache(items) {
-    try {
-      const clean = (Array.isArray(items) ? items : [])
-        .filter((r) => r && r.id)
-        .slice(0, 30);
-      GM_setValue(requestCacheKey(), JSON.stringify({ ts: Date.now(), items: clean }));
-    } catch (_) {}
-  }
-
-  function loadRequestCache() {
-    try {
-      const raw = GM_getValue(requestCacheKey(), "");
-      if (!raw) return { ts: 0, items: [] };
-      const parsed = JSON.parse(raw);
-      return {
-        ts: Number(parsed?.ts || 0),
-        items: Array.isArray(parsed?.items) ? parsed.items : [],
-      };
-    } catch (_) {
-      return { ts: 0, items: [] };
-    }
-  }
-
   function forgetClosedRequest(id) {
     if (!id) return;
     const sid = String(id);
@@ -4641,7 +2992,7 @@
     const closed = new Set(getClosedRequestIds());
     const list = (Array.isArray(items) ? items.slice() : []).filter((r) => {
       const status = String(r?.status || "pending").toLowerCase();
-      if (["pending", "approved", "complete"].includes(status)) return true;
+      if (status === "complete") return true;
       return !closed.has(String(r?.id));
     });
     const ids = new Set(list.map((r) => String(r.id)));
@@ -4693,7 +3044,7 @@
   }
 
   function notifyBankerForNewPending(pendingItems) {
-    if (!isBankerUiUser()) return;
+    if (!APP.me?.is_banker && !APP.me?.is_admin) return;
 
     const seen = getSeenPendingIds();
     const seenSet = new Set(seen);
@@ -4793,49 +3144,31 @@
   async function refreshHeaderCoinBadge(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key || APP.headerRefreshing) return false;
-    // PDA-safe: do not hammer Torn/Render. The backend also caches the Torn user.
-    const minCoinPollMs = document.hidden ? COIN_POLL_HIDDEN_MS : COIN_POLL_VISIBLE_MS;
-    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < minCoinPollMs) return true;
+    if (!force && Date.now() - (APP.lastHeaderBadgeLoad || 0) < 90000) return true;
 
     APP.headerRefreshing = true;
     APP.lastHeaderBadgeLoad = Date.now();
 
     try {
-      // v1.5.0: coin badge uses the light server-side inbox only.
-      // Do not call /me + full request list every few seconds or Torn can return "Too many requests".
-      const inbox = await gmRequest("GET", "/api/banker/pending-count");
-      APP.lastInbox = inbox;
-      APP.lastInboxTs = Date.now();
-      if (!APP.me && inbox?.me) APP.me = inbox.me;
-      if (inbox && APP.me) {
-        APP.me._coin_can_bank = !!inbox.can_bank;
-        if (inbox.can_bank) APP.me.is_banker = true;
-      }
+      const me = APP.me || await gmRequest("GET", "/api/banker/me");
+      APP.me = me;
 
-      const serverPending = Number(inbox?.pending_count || 0);
-      const inboxItems = Array.isArray(inbox?.items) ? inbox.items : [];
-
-      if (!inbox?.can_bank) {
+      if (!(me?.is_banker || me?.is_admin)) {
         setCoinAlert(0);
         return true;
       }
 
-      if (inboxItems.length) {
-        APP.requests = mergeLocalRequests(inboxItems.concat(Array.isArray(APP.requests) ? APP.requests : []));
-        saveRequestCache(APP.requests);
-      }
+      const list = await fbGetRequestListSafe();
+      const items = Array.isArray(list.items) ? list.items : [];
+      APP.requests = mergeLocalRequests(items);
 
-      // Server is now the authority for the red coin number.
-      // This stops the badge from flickering through stale local/cache counts.
-      const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
-      setCoinAlert(serverPending);
-      notifyBankerForNewPending(inboxItems.length ? inboxItems : pendingItems.filter((r) => !getSeenPendingIds().map(String).includes(String(r.id))));
+      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
+      setCoinAlert(pendingItems.length);
+      notifyBankerForNewPending(pendingItems);
       return true;
     } catch (err) {
-      APP.lastHeaderError = String(err.message || err);
       const coin = $("#fb-bank-coin-clean");
-      if (coin) coin.title = `Factional Banking — refresh missed once: ${APP.lastHeaderError.slice(0, 80)}`;
-      // Keep the existing red badge if we had one. Do not wipe/open state just because Torn rate-limited one poll.
+      if (coin) coin.title = `Factional Banking — refresh missed Render once: ${String(err.message || err).slice(0, 80)}`;
       return false;
     } finally {
       APP.headerRefreshing = false;
@@ -4871,17 +3204,6 @@
 
       const me = await gmRequest("GET", "/api/banker/me");
       APP.me = me;
-      try {
-        const inbox = await gmRequest("GET", "/api/banker/pending-count");
-        if (inbox && APP.me) {
-          APP.me._coin_can_bank = !!inbox.can_bank;
-          if (inbox.can_bank) APP.me.is_banker = true;
-          if (Array.isArray(inbox.items) && inbox.items.length) {
-            APP.requests = mergeLocalRequests(inbox.items.concat(Array.isArray(APP.requests) ? APP.requests : []));
-          }
-          if (Number(inbox.pending_count || 0) > 0) setCoinAlert(Number(inbox.pending_count || 0));
-        }
-      } catch (_) {}
       if (APP.open) rebuildTabs(activeTab());
 
       await loadFactionBalance(false);
@@ -4892,46 +3214,47 @@
 
       const list = await fbGetRequestListSafe();
       APP.requests = mergeLocalRequests(Array.isArray(list.items) ? list.items : []);
-      saveRequestCache(APP.requests);
 
       APP.bankers = [];
 
-      const pendingItems = APP.requests.filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
+      const pendingItems = APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending");
       const pending = pendingItems.length;
 
       setCoinAlert(pending);
       notifyBankerForNewPending(pendingItems);
 
-      if (APP.open) {
-        // Do not wipe leader banker inputs while a leader is typing. PDA refreshes can otherwise rebuild the tab mid-entry.
-        if (!(activeTab() === "leaders" && isLeaderBankerDraftActive())) {
-          renderBody(activeTab());
-        }
-      }
+      if (APP.open) renderBody(activeTab());
       return true;
     } catch (err) {
       APP.factions = APP.factions?.length ? APP.factions : DEFAULT_FACTIONS.slice();
       mountCoin();
 
       const subtitle = $("#fb-subtitle");
-      const msg = String(err.message || err);
       if (subtitle) {
-        subtitle.textContent = msg.toLowerCase().includes("too many")
-          ? "Showing saved board — Torn cooldown"
-          : "Showing saved board — refresh missed once";
+        subtitle.textContent = `Last refresh failed: ${String(err.message || err).slice(0, 80)}`;
       }
 
-      // PDA can miss one cross-domain request even when Render is fine.
-      // Do NOT wipe the board, do NOT clear the coin, and do NOT show the scary red box if we have cached data.
-      const cached = loadRequestCache();
-      if ((!APP.requests || !APP.requests.length) && cached.items.length) {
-        APP.requests = mergeLocalRequests(cached.items);
-      }
-      const pendingItems = (APP.requests || []).filter((r) => ["pending", "approved"].includes(String(r.status || "pending").toLowerCase()));
-      if (pendingItems.length) setCoinAlert(pendingItems.length);
-
-      if (APP.me || (APP.requests && APP.requests.length)) {
-        if (APP.open) renderBody(activeTab());
+      // Do not wipe the current screen after a successful request.
+      // Render can briefly miss one API call while waking/redeploying; keeping the last good board is better on PDA.
+      if (APP.me) {
+        if (APP.open) {
+          const body = $("#fb-body");
+          if (body && !body.querySelector("#fb-soft-network-error")) {
+            body.insertAdjacentHTML("afterbegin", `
+              <div id="fb-soft-network-error" class="fb-box">
+                <div class="fb-error">Refresh missed Render once. Your request may still be saved.</div>
+                <div class="fb-row" style="margin-top:8px;">
+                  <button id="fb-retry-network" class="fb-btn gold" type="button">Retry</button>
+                </div>
+              </div>
+            `);
+            $("#fb-retry-network")?.addEventListener("click", () => {
+              const box = $("#fb-soft-network-error");
+              if (box) box.remove();
+              refreshAll(true);
+            });
+          }
+        }
         return false;
       }
 
@@ -4993,14 +3316,6 @@
     if (isOwnFactionPage()) {
       mountBuiltInBankerBox();
       startBalanceCaptureLoop();
-      // Also read the Torn balance directly when the user is already on
-      // Faction → Controls → Deposit. This makes the Balance tab fill without forcing a new page open.
-      setTimeout(() => {
-        if (detectFactionBalanceFromPage()) mountBuiltInBankerBox();
-      }, 900);
-      setTimeout(() => {
-        if (detectFactionBalanceFromPage()) mountBuiltInBankerBox();
-      }, 2400);
 
       // PDA-safe: only load factions/me/banker status for the quick box.
       // Do not call /api/banker/requests here because that uses the database and caused 500s.
@@ -5023,8 +3338,6 @@
     ensureStyles();
     clearBankerUiOnWrongPage();
     mountCoin();
-    // Show the saved balance immediately, even if Render/Torn refresh fails or the user is not on faction controls.
-    loadLastKnownBalanceCache();
 
     APP.booted = true;
 
@@ -5033,18 +3346,7 @@
     APP.open = false;
 
     pageMount("boot");
-    if (GM_getValue(K_API_KEY, "")) {
-      setTimeout(() => refreshHeaderCoinBadge(true), 1200);
-      setTimeout(() => refreshHeaderCoinBadge(false), 6500);
-      setTimeout(() => refreshHeaderCoinBadge(false), 12000);
-    }
-
-    window.addEventListener("focus", () => {
-      if (GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(true).catch(() => {});
-    });
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && GM_getValue(K_API_KEY, "")) refreshHeaderCoinBadge(false).catch(() => {});
-    });
+    if (GM_getValue(K_API_KEY, "")) setTimeout(() => refreshHeaderCoinBadge(true), 2200);
 
     // PDA-safe faction/profile retry: short and limited. No heavy MutationObserver loop.
     mountTries = 0;
@@ -5061,16 +3363,16 @@
 
       pageMount("slow");
 
-      if (GM_getValue(K_API_KEY, "") && Date.now() - (APP.lastHeaderBadgeLoad || 0) > (document.hidden ? COIN_POLL_HIDDEN_MS : COIN_POLL_VISIBLE_MS)) {
+      if (GM_getValue(K_API_KEY, "") && !APP.open && Date.now() - (APP.lastHeaderBadgeLoad || 0) > 90000) {
         refreshHeaderCoinBadge(false);
       }
-      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > BOARD_REFRESH_OPEN_MS) {
+      if (GM_getValue(K_API_KEY, "") && APP.open && Date.now() - APP.lastLoad > 90000) {
         refreshAll(false);
       }
       if (GM_getValue(K_API_KEY, "") && isOwnFactionPage() && !APP.open && Date.now() - (APP.lastQuickLoad || 0) > 120000) {
         refreshFactionBoxData(false);
       }
-    }, 5000);
+    }, 30000);
   }
 
 
@@ -5122,59 +3424,6 @@
     }
   }
 
-  function fbForceClearChatCommand(el, originalText = "") {
-    const wanted = String(originalText || "").trim();
-    const targets = new Set();
-    if (el) targets.add(el);
-    try {
-      const active = document.activeElement;
-      if (active && fbLikelyChatInput(active)) targets.add(active);
-    } catch (_) {}
-    try {
-      document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]').forEach((node) => {
-        const text = String(fbGetEditableText(node) || "").trim();
-        if (text && (text === wanted || text.toLowerCase().startsWith("/banker"))) targets.add(node);
-      });
-    } catch (_) {}
-
-    const clearOne = (node) => {
-      if (!node) return;
-      try {
-        if (node.isContentEditable) {
-          node.focus?.();
-          node.textContent = "";
-          node.innerHTML = "";
-          node.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "deleteContentBackward", data: null }));
-          node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
-        } else {
-          const proto = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-          const desc = Object.getOwnPropertyDescriptor(proto, "value");
-          if (desc && desc.set) desc.set.call(node, "");
-          else node.value = "";
-          node.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "deleteContentBackward", data: null }));
-          node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
-          node.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        node.blur?.();
-      } catch (_) {
-        try { fbSetEditableText(node, ""); } catch (__) {}
-      }
-    };
-
-    targets.forEach(clearOne);
-    // PDA/Torn chat can be React-controlled and may restore the text after our first clear.
-    // Clear a few more times after the send tap so the command does not sit in the chat box.
-    [80, 220, 650, 1400].forEach((ms) => setTimeout(() => {
-      try {
-        targets.forEach(clearOne);
-        document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]').forEach((node) => {
-          const text = String(fbGetEditableText(node) || "").trim();
-          if (text === wanted || text.toLowerCase().startsWith("/banker")) clearOne(node);
-        });
-      } catch (_) {}
-    }, ms));
-  }
-
   function fbLikelyChatInput(el) {
     if (!el) return false;
     const tag = String(el.tagName || "").toLowerCase();
@@ -5200,7 +3449,6 @@
 
   let FB_CHAT_COMMAND_BUSY = false;
   let FB_CHAT_LAST_SENT = { text: "", ts: 0 };
-  let FB_CHAT_LAST_SEND_ATTEMPT_TS = 0;
 
   async function fbSendBankerChatCommand(commandText) {
     const text = String(commandText || "").trim();
@@ -5237,37 +3485,23 @@
       return true;
     }
 
-    // For full balance, only send when a real synced/manual balance exists. Never send a fake $1 marker.
+    // For full balance, use an explicit full-balance marker.
+    // If we know the user's balance, include it for optional bank-page prefill.
+    // If unknown, send amount 0 so the board shows "Full Balance" instead of "$1".
     let amount = 0;
-    if (["full", "balance", "all", "max"].includes(action)) {
+    const isFullCommand = ["full", "balance", "all", "max"].includes(action);
+    if (isFullCommand) {
       await loadFactionBalance(true);
       const detected = Number(APP.balanceAmount || 0);
-      if (Number.isFinite(detected) && detected > 0) {
-        amount = Math.floor(detected);
-      } else {
-        alert("I could not read your balance yet. Open Faction → Controls → Deposit, then tap Balance → Refresh Here, or enter it manually.");
-        openOverlay();
-        setTimeout(() => {
-          const tab = document.querySelector('.fb-tab[data-tab="balance"]');
-          if (tab) tab.click();
-        }, 120);
-        FB_CHAT_COMMAND_BUSY = false;
-        return true;
-      }
+      amount = Number.isFinite(detected) && detected > 0 ? Math.floor(detected) : 0;
     } else if (!["cancel", "remove", "delete", "change", "edit", "update", "status", "check", "mine"].includes(action)) {
       amount = fbParseBankerAmountToken(action);
     }
 
     try {
       if (!APP.me) APP.me = await gmRequest("GET", "/api/banker/me");
-      const knownBalance = Number(APP.balanceAmount || 0);
-      if (amount > 0 && knownBalance > 0 && amount > knownBalance) {
-        showPayNotice(`Request blocked: ${money(amount)} is more than your synced balance ${money(knownBalance)}.`);
-        FB_CHAT_COMMAND_BUSY = false;
-        return true;
-      }
       showPayNotice("🪙 Processing /banker command...");
-      const res = await gmRequest("POST", "/api/banker/chat-command", { command_text: text, amount, known_balance: knownBalance });
+      const res = await gmRequest("POST", "/api/banker/chat-command", { command_text: text, amount, request_kind: isFullCommand ? "full" : "amount" });
 
       if (res && res.item) {
         if (res.action === "canceled") {
@@ -5279,31 +3513,21 @@
           saveLocalRequest(res.item);
           saveRecentCreatedRequest(res.item);
           APP.requests = mergeLocalRequests([res.item, ...(Array.isArray(APP.requests) ? APP.requests : [])]);
-          saveRequestCache(APP.requests);
-          if (isBankerUiUser()) setCoinAlert(Math.max(Number(APP.pendingCount || 0), 1));
+          if (APP.me?.is_banker || APP.me?.is_admin) setCoinAlert(APP.requests.filter((r) => String(r.status || "pending").toLowerCase() === "pending").length);
           if (APP.open) renderBody(activeTab());
         }
       }
 
       // Do not let a slow/stale Render list erase the just-created request.
       // Refresh shortly after, but keep local backup merged if Render is late.
-      setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 1800);
+      setTimeout(() => refreshAll(true).catch(() => { if (APP.open) renderBody(activeTab()); }), 1800);
       setTimeout(() => refreshHeaderCoinBadge(true).catch(() => {}), 2200);
-      setTimeout(() => gmRequest("GET", "/api/banker/pending-count").then((inbox) => {
-        if (inbox && APP.me) {
-          APP.me._coin_can_bank = !!inbox.can_bank;
-          if (inbox.can_bank) APP.me.is_banker = true;
-          if (Array.isArray(inbox.items) && inbox.items.length) APP.requests = mergeLocalRequests(inbox.items.concat(Array.isArray(APP.requests) ? APP.requests : []));
-          if (Number(inbox.pending_count || 0) > 0) setCoinAlert(Number(inbox.pending_count || 0));
-          if (inbox.can_bank && APP.open) openBankingTabForPendingRequest();
-        }
-      }).catch(() => {}), 900);
 
       const a = String(res?.action || "created");
       if (a === "created") {
-        if (amount > 1) deductRequestedAmountFromLocalBalance(amount);
-        afterRequestCreatedNotifyBankers(res?.item, amount);
-        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved in Banking. Phone ping did not confirm, but bankers can check the red coin/request board." : `🪙 Confirmed: bank request sent${amount > 1 ? ` for ${money(amount)}` : ""}. Coin alert + banker board updated.`);
+        if (!isFullCommand && amount > 1) deductRequestedAmountFromLocalBalance(amount);
+        const label = isFullCommand ? " for Full Balance" : (amount > 1 ? ` for ${money(amount)}` : "");
+        showPayNotice(res?.pushover_sent === false ? "🪙 Request saved. Phone ping did not confirm, but bankers can check the board." : `🪙 Confirmed: bank request sent${label}. Bankers alerted.`);
       } else if (a === "canceled") {
         showPayNotice("🪙 Bank request canceled.");
       } else if (a === "changed") {
@@ -5338,10 +3562,10 @@
       if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
     }
 
-    FB_CHAT_LAST_TYPED_COMMAND = { text: String(text || "").trim(), ts: Date.now(), el };
-    fbForceClearChatCommand(el, text);
+    FB_CHAT_LAST_TYPED_COMMAND = { text: String(text || "").trim(), ts: Date.now() };
+    fbSetEditableText(el, "");
     try { el.blur?.(); } catch (_) {}
-    fbSendBankerChatCommand(text).finally?.(() => fbForceClearChatCommand(el, text));
+    fbSendBankerChatCommand(text);
     return true;
   }
 
@@ -5351,16 +3575,14 @@
 
     document.addEventListener("keydown", (ev) => {
       if (ev.key !== "Enter" || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
-      FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now();
       fbInterceptBankerCommandInput(ev.target, ev);
     }, true);
 
     function fbIsActualChatSendTap(ev, target, inputEl) {
       if (!target || !inputEl || fbIsInsideOurBankerUi(target)) return false;
-      if (target === inputEl || (target.closest && target.closest('textarea, input, [contenteditable="true"]') === inputEl)) return false;
 
       const targetText = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()}`;
-      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a, svg, path, i, span, div');
+      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a');
       const btnText = `${String(btn?.textContent || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
 
       // Text-labeled send buttons are okay. Do not match generic words like "message".
@@ -5370,134 +3592,66 @@
       try { r1 = inputEl.getBoundingClientRect(); } catch (_) { return false; }
       if (!r1 || !r1.width || !r1.height) return false;
 
-      // PDA send arrow: the user taps the arrow/control on the same row as the chat input.
-      // Some PDA themes draw the arrow over the input border, so accept slightly inside the right edge too.
+      // PDA send arrow: pointer is directly to the right of the chat input on the same row.
       const touch = ev?.changedTouches?.[0] || ev?.touches?.[0] || null;
       const x = Number(ev?.clientX || touch?.clientX || 0);
       const y = Number(ev?.clientY || touch?.clientY || 0);
       if (x && y) {
-        const rowY = y >= (r1.top - 36) && y <= (r1.bottom + 36);
-        const rightSendZone = x >= (r1.right - 28) && x <= Math.min(window.innerWidth + 8, r1.right + 230);
-        const farRightOfInput = x >= (r1.left + r1.width * 0.72);
-        if (rowY && rightSendZone && farRightOfInput) return true;
+        const rowY = y >= (r1.top - 22) && y <= (r1.bottom + 22);
+        const rightOfInput = x >= (r1.right + 2) && x <= (r1.right + 150);
+        if (rowY && rightOfInput) return true;
       }
 
-      // Fallback for wrapped icon/button geometry. This catches SVG/path arrows in PDA chat.
+      // Fallback for wrapped icon/button geometry.
       const clickEl = btn || target;
       try {
         const r2 = clickEl.getBoundingClientRect();
         const inputMidY = r1.top + r1.height / 2;
         const btnMidY = r2.top + r2.height / 2;
-        const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(76, r1.height * 1.45);
-        const smallish = r2.width <= 180 && r2.height <= 180;
-        const onSendSide = r2.left >= (r1.right - 42) && r2.left <= (r1.right + 230);
-        const tag = String(target.tagName || "").toLowerCase();
-        const iconLike = ["svg", "path", "i", "span", "button"].includes(tag) || /arrow|send|submit|icon/.test(targetText + " " + btnText);
-        return !!(closeY && smallish && onSendSide && iconLike);
+        const closeY = Math.abs(inputMidY - btnMidY) <= Math.max(55, r1.height * 1.15);
+        const smallish = r2.width <= 120 && r2.height <= 120;
+        const toRight = r2.left >= (r1.right - 2) && r2.left <= (r1.right + 150);
+        return !!(closeY && smallish && toRight);
       } catch (_) {
         return false;
       }
     }
 
-    function fbIsRememberedChatSendTap(ev, target) {
-      const remembered = String(FB_CHAT_LAST_TYPED_COMMAND?.text || "").trim();
-      if (!remembered || !fbIsCompleteBankerCommandText(remembered)) return false;
-      if (Date.now() - Number(FB_CHAT_LAST_TYPED_COMMAND.ts || 0) > 45000) return false;
-      if (!target || fbIsInsideOurBankerUi(target)) return false;
-
-      const targetText = `${String(target.textContent || "").toLowerCase()} ${String(target.className || "").toLowerCase()} ${String(target.id || "").toLowerCase()} ${String(target.getAttribute?.("aria-label") || "").toLowerCase()} ${String(target.getAttribute?.("title") || "").toLowerCase()}`;
-      const btn = target.closest && target.closest('button, [role="button"], input[type="submit"], a, svg, path, i, span, div');
-      const btnText = `${String(btn?.textContent || "").toLowerCase()} ${String(btn?.className || "").toLowerCase()} ${String(btn?.id || "").toLowerCase()} ${String(btn?.getAttribute?.("aria-label") || "").toLowerCase()} ${String(btn?.getAttribute?.("title") || "").toLowerCase()}`;
-      if (/\b(send|submit|sendmessage|send-message)\b/.test(targetText + " " + btnText)) return true;
-
-      const touch = ev?.changedTouches?.[0] || ev?.touches?.[0] || null;
-      const x = Number(ev?.clientX || touch?.clientX || 0);
-      const y = Number(ev?.clientY || touch?.clientY || 0);
-      const rect = FB_CHAT_LAST_TYPED_COMMAND.rect || null;
-      if (x && y && rect) {
-        const rowY = y >= (rect.top - 34) && y <= (rect.bottom + 34);
-        const rightOfInput = x >= (rect.right - 8) && x <= (rect.right + 190);
-        if (rowY && rightOfInput) return true;
-      }
-
-      // PDA chat send arrow is often the last visible control in the chat popup.
-      // If the command was typed in the last few seconds and the user taps a small
-      // control on the same row/right side, treat it as send even if Torn's classes changed.
-      try {
-        const r = (target.closest?.('button, [role="button"], a, span, div') || target).getBoundingClientRect();
-        if (rect && r) {
-          const inputMidY = rect.top + rect.height / 2;
-          const tapMidY = r.top + r.height / 2;
-          const closeY = Math.abs(inputMidY - tapMidY) <= 70;
-          const rightSide = r.left >= rect.right - 18 && r.left <= rect.right + 210;
-          const smallish = r.width <= 150 && r.height <= 150;
-          if (closeY && rightSide && smallish) return true;
-        }
-      } catch (_) {}
-      return false;
-    }
-
     const pointerHandler = (ev) => {
       const t = ev.target;
-      if (t && t.closest && t.closest('#fb-board, #fb-built-in-box, #fb-overlay, #fb-header-coin, #fb-pay-prefill-notice')) return;
+      if (t && t.closest && t.closest('#fb-board, #fb-built-in-box, #fb-header-coin, #fb-pay-prefill-notice')) return;
       const el = fbFindBankerCommandInput();
+      if (!el) return;
 
-      if (el) {
-        // Click-to-send capture: when the player taps the Torn chat send arrow,
-        // stop the chat message and turn it into a bank request instead.
-        if (!fbIsActualChatSendTap(ev, t, el)) return;
-        FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now();
-        fbRememberTypedBankerCommandFrom(el);
-        fbInterceptBankerCommandInput(el, ev);
-        return;
-      }
-
-      // Some PDA builds clear or detach the input before our event gets to it.
-      // Use the last remembered /banker command so the tap still becomes a request.
-      if (fbIsRememberedChatSendTap(ev, t)) {
-        FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now();
-        if (ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
-        }
-        const remembered = String(FB_CHAT_LAST_TYPED_COMMAND.text || "").trim();
-        try { fbForceClearChatCommand(FB_CHAT_LAST_TYPED_COMMAND.el, remembered); } catch (_) {}
-        fbSendBankerChatCommand(remembered).finally?.(() => fbForceClearChatCommand(FB_CHAT_LAST_TYPED_COMMAND.el, remembered));
-      }
+      // Only the chat send button/arrow sends. Tapping the coin, chat history,
+      // suggestions, or the input itself never sends.
+      if (!fbIsActualChatSendTap(ev, t, el)) return;
+      fbInterceptBankerCommandInput(el, ev);
     };
 
     document.addEventListener("pointerdown", pointerHandler, true);
-    document.addEventListener("pointerup", pointerHandler, true);
     document.addEventListener("touchstart", pointerHandler, true);
-    document.addEventListener("touchend", pointerHandler, true);
     document.addEventListener("mousedown", pointerHandler, true);
-    document.addEventListener("mouseup", pointerHandler, true);
     document.addEventListener("click", pointerHandler, true);
 
     document.addEventListener("submit", (ev) => {
       const el = fbFindBankerCommandInput();
-      if (el) { FB_CHAT_LAST_SEND_ATTEMPT_TS = Date.now(); fbInterceptBankerCommandInput(el, ev); }
+      if (el) fbInterceptBankerCommandInput(el, ev);
     }, true);
   }
 
-  // v1.4.3 send-only reliable chat fallback:
+  // v1.2.5 reliable chat fallback:
   // PDA sometimes posts /banker as a normal message before our send-button hook sees it.
   // We remember the command while the user types, then if the exact same command appears
   // in the chat within a few seconds, we still create the request and ping bankers once.
-  let FB_CHAT_LAST_TYPED_COMMAND = { text: "", ts: 0, el: null, rect: null };
+  let FB_CHAT_LAST_TYPED_COMMAND = { text: "", ts: 0 };
   const FB_CHAT_FALLBACK_DONE = new Set();
 
   function fbRememberTypedBankerCommandFrom(el) {
     if (!el || !fbLikelyChatInput(el)) return;
     const text = String(fbGetEditableText(el) || "").trim();
     if (!fbIsCompleteBankerCommandText(text)) return;
-    let rect = null;
-    try {
-      const r = el.getBoundingClientRect();
-      if (r && r.width && r.height) rect = { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
-    } catch (_) {}
-    FB_CHAT_LAST_TYPED_COMMAND = { text, ts: Date.now(), el, rect };
+    FB_CHAT_LAST_TYPED_COMMAND = { text, ts: Date.now() };
   }
 
   function fbIsInsideOurBankerUi(el) {
@@ -5523,62 +3677,19 @@
     return "";
   }
 
-  function fbHidePostedBankerCommandText(commandText) {
-    const cmd = String(commandText || "").replace(/\s+/g, " ").trim();
-    if (!cmd) return;
-    const candidates = Array.from(document.querySelectorAll('div, span, p, li'));
-    for (const el of candidates) {
-      if (!el || fbIsInsideOurBankerUi(el)) continue;
-      const tag = String(el.tagName || "").toLowerCase();
-      if (["input", "textarea", "select", "option"].includes(tag) || el.isContentEditable) continue;
-      const txt = String(el.textContent || "").replace(/\s+/g, " ").trim();
-      if (txt !== cmd) continue;
-      // Hide just the command bubble/text locally so the faction does not keep seeing it on this device.
-      const bubble = el.closest?.('[class*="message" i], [class*="msg" i], [class*="bubble" i], li, p, div') || el;
-      try {
-        bubble.style.display = "none";
-        bubble.setAttribute("data-fb-hidden-banker-command", "1");
-      } catch (_) {
-        try { el.style.display = "none"; } catch (__) {}
-      }
-    }
-  }
-
   function installChatBankerCommandFallback() {
     if (installChatBankerCommandFallback._installed) return;
     installChatBankerCommandFallback._installed = true;
 
     document.addEventListener('input', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
     document.addEventListener('keyup', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
-    document.addEventListener('beforeinput', (ev) => fbRememberTypedBankerCommandFrom(ev.target), true);
 
-    // Safety net: if Torn/PDA posts the /banker command before our send-button
-    // hook catches it, still create the backend request once and hide that command
-    // locally. This only runs for an exact command the current user typed recently.
-    const runFallbackCheck = () => {
-      // Do NOT create a request just because the user is still typing /banker.
-      // Fallback only runs after an actual send attempt (send arrow / Enter / form submit).
-      if (!FB_CHAT_LAST_SEND_ATTEMPT_TS || Date.now() - FB_CHAT_LAST_SEND_ATTEMPT_TS > 9000) return;
-      const posted = fbFindPostedBankerCommandText();
-      if (!posted) return;
-      const key = posted.toLowerCase() + ":" + String(FB_CHAT_LAST_TYPED_COMMAND.ts || "");
-      if (FB_CHAT_FALLBACK_DONE.has(key)) return;
-      FB_CHAT_FALLBACK_DONE.add(key);
-      fbHidePostedBankerCommandText(posted);
-      fbSendBankerChatCommand(posted);
-      setTimeout(() => fbHidePostedBankerCommandText(posted), 800);
-      setTimeout(() => fbHidePostedBankerCommandText(posted), 2200);
-    };
-
-    let fallbackTimer = 0;
-    const scheduleFallbackCheck = () => {
-      clearTimeout(fallbackTimer);
-      fallbackTimer = setTimeout(runFallbackCheck, 350);
-    };
-
-    const mo = new MutationObserver(scheduleFallbackCheck);
-    try { mo.observe(document.body || document.documentElement, { childList: true, subtree: true, characterData: true }); } catch (_) {}
-    setInterval(runFallbackCheck, 1500);
+    // v1.3.2: disabled post-to-chat fallback.
+    // The old fallback could fire from a visible /banker draft/message and ping before
+    // the user intentionally pressed send. Commands now only run on Enter or the real
+    // chat send button, and the script tries to prevent the command from posting.
+    // This intentionally does nothing.
+    return;
   }
 
   function startWhenReady() {
