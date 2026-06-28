@@ -1943,7 +1943,7 @@ def remove_leader_banker():
 def list_requests():
     """List active requests plus recent completed requests visible to the logged-in user.
 
-    v1.3.8:
+    v1.3.9:
     - Uses faction_id OR faction_name matching to avoid ID/name mismatch.
     - Always includes the logged-in user's own requests.
     - If a banker/admin gets an empty list, performs a same-faction fallback.
