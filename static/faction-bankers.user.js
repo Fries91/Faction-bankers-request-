@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Faction Bankers 🪙 
 // @namespace    Fries91.Torn.FactionBankers.
-// @version      1.3.8
+// @version      1.3.9
 // @description  Faction vault banking with strict /banker chat commands, banker board, leader role setup, and Torn-friendly settings/login.
 // @author       Fries91
 // @match        https://www.torn.com/*
@@ -21,7 +21,7 @@
   "use strict";
 
   const BANKER_API_BASE = "https://faction-bankers-request.onrender.com";
-  const FB_BUILD = "1.3.8-dashboard-remake";
+  const FB_BUILD = "1.3.9-dashboard-leader-fix";
 
   // Locked PDA/Torn header position for money / points / merits / gender row.
   // Increase LEFT to move right. Decrease LEFT to move left.
@@ -926,7 +926,24 @@
 
       .fb-legal-list li { margin: 4px 0; }
 
-      .fb-mini-note {
+  
+    .fb-dashboard-title{font-size:18px;font-weight:1000;color:#ffe08a;margin-bottom:3px;}
+    .fb-dashboard-sub{font-size:12px;color:#b9b0a0;line-height:1.35;}
+    .fb-stat-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0;}
+    .fb-stat-card{background:linear-gradient(145deg,#17130a,#0c0c0c);border:1px solid rgba(245,196,76,.22);border-radius:14px;padding:12px;}
+    .fb-stat-card b{display:block;color:#ffe08a;font-size:18px;margin-bottom:3px;}
+    .fb-stat-card span{font-size:11px;color:#b9b0a0;text-transform:uppercase;letter-spacing:.04em;}
+    .fb-command-card{background:linear-gradient(145deg,#15110a,#0a0a0a);border:1px solid rgba(245,196,76,.24);border-radius:14px;padding:12px;margin-top:10px;}
+    .fb-command-card code{display:inline-block;background:#050505;border:1px solid rgba(245,196,76,.24);color:#ffe08a;border-radius:8px;padding:4px 6px;margin:2px 0;font-weight:900;}
+    .fb-command-card .fb-btn{padding:6px 9px;font-size:12px;}
+    .fb-actionline{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
+    .fb-section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;}
+    .fb-section-head .fb-request-title{font-size:16px;}
+    .fb-empty{background:rgba(255,255,255,.035);border:1px dashed rgba(245,196,76,.25);border-radius:14px;padding:14px;color:#b9b0a0;text-align:center;}
+    .fb-form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+    @media(max-width:520px){.fb-stat-row,.fb-form-row{grid-template-columns:1fr}.fb-dashboard-title{font-size:16px}}
+
+    .fb-mini-note {
         color: #aaa;
         font-size: 10px;
         line-height: 1.35;
@@ -2627,11 +2644,13 @@
     $("#fb-completed-refresh")?.addEventListener("click", () => refreshAll(true));
   }
 
-  function renderBankersManageTab(msg = "") {
+  async function renderBankersManageTab(msg = "") {
+    await loadLeaderBankers();
     renderLeadersTab(msg, "bankers");
   }
 
-  function renderRolesManageTab(msg = "") {
+  async function renderRolesManageTab(msg = "") {
+    await loadLeaderBankers();
     renderLeadersTab(msg, "roles");
   }
 
@@ -3084,6 +3103,243 @@
     saveSeenPendingIds([...seen, ...fresh.map((r) => String(r.id))]);
   }
 
+  // v1.3.9 restored leader/banker management functions used by Dashboard Remake.
+  async function loadLeaderBankers() {
+    APP.leaderLoadError = "";
+    try {
+      const res = await gmRequest("GET", "/api/banker/leaders");
+      APP.manualBankers = Array.isArray(res.items) ? res.items : [];
+      APP.leaderRoleNames = Array.isArray(res.role_names) ? res.role_names : [];
+      APP.leaderRoleItems = Array.isArray(res.role_items) ? res.role_items : [];
+      APP.defaultRoleNames = Array.isArray(res.default_role_names) ? res.default_role_names : [];
+      return true;
+    } catch (err) {
+      APP.leaderLoadError = String(err?.message || err || "Could not load leader banker list");
+      APP.manualBankers = [];
+      return false;
+    }
+  }
+
+  async function addLeaderBanker() {
+    if (APP.busy) return;
+    const bankerId = String($("#fb-leader-banker-id")?.value || "").replace(/[^0-9]/g, "").trim();
+    const bankerName = String($("#fb-leader-banker-name")?.value || "").trim();
+    const pushoverKey = String($("#fb-leader-pushover")?.value || "").trim();
+
+    if (!bankerId) {
+      renderLeadersTab(`<div class="fb-error">Enter the banker Torn ID.</div>`);
+      return;
+    }
+
+    APP.busy = true;
+    try {
+      const res = await gmRequest("POST", "/api/banker/leaders/add", {
+        banker_id: bankerId,
+        banker_name: bankerName || bankerId,
+        pushover_key: pushoverKey,
+      });
+      await loadLeaderBankers();
+      APP.bankers = [];
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker saved.${res.test_ping_sent ? " Test phone ping sent." : ""}</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function removeLeaderBanker(bankerId) {
+    if (APP.busy || !bankerId) return;
+    APP.busy = true;
+    try {
+      await gmRequest("POST", "/api/banker/leaders/remove", { banker_id: bankerId });
+      await loadLeaderBankers();
+      APP.bankers = [];
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker removed.</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function addLeaderRoleName() {
+    if (APP.busy) return;
+    const roleName = String($("#fb-leader-role-name")?.value || "").trim();
+    const rolePushoverKey = String($("#fb-leader-role-pushover")?.value || "").trim();
+
+    if (!roleName) {
+      renderLeadersTab(`<div class="fb-error">Enter the faction role name that should count as a banker.</div>`);
+      return;
+    }
+
+    APP.busy = true;
+    try {
+      const res = await gmRequest("POST", "/api/banker/leaders/roles/add", { role_name: roleName, pushover_key: rolePushoverKey });
+      await loadLeaderBankers();
+      APP.bankers = [];
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker role saved. Anyone in your faction with that role counts as a banker.${res.test_ping_sent ? " Role phone ping test sent." : ""}</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  async function removeLeaderRoleName(roleName) {
+    if (APP.busy || !roleName) return;
+    APP.busy = true;
+    try {
+      await gmRequest("POST", "/api/banker/leaders/roles/remove", { role_name: roleName });
+      await loadLeaderBankers();
+      APP.bankers = [];
+      mountBuiltInBankerBox();
+      renderLeadersTab(`<div class="fb-success">Banker role removed.</div>`);
+    } catch (err) {
+      renderLeadersTab(`<div class="fb-error">${esc(err.message || err)}</div>`);
+    } finally {
+      APP.busy = false;
+    }
+  }
+
+  function renderLeadersTab(msg = "", mode = "all") {
+    const canManage = !!APP.me?.can_manage_leaders || !!APP.me?.is_admin || !!APP.me?.is_banker;
+
+    if (!canManage) {
+      setBody(`
+        <div class="fb-box fb-hero-card">
+          <div class="fb-request-title">Leaders</div>
+          <div class="fb-error" style="margin-top:6px;">Leader/banker access is required to manage bankers.</div>
+          <div class="fb-small" style="margin-top:8px;">This tab is for the leader team of your own faction only.</div>
+        </div>
+      `);
+      return;
+    }
+
+    const factionName = APP.me?.faction_name || "Your faction";
+    const yourRole = APP.me?.faction_role || (APP.me?.is_admin ? "Admin" : "Role not detected");
+
+    const rows = (APP.manualBankers || []).map((b) => `
+      <div class="fb-box">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">${esc(b.banker_name || b.name || b.banker_id)}</div>
+            <div class="fb-small">ID: ${esc(b.banker_id || b.id)} ${b.has_pushover ? "• phone ping enabled" : "• no phone ping key saved"}</div>
+          </div>
+          <button class="fb-btn red" data-leader-remove="${esc(b.banker_id || b.id)}" type="button">Remove</button>
+        </div>
+      </div>
+    `).join("") || `<div class="fb-box"><div class="fb-muted">No manual bankers registered yet. Add name + Torn ID above if you want a specific player to count as banker.</div></div>`;
+
+    const roleList = (APP.leaderRoleItems && APP.leaderRoleItems.length)
+      ? APP.leaderRoleItems
+      : (APP.leaderRoleNames || []).map((role) => ({ role_name: role, has_pushover: false, source: "leaders" }));
+
+    const roleRows = roleList.map((roleObj) => {
+      const role = roleObj.role_name || roleObj.name || roleObj;
+      return `
+        <div class="fb-box">
+          <div class="fb-row fb-space">
+            <div>
+              <div class="fb-request-title">${esc(role)}</div>
+              <div class="fb-small">Anyone in ${esc(factionName)} with this role counts as a banker.${roleObj.has_pushover ? " • role phone ping enabled" : " • no role phone ping key"}</div>
+            </div>
+            <button class="fb-btn red" data-leader-role-remove="${esc(role)}" type="button">Remove</button>
+          </div>
+        </div>
+      `;
+    }).join("") || `<div class="fb-box"><div class="fb-muted">No custom banker roles saved yet. Defaults are: ${esc((APP.defaultRoleNames || []).join(", ") || "Banker, Treasurer, Leader, Co-leader")}</div></div>`;
+
+    setBody(`
+      ${msg ? `<div class="fb-box">${msg}</div>` : ""}
+      ${APP.leaderLoadError ? `<div class="fb-box"><div class="fb-error">${esc(APP.leaderLoadError)}</div></div>` : ""}
+
+      <div class="fb-box fb-hero-card">
+        <div class="fb-row fb-space">
+          <div>
+            <div class="fb-request-title">👑 Leaders • ${esc(factionName)}</div>
+            <div class="fb-small">This setup only affects your own faction. Other factions get their own Leaders tab and their own roles.</div>
+          </div>
+          <span class="fb-pill approved">${esc(yourRole)}</span>
+        </div>
+        <div class="fb-flow-grid" style="margin-top:10px;">
+          <div class="fb-flow-card"><b>1. Add roles</b><span>Type the exact Torn faction role that means “can bank” for your faction.</span></div>
+          <div class="fb-flow-card"><b>2. Register bankers</b><span>Manually add banker name + Torn ID when roles miss someone.</span></div>
+          <div class="fb-flow-card"><b>3. Phone pings</b><span>Add a Pushover key to a role or banker if you want direct phone alerts.</span></div>
+        </div>
+      </div>
+
+      <div class="fb-box" style="${mode === 'bankers' ? 'display:none;' : ''}">
+        <div class="fb-request-title">Banker role names</div>
+        <div class="fb-small" style="margin-top:5px;">Examples: Banker, Treasurer, Finance, Vault Keeper, Money Manager, Co-Leader.</div>
+        <label class="fb-label" style="margin-top:10px;">Faction role name</label>
+        <input id="fb-leader-role-name" class="fb-input" placeholder="Example: Treasurer">
+        <label class="fb-label" style="margin-top:10px;">Optional Pushover key for this role</label>
+        <input id="fb-leader-role-pushover" class="fb-input" placeholder="Paste a Pushover key to ping this role/team phone">
+        <div class="fb-small" style="margin-top:5px;">When a request is sent, all saved banker keys plus role keys for this faction get notified.</div>
+        <div class="fb-row" style="margin-top:10px;">
+          <button id="fb-leader-role-add" class="fb-btn gold" type="button">Add Banker Role</button>
+          <button id="fb-leader-refresh" class="fb-btn" type="button">Refresh</button>
+        </div>
+      </div>
+      ${roleRows}
+
+      <div class="fb-box fb-hero-card" style="${mode === 'roles' ? 'display:none;' : ''}">
+        <div class="fb-request-title">Manual Banker Registration</div>
+        <div class="fb-small" style="margin-top:5px; line-height:1.45;">
+          Add a banker by <b>Torn name</b> and <b>Torn ID</b>. This makes them count as a banker for this faction when they log in with the script.
+          Add a Pushover key if that banker should get direct phone notifications.
+        </div>
+
+        <label class="fb-label" style="margin-top:12px;">Banker Torn ID</label>
+        <input id="fb-leader-banker-id" class="fb-input" inputmode="numeric" placeholder="Example: 3679030">
+
+        <label class="fb-label" style="margin-top:10px;">Banker name</label>
+        <input id="fb-leader-banker-name" class="fb-input" placeholder="Example: Fries91">
+
+        <label class="fb-label" style="margin-top:10px;">Pushover User Key optional</label>
+        <input id="fb-leader-pushover" class="fb-input" placeholder="Optional: paste their Pushover User Key">
+
+        <div class="fb-row" style="margin-top:12px;">
+          <button id="fb-leader-add" class="fb-btn gold" type="button">Register Banker</button>
+          <button id="fb-leader-refresh-2" class="fb-btn" type="button">Refresh List</button>
+        </div>
+
+        <div class="fb-mini-note" style="margin-top:10px;">
+          No Pushover key = they can still see the Banking tab/coin after login.  
+          Pushover key saved = they can receive phone pings too.
+        </div>
+      </div>
+
+      <div class="fb-box" style="${mode === 'roles' ? 'display:none;' : ''}">
+        <div class="fb-request-title">Registered Manual Bankers</div>
+        <div class="fb-mini-note">These banker entries are private to ${esc(factionName)} only.</div>
+      </div>
+      ${rows}
+    `);
+
+    $("#fb-leader-role-add")?.addEventListener("click", addLeaderRoleName);
+    $("#fb-leader-add")?.addEventListener("click", addLeaderBanker);
+    $("#fb-leader-refresh")?.addEventListener("click", async () => {
+      await loadLeaderBankers();
+      renderLeadersTab();
+    });
+    $("#fb-leader-refresh-2")?.addEventListener("click", async () => {
+      await loadLeaderBankers();
+      renderLeadersTab();
+    });
+    $$('[data-leader-role-remove]').forEach((btn) => {
+      btn.addEventListener("click", () => removeLeaderRoleName(btn.dataset.leaderRoleRemove));
+    });
+    $$('[data-leader-remove]').forEach((btn) => {
+      btn.addEventListener("click", () => removeLeaderBanker(btn.dataset.leaderRemove));
+    });
+  }
+
+
   async function refreshFactionBoxData(force = false) {
     const key = GM_getValue(K_API_KEY, "");
     if (!key) {
@@ -3112,7 +3368,7 @@
         const me = await gmRequest("GET", "/api/banker/me");
         APP.me = me;
         if (APP.me?.can_manage_leaders || APP.me?.is_admin || APP.me?.is_banker) {
-          await loadLeaderBankers();
+          try { await loadLeaderBankers(); } catch (_) {}
         }
       } catch (meErr) {
         APP.bankerStatusError = String(meErr.message || meErr).slice(0, 90);
